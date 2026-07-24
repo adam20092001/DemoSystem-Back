@@ -202,10 +202,9 @@ Si una tarea parece requerir algo de esta lista, **detenerse y consultar** antes
 Documento maestro del proyecto:
 
 ```
-docs/Documento_Maestro_POS_Gestion_Comercial_MVP.docx.docx
+docs/Documento_Maestro_POS_Gestion_Comercial_MVP.docx
 ```
 
-> Nota: el archivo actualmente tiene la extensión `.docx` duplicada en su nombre.
 > Es la referencia funcional oficial; ante conflicto entre este CLAUDE.md y el documento,
 > prevalece el documento maestro y debe actualizarse este archivo.
 
