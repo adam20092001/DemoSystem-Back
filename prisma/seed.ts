@@ -1,4 +1,5 @@
 import { PrismaClient, RoleName } from '@prisma/client';
+import { assertPasswordPolicy } from '../src/common/security/password-policy';
 import { hashPassword } from '../src/common/security/password.service';
 
 const prisma = new PrismaClient();
@@ -9,9 +10,6 @@ const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   WAREHOUSE: 'Productos, categorías, unidades e inventario',
   MANAGEMENT: 'Dashboard y reportes de lectura y análisis',
 };
-
-const PASSWORD_MIN_LENGTH = 12;
-const PASSWORD_MAX_LENGTH = 128;
 
 function normalize(value: string): string {
   return value.trim().toLowerCase();
@@ -25,30 +23,6 @@ function requireEnv(name: string): string {
     );
   }
   return value;
-}
-
-/** Política mínima de contraseña para el seed. No registra el valor evaluado. */
-function assertPasswordPolicy(password: string): void {
-  const issues: string[] = [];
-
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    issues.push(`mínimo ${PASSWORD_MIN_LENGTH} caracteres`);
-  }
-  if (password.length > PASSWORD_MAX_LENGTH) {
-    issues.push(`máximo ${PASSWORD_MAX_LENGTH} caracteres`);
-  }
-  if (!/[a-zA-Z]/.test(password)) {
-    issues.push('al menos una letra');
-  }
-  if (!/[0-9]/.test(password)) {
-    issues.push('al menos un número');
-  }
-
-  if (issues.length > 0) {
-    throw new Error(
-      `INITIAL_ADMIN_PASSWORD no cumple la política de contraseñas: ${issues.join(', ')}.`,
-    );
-  }
 }
 
 async function seedRoles(): Promise<void> {
@@ -67,7 +41,11 @@ async function seedInitialAdmin(): Promise<void> {
   const rawEmail = requireEnv('INITIAL_ADMIN_EMAIL');
   const rawPassword = requireEnv('INITIAL_ADMIN_PASSWORD');
 
-  assertPasswordPolicy(rawPassword);
+  assertPasswordPolicy(
+    rawPassword,
+    (violations) =>
+      `INITIAL_ADMIN_PASSWORD no cumple la política de contraseñas: ${violations.join(', ')}.`,
+  );
 
   const username = normalize(rawUsername);
   const email = normalize(rawEmail);

@@ -1,0 +1,180 @@
+import { PrismaService } from '../database/prisma.service';
+import { AuditAction } from './audit-action.enum';
+import {
+  AuditMetadata,
+  AuditService,
+  PrismaExecutionClient,
+  sanitizeAuditMetadata,
+} from './audit.service';
+
+function createPrismaMock() {
+  return {
+    auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+  };
+}
+
+describe('AuditService', () => {
+  let prisma: ReturnType<typeof createPrismaMock>;
+  let service: AuditService;
+
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    service = new AuditService(prisma as unknown as PrismaService);
+  });
+
+  it('crea un registro con los campos provistos', async () => {
+    await service.record({
+      userId: 'user-1',
+      module: 'USERS',
+      action: AuditAction.USER_CREATED,
+      entityType: 'User',
+      entityId: 'user-2',
+      description: 'Usuario creado',
+      metadata: { username: 'jdoe' },
+      ipAddress: '127.0.0.1',
+    });
+
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: {
+        userId: 'user-1',
+        module: 'USERS',
+        action: AuditAction.USER_CREATED,
+        entityType: 'User',
+        entityId: 'user-2',
+        description: 'Usuario creado',
+        metadata: { username: 'jdoe' },
+        ipAddress: '127.0.0.1',
+      },
+    });
+  });
+
+  it('acepta un cliente de transacción en lugar de PrismaService', async () => {
+    const tx = createPrismaMock();
+
+    await service.record({
+      userId: null,
+      module: 'USERS',
+      action: AuditAction.USER_BLOCKED,
+      entityType: 'User',
+      description: 'Usuario bloqueado',
+      metadata: { username: 'jdoe' },
+      client: tx as unknown as PrismaExecutionClient,
+    });
+
+    expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it('soporta userId nulo', async () => {
+    await service.record({
+      userId: null,
+      module: 'AUTH',
+      action: AuditAction.LOGIN_FAILED,
+      entityType: 'User',
+      description: 'Intento de login fallido',
+      metadata: { identifier: 'jdoe' },
+    });
+
+    const [[call]] = prisma.auditLog.create.mock.calls as [
+      [{ data: { userId: string | null } }],
+    ];
+    expect(call.data.userId).toBeNull();
+  });
+
+  it('usa entityId y ipAddress nulos cuando no se proveen', async () => {
+    await service.record({
+      userId: 'user-1',
+      module: 'USERS',
+      action: AuditAction.USER_UNBLOCKED,
+      entityType: 'User',
+      description: 'Usuario desbloqueado',
+    });
+
+    const [[call]] = prisma.auditLog.create.mock.calls as [
+      [{ data: { entityId: unknown; ipAddress: unknown } }],
+    ];
+    expect(call.data.entityId).toBeNull();
+    expect(call.data.ipAddress).toBeNull();
+  });
+});
+
+describe('sanitizeAuditMetadata', () => {
+  it('conserva solo las claves permitidas para la acción', () => {
+    const metadata: AuditMetadata = {
+      username: 'jdoe',
+      email: 'jdoe@demosystem.local',
+      roleName: 'SELLER',
+    };
+
+    const sanitized = sanitizeAuditMetadata(AuditAction.USER_CREATED, metadata);
+
+    expect(sanitized).toEqual(metadata);
+  });
+
+  it.each([
+    'password',
+    'passwordHash',
+    'password_hash',
+    'temporaryPassword',
+    'token',
+    'jwt',
+    'cookie',
+    'authorization',
+    'secret',
+  ])(
+    'descarta la clave sensible "%s" aunque esté en la lista blanca',
+    (key) => {
+      // Se fuerza la clave sensible dentro de un objeto igualmente tipado como
+      // AuditMetadata, simulando un error de quien llama al servicio.
+      const metadata = {
+        username: 'jdoe',
+        [key]: 'valor-secreto',
+      } as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.USER_CREATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({ username: 'jdoe' });
+      expect(JSON.stringify(sanitized)).not.toContain('valor-secreto');
+    },
+  );
+
+  it('descarta claves que no pertenecen a la lista blanca de la acción', () => {
+    const metadata: AuditMetadata = {
+      username: 'jdoe',
+      unexpectedField: 'algo',
+    };
+
+    const sanitized = sanitizeAuditMetadata(AuditAction.USER_BLOCKED, metadata);
+
+    expect(sanitized).toEqual({ username: 'jdoe' });
+  });
+
+  it('no modifica el objeto metadata original', () => {
+    const metadata: AuditMetadata = {
+      username: 'jdoe',
+      password: 'secreta',
+    };
+    const original = { ...metadata };
+
+    sanitizeAuditMetadata(AuditAction.USER_CREATED, metadata);
+
+    expect(metadata).toEqual(original);
+  });
+
+  it('devuelve undefined si no queda ninguna clave permitida', () => {
+    const metadata = { password: 'secreta' } as AuditMetadata;
+
+    expect(
+      sanitizeAuditMetadata(AuditAction.USER_CREATED, metadata),
+    ).toBeUndefined();
+  });
+
+  it('devuelve undefined si no se provee metadata', () => {
+    expect(
+      sanitizeAuditMetadata(AuditAction.USER_CREATED, undefined),
+    ).toBeUndefined();
+  });
+});
