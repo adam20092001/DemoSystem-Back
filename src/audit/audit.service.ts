@@ -52,7 +52,9 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   Record<AuditAction, readonly string[]>
 > = {
   [AuditAction.LOGIN_SUCCESS]: ['username'],
-  [AuditAction.LOGIN_FAILED]: ['identifier', 'reason'],
+  // El identifier ingresado por quien intenta iniciar sesión nunca se
+  // audita: solo un motivo seguro (USER_NOT_FOUND, INVALID_PASSWORD, etc.).
+  [AuditAction.LOGIN_FAILED]: ['reason'],
   [AuditAction.USER_CREATED]: ['username', 'email', 'roleName'],
   [AuditAction.USER_UPDATED]: ['updatedFields', 'roleName'],
   [AuditAction.USER_BLOCKED]: ['username'],

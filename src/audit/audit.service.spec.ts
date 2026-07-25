@@ -72,7 +72,7 @@ describe('AuditService', () => {
       action: AuditAction.LOGIN_FAILED,
       entityType: 'User',
       description: 'Intento de login fallido',
-      metadata: { identifier: 'jdoe' },
+      metadata: { reason: 'USER_NOT_FOUND' },
     });
 
     const [[call]] = prisma.auditLog.create.mock.calls as [

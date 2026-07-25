@@ -22,6 +22,8 @@ export function setupSwagger(app: INestApplication): boolean {
     return false;
   }
 
+  const cookieName = config.get('AUTH_COOKIE_NAME', { infer: true });
+
   const documentConfig = new DocumentBuilder()
     .setTitle('DemoSystem — Punto de Venta y Gestión Comercial')
     .setDescription(
@@ -30,18 +32,18 @@ export function setupSwagger(app: INestApplication): boolean {
     )
     .setVersion('1.0')
     .addCookieAuth(
-      'access_token',
+      cookieName,
       {
         type: 'apiKey',
         in: 'cookie',
-        name: 'access_token',
+        name: cookieName,
         description:
-          'Sesión mediante cookie HttpOnly. Se emitirá en el módulo de ' +
-          'autenticación; todavía no hay endpoints protegidos.',
+          'Sesión mediante JWT en cookie HttpOnly, emitida por POST /auth/login.',
       },
       COOKIE_AUTH_NAME,
     )
     .addTag('Health', 'Estado de la aplicación y de la base de datos')
+    .addTag('Auth', 'Autenticación, sesión y cambio de contraseña')
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
