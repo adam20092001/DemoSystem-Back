@@ -1,0 +1,15 @@
+// Esquema de Prisma — Fase 0 (Bloque A).
+//
+// Todavía NO existen modelos de dominio: la primera migración real se generará
+// en la Fase 1, junto al primer módulo funcional, con `npm run prisma:migrate`.
+// Por eso en este bloque no se ejecuta `prisma migrate dev` ni se crea ninguna
+// migración vacía o artificial.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
