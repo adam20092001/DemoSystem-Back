@@ -53,7 +53,7 @@ src/
       dto/                         # DTOs de entrada/salida + class-validator
       entities/                    # tipos de dominio / mapeos
   common/                          # guards, decorators, filters, interceptors, pipes
-  prisma/                          # PrismaService y módulo
+  database/                        # PrismaService y módulo
   config/                          # configuración y validación de variables de entorno
 ```
 
