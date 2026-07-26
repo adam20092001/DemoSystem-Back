@@ -26,7 +26,12 @@
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f db",
-    "db:seed": "prisma db seed"
+    "db:seed": "prisma db seed",
+    "db:test:up": "docker compose up -d db_test",
+    "db:test:down": "docker compose stop db_test",
+    "db:test:down:clean": "docker compose rm -sf db_test && docker volume rm demosystem-back_pos_pgdata_test",
+    "prisma:test:deploy": "node scripts/run-with-env.js .env.test prisma migrate deploy",
+    "prisma:test:seed": "node scripts/run-with-env.js .env.test prisma db seed"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
@@ -58,6 +63,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
+    "dotenv": "^17.4.2",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",

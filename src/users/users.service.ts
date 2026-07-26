@@ -164,7 +164,12 @@ export class UsersService {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.user.findUnique({
         where: { id: input.userId },
-        select: { id: true, username: true },
+        select: {
+          id: true,
+          username: true,
+          status: true,
+          role: { select: { name: true } },
+        },
       });
       if (existing === null) {
         throw new NotFoundException('Usuario no encontrado');
@@ -194,6 +199,28 @@ export class UsersService {
         if (role === null) {
           throw new BadRequestException(`El rol ${input.roleName} no existe`);
         }
+
+        // El rol y el estado se leen de PostgreSQL, nunca del payload: un
+        // ADMIN activo no puede dejar de serlo si es el único que queda.
+        const losesLastActiveAdmin =
+          existing.role.name === RoleName.ADMIN &&
+          existing.status === UserStatus.ACTIVE &&
+          input.roleName !== RoleName.ADMIN;
+
+        if (losesLastActiveAdmin) {
+          const activeAdmins = await tx.user.count({
+            where: {
+              role: { name: RoleName.ADMIN },
+              status: UserStatus.ACTIVE,
+            },
+          });
+          if (activeAdmins <= 1) {
+            throw new ConflictException(
+              'No es posible cambiar el rol del único administrador activo',
+            );
+          }
+        }
+
         data.role = { connect: { id: role.id } };
         updatedFields.push('roleName');
         roleName = input.roleName;

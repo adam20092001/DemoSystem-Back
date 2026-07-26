@@ -22,5 +22,32 @@ services:
       retries: 5
       start_period: 10s
 
+  # Base exclusiva para pruebas e2e. Contenedor, puerto, credenciales y
+  # volumen totalmente independientes de `db`: nunca comparte datos con
+  # pos_db ni con el volumen pos_pgdata.
+  db_test:
+    image: postgres:16-alpine
+    container_name: pos_db_test
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TEST_POSTGRES_DB:-pos_db_test}
+      POSTGRES_USER: ${TEST_POSTGRES_USER:-pos_test_user}
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:-pos_test_password}
+    ports:
+      - '${TEST_POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - pos_pgdata_test:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${TEST_POSTGRES_USER:-pos_test_user} -d ${TEST_POSTGRES_DB:-pos_db_test}',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   pos_pgdata:
+  pos_pgdata_test:

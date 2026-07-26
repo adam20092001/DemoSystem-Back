@@ -276,6 +276,8 @@ describe('UsersService', () => {
       prisma.tx.user.findUnique.mockResolvedValue({
         id: 'user-1',
         username: 'jperez',
+        status: UserStatus.ACTIVE,
+        role: { name: RoleName.SELLER },
       });
       prisma.tx.role.findUnique.mockResolvedValue(
         makeRole(RoleName.MANAGEMENT),
@@ -354,6 +356,140 @@ describe('UsersService', () => {
           actorUserId: ACTOR_ID,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    describe('protección del último ADMIN activo al cambiar roleName', () => {
+      it('rechaza con 409 cuando el único ADMIN activo intenta cambiar su propio rol', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'admin-1',
+          username: 'admin',
+          status: UserStatus.ACTIVE,
+          role: { name: RoleName.ADMIN },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(makeRole(RoleName.SELLER));
+        prisma.tx.user.count.mockResolvedValue(1);
+
+        await expect(
+          service.updateUser({
+            userId: 'admin-1',
+            roleName: RoleName.SELLER,
+            actorUserId: 'admin-1',
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+      });
+
+      it('no llama a update cuando se rechaza', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'admin-1',
+          username: 'admin',
+          status: UserStatus.ACTIVE,
+          role: { name: RoleName.ADMIN },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(makeRole(RoleName.SELLER));
+        prisma.tx.user.count.mockResolvedValue(1);
+
+        await expect(
+          service.updateUser({
+            userId: 'admin-1',
+            roleName: RoleName.SELLER,
+            actorUserId: 'admin-1',
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+
+        expect(prisma.tx.user.update).not.toHaveBeenCalled();
+      });
+
+      it('no llama a AuditService cuando se rechaza', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'admin-1',
+          username: 'admin',
+          status: UserStatus.ACTIVE,
+          role: { name: RoleName.ADMIN },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(makeRole(RoleName.SELLER));
+        prisma.tx.user.count.mockResolvedValue(1);
+
+        await expect(
+          service.updateUser({
+            userId: 'admin-1',
+            roleName: RoleName.SELLER,
+            actorUserId: 'admin-1',
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+
+      it('permite el cambio si existen dos ADMIN activos', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'admin-1',
+          username: 'admin',
+          status: UserStatus.ACTIVE,
+          role: { name: RoleName.ADMIN },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(makeRole(RoleName.SELLER));
+        prisma.tx.user.count.mockResolvedValue(2);
+        prisma.tx.user.update.mockResolvedValue(
+          makeUserRow({ id: 'admin-1', role: { name: RoleName.SELLER } }),
+        );
+
+        const result = await service.updateUser({
+          userId: 'admin-1',
+          roleName: RoleName.SELLER,
+          actorUserId: 'otro-admin-id',
+        });
+
+        expect(result.role).toBe(RoleName.SELLER);
+        expect(auditService.record).toHaveBeenCalledWith(
+          expect.objectContaining({ action: AuditAction.USER_UPDATED }),
+        );
+      });
+
+      it('permite cambiar el rol de un usuario que no es ADMIN', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'user-1',
+          username: 'jperez',
+          status: UserStatus.ACTIVE,
+          role: { name: RoleName.SELLER },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(
+          makeRole(RoleName.WAREHOUSE),
+        );
+        prisma.tx.user.update.mockResolvedValue(
+          makeUserRow({ role: { name: RoleName.WAREHOUSE } }),
+        );
+
+        const result = await service.updateUser({
+          userId: 'user-1',
+          roleName: RoleName.WAREHOUSE,
+          actorUserId: ACTOR_ID,
+        });
+
+        expect(result.role).toBe(RoleName.WAREHOUSE);
+        expect(prisma.tx.user.count).not.toHaveBeenCalled();
+      });
+
+      it('permite cambiar el rol de un ADMIN INACTIVE', async () => {
+        prisma.tx.user.findUnique.mockResolvedValue({
+          id: 'admin-2',
+          username: 'admin_inactivo',
+          status: UserStatus.INACTIVE,
+          role: { name: RoleName.ADMIN },
+        });
+        prisma.tx.role.findUnique.mockResolvedValue(makeRole(RoleName.SELLER));
+        prisma.tx.user.update.mockResolvedValue(
+          makeUserRow({ id: 'admin-2', role: { name: RoleName.SELLER } }),
+        );
+
+        const result = await service.updateUser({
+          userId: 'admin-2',
+          roleName: RoleName.SELLER,
+          actorUserId: ACTOR_ID,
+        });
+
+        expect(result.role).toBe(RoleName.SELLER);
+        expect(prisma.tx.user.count).not.toHaveBeenCalled();
+      });
     });
   });
 

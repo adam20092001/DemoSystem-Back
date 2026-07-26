@@ -44,6 +44,7 @@ export function setupSwagger(app: INestApplication): boolean {
     )
     .addTag('Health', 'Estado de la aplicación y de la base de datos')
     .addTag('Auth', 'Autenticación, sesión y cambio de contraseña')
+    .addTag('Users', 'Administración de usuarios (solo ADMIN)')
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
