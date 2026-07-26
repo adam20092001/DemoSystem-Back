@@ -1,5 +1,6 @@
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import cookieParser from 'cookie-parser';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { AppConfigService } from './config/configuration';
@@ -13,6 +14,9 @@ import { AppConfigService } from './config/configuration';
  */
 export function setupApp(app: INestApplication): void {
   const config = app.get<AppConfigService>(ConfigService);
+
+  // Sin firmar: el contenido ya viaja firmado criptográficamente como JWT.
+  app.use(cookieParser());
 
   app.setGlobalPrefix('api');
   app.enableVersioning({
