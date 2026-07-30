@@ -69,6 +69,15 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.UNIT_UPDATED]: ['updatedFields'],
   [AuditAction.UNIT_ACTIVATED]: ['code'],
   [AuditAction.UNIT_DEACTIVATED]: ['code'],
+  [AuditAction.PRODUCT_CREATED]: ['sku', 'productType', 'categoryId', 'unitId'],
+  [AuditAction.PRODUCT_UPDATED]: ['updatedFields'],
+  [AuditAction.PRODUCT_PRICE_CHANGED]: ['oldPrice', 'newPrice'],
+  [AuditAction.PRODUCT_ACTIVATED]: ['sku'],
+  [AuditAction.PRODUCT_DEACTIVATED]: ['sku'],
+  [AuditAction.PRODUCT_SPECIFICATION_CHANGED]: [
+    'operation',
+    'specificationName',
+  ],
 };
 
 /**

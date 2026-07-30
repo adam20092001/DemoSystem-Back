@@ -1,4 +1,4 @@
-import { UnitStatus } from '@prisma/client';
+import { ProductStatus, ProductType } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
@@ -6,12 +6,13 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   Min,
 } from 'class-validator';
 import { toStrictBoolean } from '../../common/validators/to-strict-boolean.transform';
 
-export class ListUnitsQueryDto {
+export class ListProductsQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -30,11 +31,23 @@ export class ListUnitsQueryDto {
   search?: string;
 
   @IsOptional()
-  @IsEnum(UnitStatus)
-  status?: UnitStatus;
+  @IsUUID()
+  categoryId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  unitId?: string;
+
+  @IsOptional()
+  @IsEnum(ProductType)
+  productType?: ProductType;
+
+  @IsOptional()
+  @IsEnum(ProductStatus)
+  status?: ProductStatus;
 
   @IsOptional()
   @Transform(toStrictBoolean)
   @IsBoolean()
-  allowDecimal?: boolean;
+  isInventoryTracked?: boolean;
 }
