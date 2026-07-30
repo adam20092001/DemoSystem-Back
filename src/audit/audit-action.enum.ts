@@ -1,6 +1,7 @@
 /**
- * Acciones auditables del sistema. Las de USER_* se usan desde el Bloque B;
- * LOGIN_SUCCESS y LOGIN_FAILED quedan reservadas para el Bloque C.
+ * Acciones auditables del sistema. Las de USER_ se usan desde la Fase 1,
+ * Bloque B; LOGIN_SUCCESS y LOGIN_FAILED desde el Bloque C. Las de
+ * CATEGORY_ y UNIT_ se usan desde la Fase 2, Bloque B.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -11,4 +12,12 @@ export enum AuditAction {
   USER_UNBLOCKED = 'USER_UNBLOCKED',
   PASSWORD_RESET = 'PASSWORD_RESET',
   PASSWORD_CHANGED = 'PASSWORD_CHANGED',
+  CATEGORY_CREATED = 'CATEGORY_CREATED',
+  CATEGORY_UPDATED = 'CATEGORY_UPDATED',
+  CATEGORY_ACTIVATED = 'CATEGORY_ACTIVATED',
+  CATEGORY_DEACTIVATED = 'CATEGORY_DEACTIVATED',
+  UNIT_CREATED = 'UNIT_CREATED',
+  UNIT_UPDATED = 'UNIT_UPDATED',
+  UNIT_ACTIVATED = 'UNIT_ACTIVATED',
+  UNIT_DEACTIVATED = 'UNIT_DEACTIVATED',
 }

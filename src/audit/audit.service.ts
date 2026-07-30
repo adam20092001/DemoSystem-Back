@@ -61,6 +61,14 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.USER_UNBLOCKED]: ['username'],
   [AuditAction.PASSWORD_RESET]: ['username'],
   [AuditAction.PASSWORD_CHANGED]: ['username'],
+  [AuditAction.CATEGORY_CREATED]: ['code', 'name', 'parentId'],
+  [AuditAction.CATEGORY_UPDATED]: ['updatedFields'],
+  [AuditAction.CATEGORY_ACTIVATED]: ['code'],
+  [AuditAction.CATEGORY_DEACTIVATED]: ['code'],
+  [AuditAction.UNIT_CREATED]: ['code', 'abbreviation', 'allowDecimal'],
+  [AuditAction.UNIT_UPDATED]: ['updatedFields'],
+  [AuditAction.UNIT_ACTIVATED]: ['code'],
+  [AuditAction.UNIT_DEACTIVATED]: ['code'],
 };
 
 /**
