@@ -1,8 +1,10 @@
-// Esquema de Prisma — Fase 1, Bloque A.
+// Esquema de Prisma.
 //
-// Primera migración real: roles, usuarios y auditoría mínima.
-// Ningún modelo de catálogo, inventario, ventas o contabilidad pertenece a
-// este bloque; esos se incorporarán en fases posteriores.
+// Fase 1: roles, usuarios y auditoría mínima.
+// Fase 2, Bloque A: catálogo — categorías, unidades, productos,
+// especificaciones e imágenes. Sin servicios/controllers todavía; ese
+// trabajo llega en los Bloques B-D. Sin movimientos de inventario: eso es
+// Fase 3.
 
 generator client {
   provider = "prisma-client-js"
@@ -24,6 +26,26 @@ enum UserStatus {
   ACTIVE
   INACTIVE
   BLOCKED
+}
+
+enum CategoryStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UnitStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProductType {
+  PRODUCT
+  SERVICE
 }
 
 model Role {
@@ -78,4 +100,111 @@ model AuditLog {
   @@index([createdAt])
   @@index([entityType, entityId])
   @@map("audit_logs")
+}
+
+// --- Catálogo (Fase 2, Bloque A) -------------------------------------------
+
+model Category {
+  id          String         @id @default(uuid()) @db.Uuid
+  code        String         @unique @db.VarChar(30)
+  name        String         @db.VarChar(120)
+  description String?        @db.VarChar(500)
+  parentId    String?        @map("parent_id") @db.Uuid
+  parent      Category?      @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children    Category[]     @relation("CategoryHierarchy")
+  status      CategoryStatus @default(ACTIVE)
+  sortOrder   Int            @default(0) @map("sort_order")
+  products    Product[]
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  // La unicidad de nombre por nivel (case-insensitive, raíz vs. con padre)
+  // se agrega a mano en migration.sql mediante índices únicos parciales:
+  // Prisma no expresa LOWER(name) ni WHERE parent_id IS NULL de forma
+  // declarativa en el DSL.
+  @@index([parentId])
+  @@index([status])
+  @@map("categories")
+}
+
+model Unit {
+  id           String     @id @default(uuid()) @db.Uuid
+  code         String     @unique @db.VarChar(15)
+  name         String     @db.VarChar(60)
+  abbreviation String     @db.VarChar(10)
+  allowDecimal Boolean    @default(false) @map("allow_decimal")
+  status       UnitStatus @default(ACTIVE)
+  products     Product[]
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  @@map("units")
+}
+
+model Product {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  sku                   String                 @unique @db.VarChar(40)
+  name                  String                 @db.VarChar(150)
+  brand                 String?                @db.VarChar(80)
+  productType           ProductType            @map("product_type")
+  categoryId            String                 @map("category_id") @db.Uuid
+  category              Category               @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  unitId                String                 @map("unit_id") @db.Uuid
+  unit                  Unit                   @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  salePrice             Decimal                @map("sale_price") @db.Decimal(14, 2)
+  commercialDescription String?                @map("commercial_description") @db.VarChar(1000)
+  internalNotes         String?                @map("internal_notes") @db.VarChar(1000)
+  isInventoryTracked    Boolean                @default(true) @map("is_inventory_tracked")
+  stockCurrent          Decimal                @default(0) @map("stock_current") @db.Decimal(14, 3)
+  stockMinimum          Decimal                @default(0) @map("stock_minimum") @db.Decimal(14, 3)
+  status                ProductStatus          @default(ACTIVE)
+  specifications        ProductSpecification[]
+  images                ProductImage[]
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
+
+  // CHECK de sale_price/stock_current/stock_minimum >= 0 agregados a mano
+  // en migration.sql (Prisma DSL no soporta @@check en esta versión).
+  @@index([categoryId])
+  @@index([unitId])
+  @@index([status])
+  @@index([productType])
+  @@index([isInventoryTracked])
+  @@map("products")
+}
+
+model ProductSpecification {
+  id        String   @id @default(uuid()) @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name      String   @db.VarChar(80)
+  value     String   @db.VarChar(300)
+  unit      String?  @db.VarChar(20)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Unicidad case-insensitive (product_id, LOWER(name)) agregada a mano en
+  // migration.sql.
+  @@index([productId])
+  @@map("product_specifications")
+}
+
+model ProductImage {
+  id          String   @id @default(uuid()) @db.Uuid
+  productId   String   @map("product_id") @db.Uuid
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  fileName    String   @map("file_name") @db.VarChar(255)
+  storagePath String   @map("storage_path") @db.VarChar(500)
+  mimeType    String   @map("mime_type") @db.VarChar(100)
+  fileSize    Int      @map("file_size")
+  sortOrder   Int      @default(0) @map("sort_order")
+  isPrimary   Boolean  @default(false) @map("is_primary")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Índice único parcial "una sola imagen principal por producto" agregado
+  // a mano en migration.sql (product_id WHERE is_primary = true).
+  @@index([productId])
+  @@index([productId, isPrimary])
+  @@map("product_images")
 }
