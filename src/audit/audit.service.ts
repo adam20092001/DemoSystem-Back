@@ -78,6 +78,17 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'operation',
     'specificationName',
   ],
+  [AuditAction.PRODUCT_IMAGE_ADDED]: [
+    'imageId',
+    'mimeType',
+    'fileSize',
+    'isPrimary',
+  ],
+  [AuditAction.PRODUCT_IMAGE_REMOVED]: ['imageId', 'wasPrimary'],
+  [AuditAction.PRODUCT_PRIMARY_IMAGE_CHANGED]: [
+    'previousImageId',
+    'newImageId',
+  ],
 };
 
 /**

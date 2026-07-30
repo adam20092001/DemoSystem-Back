@@ -17,6 +17,8 @@ const baseEnv = {
   MAX_LOGIN_ATTEMPTS: '5',
   LOGIN_THROTTLE_TTL_MS: '60000',
   LOGIN_THROTTLE_LIMIT: '10',
+  PRODUCT_UPLOAD_DIR: 'uploads/products',
+  PRODUCT_IMAGE_MAX_SIZE_BYTES: '5242880',
 };
 
 describe('validateEnv', () => {
@@ -30,6 +32,8 @@ describe('validateEnv', () => {
     expect(config.MAX_LOGIN_ATTEMPTS).toBe(5);
     expect(config.LOGIN_THROTTLE_TTL_MS).toBe(60000);
     expect(config.LOGIN_THROTTLE_LIMIT).toBe(10);
+    expect(config.PRODUCT_UPLOAD_DIR).toBe('uploads/products');
+    expect(config.PRODUCT_IMAGE_MAX_SIZE_BYTES).toBe(5242880);
   });
 
   // Regresión: Boolean('false') devuelve true y habilitaría Swagger por error.
@@ -58,6 +62,8 @@ describe('validateEnv', () => {
     expect(config.MAX_LOGIN_ATTEMPTS).toBe(5);
     expect(config.LOGIN_THROTTLE_TTL_MS).toBe(60000);
     expect(config.LOGIN_THROTTLE_LIMIT).toBe(10);
+    expect(config.PRODUCT_UPLOAD_DIR).toBe('uploads/products');
+    expect(config.PRODUCT_IMAGE_MAX_SIZE_BYTES).toBe(5242880);
   });
 
   it('falla si DATABASE_URL no está definida', () => {
@@ -222,6 +228,64 @@ describe('validateEnv', () => {
 
       expect(config.LOGIN_THROTTLE_TTL_MS).toBe(60000);
       expect(config.LOGIN_THROTTLE_LIMIT).toBe(10);
+    });
+  });
+
+  describe('PRODUCT_UPLOAD_DIR', () => {
+    it('usa "uploads/products" como valor por defecto', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        PRODUCT_UPLOAD_DIR: undefined,
+      });
+
+      expect(config.PRODUCT_UPLOAD_DIR).toBe('uploads/products');
+    });
+
+    it('acepta un valor personalizado', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        PRODUCT_UPLOAD_DIR: 'custom/uploads',
+      });
+
+      expect(config.PRODUCT_UPLOAD_DIR).toBe('custom/uploads');
+    });
+
+    it('falla si se envía como cadena vacía', () => {
+      expect(() => validateEnv({ ...baseEnv, PRODUCT_UPLOAD_DIR: '' })).toThrow(
+        /PRODUCT_UPLOAD_DIR/,
+      );
+    });
+  });
+
+  describe('PRODUCT_IMAGE_MAX_SIZE_BYTES', () => {
+    it('usa 5242880 como valor por defecto', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        PRODUCT_IMAGE_MAX_SIZE_BYTES: undefined,
+      });
+
+      expect(config.PRODUCT_IMAGE_MAX_SIZE_BYTES).toBe(5242880);
+    });
+
+    it('falla si no es un entero', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv, PRODUCT_IMAGE_MAX_SIZE_BYTES: 'abc' }),
+      ).toThrow(/PRODUCT_IMAGE_MAX_SIZE_BYTES/);
+    });
+
+    it('falla si es menor a 1024', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv, PRODUCT_IMAGE_MAX_SIZE_BYTES: '1023' }),
+      ).toThrow(/PRODUCT_IMAGE_MAX_SIZE_BYTES/);
+    });
+
+    it('acepta exactamente 1024', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        PRODUCT_IMAGE_MAX_SIZE_BYTES: '1024',
+      });
+
+      expect(config.PRODUCT_IMAGE_MAX_SIZE_BYTES).toBe(1024);
     });
   });
 });

@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsOptional,
@@ -9,18 +10,21 @@ import {
 
 /** status nunca se acepta aquí: se administra vía activate/deactivate. */
 export class UpdateUnitDto {
+  @ApiPropertyOptional({ maxLength: 15 })
   @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(15)
   code?: string;
 
+  @ApiPropertyOptional({ maxLength: 60 })
   @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(60)
   name?: string;
 
+  @ApiPropertyOptional({ maxLength: 10 })
   @IsOptional()
   @IsString()
   @MinLength(1)
@@ -30,6 +34,7 @@ export class UpdateUnitDto {
   })
   abbreviation?: string;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   allowDecimal?: boolean;

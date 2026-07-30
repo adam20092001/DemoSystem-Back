@@ -1,4 +1,5 @@
 import { ProductStatus, ProductType } from '@prisma/client';
+import { SafeProductImage } from './safe-product-image';
 
 export interface CategorySummary {
   id: string;
@@ -48,9 +49,11 @@ export interface SafeProductListItem {
   createdAt: Date;
   updatedAt: Date;
   internalNotes?: string | null;
+  primaryImage: SafeProductImage | null;
 }
 
 export interface SafeProductDetail extends SafeProductListItem {
   commercialDescription: string | null;
   specifications: SafeProductSpecification[];
+  images: SafeProductImage[];
 }

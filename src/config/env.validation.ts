@@ -90,6 +90,16 @@ export class EnvironmentVariables {
   @IsInt({ message: 'LOGIN_THROTTLE_LIMIT debe ser un número entero' })
   @Min(1)
   LOGIN_THROTTLE_LIMIT!: number;
+
+  @IsString()
+  @IsNotEmpty({ message: 'PRODUCT_UPLOAD_DIR es obligatorio' })
+  PRODUCT_UPLOAD_DIR!: string;
+
+  @IsInt({ message: 'PRODUCT_IMAGE_MAX_SIZE_BYTES debe ser un número entero' })
+  @Min(1024, {
+    message: 'PRODUCT_IMAGE_MAX_SIZE_BYTES debe ser al menos 1024 bytes',
+  })
+  PRODUCT_IMAGE_MAX_SIZE_BYTES!: number;
 }
 
 /**
@@ -141,6 +151,11 @@ export function validateEnv(
     MAX_LOGIN_ATTEMPTS: toInt(raw.MAX_LOGIN_ATTEMPTS, 5),
     LOGIN_THROTTLE_TTL_MS: toInt(raw.LOGIN_THROTTLE_TTL_MS, 60000),
     LOGIN_THROTTLE_LIMIT: toInt(raw.LOGIN_THROTTLE_LIMIT, 10),
+    PRODUCT_UPLOAD_DIR: raw.PRODUCT_UPLOAD_DIR ?? 'uploads/products',
+    PRODUCT_IMAGE_MAX_SIZE_BYTES: toInt(
+      raw.PRODUCT_IMAGE_MAX_SIZE_BYTES,
+      5242880,
+    ),
   };
 
   const config = plainToInstance(EnvironmentVariables, normalized);

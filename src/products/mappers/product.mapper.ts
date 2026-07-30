@@ -1,9 +1,14 @@
 import { Prisma, RoleName } from '@prisma/client';
+import { SafeProductImage } from '../types/safe-product-image';
 import {
   SafeProductDetail,
   SafeProductListItem,
   SafeProductSpecification,
 } from '../types/safe-product';
+
+function buildProductImageFileUrl(productId: string, imageId: string): string {
+  return `/api/v1/products/${productId}/images/${imageId}/file`;
+}
 
 /** internalNotes se oculta únicamente a SELLER; el resto de roles autenticados la ve. */
 export function canSeeInternalNotes(role: RoleName): boolean {
@@ -34,6 +39,30 @@ const SPECIFICATION_SELECT = {
   updatedAt: true,
 } satisfies Prisma.ProductSpecificationSelect;
 
+/** Nunca incluye storagePath: es lo único que garantiza que jamás viaje al cliente. */
+const IMAGE_SELECT = {
+  id: true,
+  fileName: true,
+  mimeType: true,
+  fileSize: true,
+  sortOrder: true,
+  isPrimary: true,
+  createdAt: true,
+} satisfies Prisma.ProductImageSelect;
+
+/** Solo la imagen principal (a lo sumo una, garantizado por el índice único parcial). */
+const PRIMARY_IMAGE_SELECT = {
+  where: { isPrimary: true },
+  select: IMAGE_SELECT,
+  take: 1,
+} satisfies Prisma.Product$imagesArgs;
+
+/** Detalle: todas las imágenes, principal primero. */
+const ALL_IMAGES_SELECT = {
+  select: IMAGE_SELECT,
+  orderBy: [{ isPrimary: 'desc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }],
+} satisfies Prisma.Product$imagesArgs;
+
 /** Select explícito para listados: sin especificaciones ni descripción comercial. */
 export const PRODUCT_LIST_SELECT = {
   id: true,
@@ -51,9 +80,10 @@ export const PRODUCT_LIST_SELECT = {
   updatedAt: true,
   category: { select: CATEGORY_SUMMARY_SELECT },
   unit: { select: UNIT_SUMMARY_SELECT },
+  images: PRIMARY_IMAGE_SELECT,
 } satisfies Prisma.ProductSelect;
 
-/** Select explícito para detalle: agrega descripción comercial y especificaciones ordenadas. */
+/** Select explícito para detalle: agrega descripción comercial, especificaciones e imágenes ordenadas. */
 export const PRODUCT_DETAIL_SELECT = {
   ...PRODUCT_LIST_SELECT,
   commercialDescription: true,
@@ -61,6 +91,7 @@ export const PRODUCT_DETAIL_SELECT = {
     select: SPECIFICATION_SELECT,
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
   },
+  images: ALL_IMAGES_SELECT,
 } satisfies Prisma.ProductSelect;
 
 export type ProductListRow = Prisma.ProductGetPayload<{
@@ -73,6 +104,10 @@ export type ProductDetailRow = Prisma.ProductGetPayload<{
 
 export type ProductSpecificationRow = Prisma.ProductSpecificationGetPayload<{
   select: typeof SPECIFICATION_SELECT;
+}>;
+
+export type ProductImageRow = Prisma.ProductImageGetPayload<{
+  select: typeof IMAGE_SELECT;
 }>;
 
 export function toSafeProductSpecification(
@@ -89,10 +124,27 @@ export function toSafeProductSpecification(
   };
 }
 
+export function toSafeProductImage(
+  row: ProductImageRow,
+  productId: string,
+): SafeProductImage {
+  return {
+    id: row.id,
+    fileName: row.fileName,
+    mimeType: row.mimeType,
+    fileSize: row.fileSize,
+    sortOrder: row.sortOrder,
+    isPrimary: row.isPrimary,
+    createdAt: row.createdAt,
+    fileUrl: buildProductImageFileUrl(productId, row.id),
+  };
+}
+
 export function toSafeProductListItem(
   row: ProductListRow,
   showInternalNotes: boolean,
 ): SafeProductListItem {
+  const primaryImageRow = row.images[0];
   return {
     id: row.id,
     sku: row.sku,
@@ -109,6 +161,10 @@ export function toSafeProductListItem(
     status: row.status,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    primaryImage:
+      primaryImageRow !== undefined
+        ? toSafeProductImage(primaryImageRow, row.id)
+        : null,
     ...(showInternalNotes ? { internalNotes: row.internalNotes } : {}),
   };
 }
@@ -121,5 +177,6 @@ export function toSafeProductDetail(
     ...toSafeProductListItem(row, showInternalNotes),
     commercialDescription: row.commercialDescription,
     specifications: row.specifications.map(toSafeProductSpecification),
+    images: row.images.map((image) => toSafeProductImage(image, row.id)),
   };
 }

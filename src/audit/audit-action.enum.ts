@@ -2,7 +2,8 @@
  * Acciones auditables del sistema. Las de USER_ se usan desde la Fase 1,
  * Bloque B; LOGIN_SUCCESS y LOGIN_FAILED desde el Bloque C. Las de
  * CATEGORY_ y UNIT_ se usan desde la Fase 2, Bloque B; las de PRODUCT_
- * desde el Bloque C.
+ * desde el Bloque C; las de PRODUCT_IMAGE_ y PRODUCT_PRIMARY_IMAGE_CHANGED
+ * desde el Bloque D.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -27,4 +28,7 @@ export enum AuditAction {
   PRODUCT_ACTIVATED = 'PRODUCT_ACTIVATED',
   PRODUCT_DEACTIVATED = 'PRODUCT_DEACTIVATED',
   PRODUCT_SPECIFICATION_CHANGED = 'PRODUCT_SPECIFICATION_CHANGED',
+  PRODUCT_IMAGE_ADDED = 'PRODUCT_IMAGE_ADDED',
+  PRODUCT_IMAGE_REMOVED = 'PRODUCT_IMAGE_REMOVED',
+  PRODUCT_PRIMARY_IMAGE_CHANGED = 'PRODUCT_PRIMARY_IMAGE_CHANGED',
 }

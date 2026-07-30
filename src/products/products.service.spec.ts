@@ -71,6 +71,7 @@ function makeProductRow(overrides: Partial<Record<string, unknown>> = {}) {
     },
     commercialDescription: null,
     specifications: [],
+    images: [],
     ...overrides,
   };
 }
