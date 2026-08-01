@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** Forma única de todas las respuestas de error de la API. */
 export class ErrorResponseDto {
@@ -24,4 +24,12 @@ export class ErrorResponseDto {
 
   @ApiProperty({ example: '/api/v1/health', description: 'Ruta solicitada' })
   path!: string;
+
+  @ApiPropertyOptional({
+    example: 'ACCOUNT_BLOCKED',
+    description:
+      'Código estable para que el cliente distinga condiciones específicas ' +
+      'sin depender del texto de message. Ausente en la mayoría de errores.',
+  })
+  code?: string;
 }

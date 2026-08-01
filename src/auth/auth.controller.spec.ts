@@ -3,6 +3,7 @@ import { Request, Response } from 'express';
 import { AuthenticatedUser } from '../common/types/authenticated-user';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AccountBlockedException } from './exceptions/account-blocked.exception';
 import { TokenService } from './token.service';
 
 const HTTP_CODE_METADATA = '__httpCode__';
@@ -101,6 +102,36 @@ describe('AuthController', () => {
         controllerPrototype.login,
       ) as number;
       expect(code).toBe(200);
+    });
+
+    it('propaga AccountBlockedException sin capturarla', async () => {
+      authService.login.mockRejectedValue(new AccountBlockedException());
+      const response = {} as Response;
+      const request = { ip: '127.0.0.1' } as unknown as Request;
+
+      await expect(
+        controller.login(
+          { identifier: 'bloqueado', password: 'Temporal1234' },
+          request,
+          response,
+        ),
+      ).rejects.toBeInstanceOf(AccountBlockedException);
+    });
+
+    it('no establece cookie cuando AuthService rechaza el login (p. ej. cuenta bloqueada)', async () => {
+      authService.login.mockRejectedValue(new AccountBlockedException());
+      const response = {} as Response;
+      const request = { ip: '127.0.0.1' } as unknown as Request;
+
+      await expect(
+        controller.login(
+          { identifier: 'bloqueado', password: 'Temporal1234' },
+          request,
+          response,
+        ),
+      ).rejects.toBeInstanceOf(AccountBlockedException);
+
+      expect(tokenService.setAuthCookie).not.toHaveBeenCalled();
     });
   });
 

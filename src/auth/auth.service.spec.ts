@@ -6,6 +6,11 @@ import { AuditService } from '../audit/audit.service';
 import { EnvironmentVariables } from '../config/env.validation';
 import { PrismaService } from '../database/prisma.service';
 import { AuthService } from './auth.service';
+import {
+  ACCOUNT_BLOCKED_CODE,
+  ACCOUNT_BLOCKED_MESSAGE,
+  AccountBlockedException,
+} from './exceptions/account-blocked.exception';
 import { TokenService } from './token.service';
 
 interface UserFindFirstArgs {
@@ -216,7 +221,18 @@ describe('AuthService', () => {
       });
       passwordService.verify.mockResolvedValue(false);
 
-      await expect(service.login(credentials)).rejects.toThrow();
+      let caughtError: unknown;
+      try {
+        await service.login(credentials);
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(UnauthorizedException);
+      expect(caughtError).not.toBeInstanceOf(AccountBlockedException);
+      expect((caughtError as UnauthorizedException).message).toBe(
+        'Credenciales inválidas',
+      );
 
       const updateArgs = prisma.tx.user.update.mock.calls[0][0];
       expect(updateArgs.data.failedLoginAttempts).toBe(5);
@@ -224,33 +240,159 @@ describe('AuthService', () => {
       expect(updateArgs.data.blockedAt).toBeInstanceOf(Date);
     });
 
-    it('usuario INACTIVE responde con 401 genérico sin incrementar intentos', async () => {
-      prisma.user.findFirst.mockResolvedValue({
-        id: 'user-1',
-        passwordHash: '$argon2id$hash',
-        status: UserStatus.INACTIVE,
-        failedLoginAttempts: 0,
+    describe('cuenta BLOCKED', () => {
+      it('contraseña correcta responde 423 con code ACCOUNT_BLOCKED y el mensaje específico', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.BLOCKED,
+          failedLoginAttempts: 5,
+        });
+        passwordService.verify.mockResolvedValue(true);
+
+        let caughtError: unknown;
+        try {
+          await service.login(credentials);
+        } catch (error) {
+          caughtError = error;
+        }
+
+        expect(caughtError).toBeInstanceOf(AccountBlockedException);
+        const exception = caughtError as AccountBlockedException;
+        expect(exception.getStatus()).toBe(423);
+        expect(exception.getResponse()).toEqual({
+          message: ACCOUNT_BLOCKED_MESSAGE,
+          code: ACCOUNT_BLOCKED_CODE,
+        });
       });
 
-      await expect(service.login(credentials)).rejects.toThrow(
-        'Credenciales inválidas',
-      );
-      expect(passwordService.verify).not.toHaveBeenCalled();
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      it('contraseña correcta no genera JWT, no actualiza lastLoginAt y no reinicia intentos', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.BLOCKED,
+          failedLoginAttempts: 5,
+        });
+        passwordService.verify.mockResolvedValue(true);
+
+        await expect(service.login(credentials)).rejects.toBeInstanceOf(
+          AccountBlockedException,
+        );
+
+        expect(tokenService.sign).not.toHaveBeenCalled();
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(prisma.tx.user.update).not.toHaveBeenCalled();
+      });
+
+      it('contraseña correcta audita LOGIN_FAILED con reason USER_BLOCKED', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.BLOCKED,
+          failedLoginAttempts: 5,
+        });
+        passwordService.verify.mockResolvedValue(true);
+
+        await expect(service.login(credentials)).rejects.toBeInstanceOf(
+          AccountBlockedException,
+        );
+
+        expect(auditService.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: AuditAction.LOGIN_FAILED,
+            userId: 'user-1',
+            metadata: { reason: 'USER_BLOCKED' },
+          }),
+        );
+      });
+
+      it('contraseña incorrecta responde 401 genérico, no ACCOUNT_BLOCKED, y no incrementa intentos', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.BLOCKED,
+          failedLoginAttempts: 5,
+        });
+        passwordService.verify.mockResolvedValue(false);
+
+        let caughtError: unknown;
+        try {
+          await service.login(credentials);
+        } catch (error) {
+          caughtError = error;
+        }
+
+        expect(caughtError).toBeInstanceOf(UnauthorizedException);
+        expect(caughtError).not.toBeInstanceOf(AccountBlockedException);
+        expect((caughtError as UnauthorizedException).message).toBe(
+          'Credenciales inválidas',
+        );
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+      });
+
+      it('contraseña incorrecta audita LOGIN_FAILED con reason INVALID_PASSWORD', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.BLOCKED,
+          failedLoginAttempts: 5,
+        });
+        passwordService.verify.mockResolvedValue(false);
+
+        await expect(service.login(credentials)).rejects.toThrow();
+
+        expect(auditService.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: AuditAction.LOGIN_FAILED,
+            userId: 'user-1',
+            metadata: { reason: 'INVALID_PASSWORD' },
+          }),
+        );
+      });
     });
 
-    it('usuario BLOCKED responde con 401 genérico sin incrementar intentos', async () => {
-      prisma.user.findFirst.mockResolvedValue({
-        id: 'user-1',
-        passwordHash: '$argon2id$hash',
-        status: UserStatus.BLOCKED,
-        failedLoginAttempts: 5,
+    describe('cuenta INACTIVE', () => {
+      it('contraseña correcta permanece 401 genérico y audita USER_INACTIVE', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.INACTIVE,
+          failedLoginAttempts: 0,
+        });
+        passwordService.verify.mockResolvedValue(true);
+
+        await expect(service.login(credentials)).rejects.toThrow(
+          'Credenciales inválidas',
+        );
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(auditService.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: AuditAction.LOGIN_FAILED,
+            metadata: { reason: 'USER_INACTIVE' },
+          }),
+        );
       });
 
-      await expect(service.login(credentials)).rejects.toThrow(
-        'Credenciales inválidas',
-      );
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      it('contraseña incorrecta permanece 401 genérico, audita INVALID_PASSWORD y no modifica al usuario', async () => {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-1',
+          passwordHash: '$argon2id$hash',
+          status: UserStatus.INACTIVE,
+          failedLoginAttempts: 0,
+        });
+        passwordService.verify.mockResolvedValue(false);
+
+        await expect(service.login(credentials)).rejects.toThrow(
+          'Credenciales inválidas',
+        );
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(auditService.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: AuditAction.LOGIN_FAILED,
+            metadata: { reason: 'INVALID_PASSWORD' },
+          }),
+        );
+      });
     });
 
     it('login exitoso reinicia los intentos fallidos y limpia blockedAt', async () => {
