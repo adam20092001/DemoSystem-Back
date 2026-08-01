@@ -45,6 +45,14 @@ export function setupSwagger(app: INestApplication): boolean {
     .addTag('Health', 'Estado de la aplicación y de la base de datos')
     .addTag('Auth', 'Autenticación, sesión y cambio de contraseña')
     .addTag('Users', 'Administración de usuarios (solo ADMIN)')
+    .addTag('Categories', 'Categorías de productos (jerárquicas)')
+    .addTag('Units', 'Unidades de medida')
+    .addTag('Products', 'Productos y servicios del catálogo')
+    .addTag(
+      'Product Specifications',
+      'Especificaciones técnicas de un producto',
+    )
+    .addTag('Product Images', 'Imágenes de un producto')
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);

@@ -61,6 +61,34 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.USER_UNBLOCKED]: ['username'],
   [AuditAction.PASSWORD_RESET]: ['username'],
   [AuditAction.PASSWORD_CHANGED]: ['username'],
+  [AuditAction.CATEGORY_CREATED]: ['code', 'name', 'parentId'],
+  [AuditAction.CATEGORY_UPDATED]: ['updatedFields'],
+  [AuditAction.CATEGORY_ACTIVATED]: ['code'],
+  [AuditAction.CATEGORY_DEACTIVATED]: ['code'],
+  [AuditAction.UNIT_CREATED]: ['code', 'abbreviation', 'allowDecimal'],
+  [AuditAction.UNIT_UPDATED]: ['updatedFields'],
+  [AuditAction.UNIT_ACTIVATED]: ['code'],
+  [AuditAction.UNIT_DEACTIVATED]: ['code'],
+  [AuditAction.PRODUCT_CREATED]: ['sku', 'productType', 'categoryId', 'unitId'],
+  [AuditAction.PRODUCT_UPDATED]: ['updatedFields'],
+  [AuditAction.PRODUCT_PRICE_CHANGED]: ['oldPrice', 'newPrice'],
+  [AuditAction.PRODUCT_ACTIVATED]: ['sku'],
+  [AuditAction.PRODUCT_DEACTIVATED]: ['sku'],
+  [AuditAction.PRODUCT_SPECIFICATION_CHANGED]: [
+    'operation',
+    'specificationName',
+  ],
+  [AuditAction.PRODUCT_IMAGE_ADDED]: [
+    'imageId',
+    'mimeType',
+    'fileSize',
+    'isPrimary',
+  ],
+  [AuditAction.PRODUCT_IMAGE_REMOVED]: ['imageId', 'wasPrimary'],
+  [AuditAction.PRODUCT_PRIMARY_IMAGE_CHANGED]: [
+    'previousImageId',
+    'newImageId',
+  ],
 };
 
 /**

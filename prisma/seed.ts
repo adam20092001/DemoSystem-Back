@@ -11,6 +11,39 @@ const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   MANAGEMENT: 'Dashboard y reportes de lectura y análisis',
 };
 
+/**
+ * Categorías raíz de demostración (Fase 2, Bloque A). No se inventan
+ * subcategorías aquí: la jerarquía se probará en un bloque posterior.
+ */
+const SEED_CATEGORIES: ReadonlyArray<{ code: string; name: string }> = [
+  { code: 'MAQ_CONSTRUCCION', name: 'Máquinas de construcción' },
+  { code: 'GASF_TUBERIAS', name: 'Gasfitería y tuberías' },
+  { code: 'SIST_AGUA', name: 'Sistemas de agua' },
+  { code: 'EQ_HIDRAULICOS', name: 'Equipos hidráulicos' },
+  { code: 'PINTURA', name: 'Pintura' },
+  { code: 'REPUESTOS', name: 'Repuestos' },
+  { code: 'SERVICIOS', name: 'Servicios' },
+];
+
+/** Unidades de medida base. allowDecimal solo para las continuas. */
+const SEED_UNITS: ReadonlyArray<{
+  code: string;
+  name: string;
+  abbreviation: string;
+  allowDecimal: boolean;
+}> = [
+  { code: 'UND', name: 'Unidad', abbreviation: 'und', allowDecimal: false },
+  { code: 'MTR', name: 'Metro', abbreviation: 'm', allowDecimal: true },
+  { code: 'KG', name: 'Kilogramo', abbreviation: 'kg', allowDecimal: true },
+  { code: 'LTR', name: 'Litro', abbreviation: 'L', allowDecimal: true },
+  { code: 'GLN', name: 'Galón', abbreviation: 'gal', allowDecimal: true },
+  { code: 'CJ', name: 'Caja', abbreviation: 'cj', allowDecimal: false },
+  { code: 'JGO', name: 'Juego', abbreviation: 'jgo', allowDecimal: false },
+  { code: 'PAR', name: 'Par', abbreviation: 'par', allowDecimal: false },
+  { code: 'RLL', name: 'Rollo', abbreviation: 'rll', allowDecimal: false },
+  { code: 'SER', name: 'Servicio', abbreviation: 'ser', allowDecimal: false },
+];
+
 function normalize(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -91,9 +124,47 @@ async function seedInitialAdmin(): Promise<void> {
   );
 }
 
+/**
+ * Categorías raíz de demostración. upsert por code: no duplica en
+ * reejecuciones y no sobrescribe cambios que un administrador haya hecho
+ * después (update: {} — igual que seedRoles()).
+ */
+async function seedCategories(): Promise<void> {
+  for (const category of SEED_CATEGORIES) {
+    await prisma.category.upsert({
+      where: { code: category.code },
+      update: {},
+      create: {
+        code: category.code,
+        name: category.name,
+      },
+    });
+  }
+  console.log(`Categorías verificadas: ${SEED_CATEGORIES.length}`);
+}
+
+/** Unidades de medida base. Mismo criterio de idempotencia que seedCategories(). */
+async function seedUnits(): Promise<void> {
+  for (const unit of SEED_UNITS) {
+    await prisma.unit.upsert({
+      where: { code: unit.code },
+      update: {},
+      create: {
+        code: unit.code,
+        name: unit.name,
+        abbreviation: unit.abbreviation,
+        allowDecimal: unit.allowDecimal,
+      },
+    });
+  }
+  console.log(`Unidades verificadas: ${SEED_UNITS.length}`);
+}
+
 async function main(): Promise<void> {
   await seedRoles();
   await seedInitialAdmin();
+  await seedCategories();
+  await seedUnits();
 }
 
 main()
