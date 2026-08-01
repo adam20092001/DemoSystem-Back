@@ -1,11 +1,17 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import {
+  CategoryStatus,
   InventoryMovementOrigin,
   InventoryMovementType,
   Prisma,
+  ProductStatus,
+  ProductType,
+  RoleName,
+  UnitStatus,
 } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { InventoryService } from './inventory.service';
+import { INVENTORY_MOVEMENT_SAFE_SELECT } from './mappers/inventory-movement.mapper';
 import { StockMovementEngine } from './stock-movement.engine';
 import { RegisterMovementInput } from './types/register-movement.input';
 import { SafeInventoryMovement } from './types/safe-inventory-movement';
@@ -59,12 +65,39 @@ function makeSafeMovement(
   };
 }
 
+interface ProductFindUniqueArgs {
+  where: { id: string };
+  select?: Record<string, unknown>;
+}
+interface MovementFindUniqueArgs {
+  where: { id: string };
+  select?: Record<string, unknown>;
+}
+interface MovementFindManyArgs {
+  where?: Record<string, unknown>;
+  select?: Record<string, unknown>;
+  orderBy?: unknown;
+  skip?: number;
+  take?: number;
+}
+interface MovementCountArgs {
+  where?: Record<string, unknown>;
+}
+
 function createPrismaMock() {
   return {
-    $queryRaw: jest.fn(),
+    $queryRaw: jest.fn<Promise<unknown[]>, [Prisma.Sql]>(),
     $transaction: jest.fn((callback: (tx: FakeTx) => unknown) =>
       callback(FAKE_TX),
     ),
+    product: {
+      findUnique: jest.fn<Promise<unknown>, [ProductFindUniqueArgs]>(),
+    },
+    inventoryMovement: {
+      findUnique: jest.fn<Promise<unknown>, [MovementFindUniqueArgs]>(),
+      findMany: jest.fn<Promise<unknown[]>, [MovementFindManyArgs]>(),
+      count: jest.fn<Promise<number>, [MovementCountArgs]>(),
+    },
   };
 }
 
@@ -74,6 +107,59 @@ function createEngineMock() {
       Promise<SafeInventoryMovement>,
       [FakeTx, StockMovementCommand]
     >(),
+  };
+}
+
+function makeMovementRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'movement-1',
+    product: { id: PRODUCT_ID, sku: 'SKU-1', name: 'Producto uno' },
+    movementType: InventoryMovementType.ENTRY,
+    origin: InventoryMovementOrigin.MANUAL,
+    quantity: new Prisma.Decimal('5.000'),
+    previousStock: new Prisma.Decimal('0.000'),
+    newStock: new Prisma.Decimal('5.000'),
+    reason: 'Motivo de prueba',
+    notes: null,
+    createdBy: {
+      id: ACTOR_ID,
+      username: 'jdoe',
+      firstName: 'Juan',
+      lastName: 'Doe',
+    },
+    createdAt: NOW,
+    ...overrides,
+  };
+}
+
+function makeProductStockRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: PRODUCT_ID,
+    sku: 'SKU-1',
+    name: 'Producto uno',
+    productType: ProductType.PRODUCT,
+    isInventoryTracked: true,
+    status: ProductStatus.ACTIVE,
+    stockCurrent: new Prisma.Decimal('10.000'),
+    stockMinimum: new Prisma.Decimal('2.000'),
+    category: { status: CategoryStatus.ACTIVE },
+    unit: { status: UnitStatus.ACTIVE, abbreviation: 'un', allowDecimal: true },
+    ...overrides,
+  };
+}
+
+function makeLowStockRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'product-1',
+    sku: 'SKU-1',
+    name: 'Producto uno',
+    stockCurrent: new Prisma.Decimal('1.000'),
+    stockMinimum: new Prisma.Decimal('5.000'),
+    categoryId: 'category-1',
+    categoryName: 'Categoria uno',
+    unitId: 'unit-1',
+    unitAbbreviation: 'un',
+    ...overrides,
   };
 }
 
@@ -215,5 +301,395 @@ describe('InventoryService', () => {
     const result = await service.registerExit(makeInput());
 
     expect(result).toBe(expected);
+  });
+
+  describe('listMovements', () => {
+    it('usa página/límite por defecto y el select seguro, ordenado createdAt/id DESC', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([makeMovementRow()]);
+      prisma.inventoryMovement.count.mockResolvedValue(1);
+
+      const result = await service.listMovements({});
+
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(20);
+      expect(result.total).toBe(1);
+      expect(result.data[0].quantity).toBe('5.000');
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.select).toEqual(INVENTORY_MOVEMENT_SAFE_SELECT);
+      expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }]);
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(20);
+    });
+
+    it('limita a un máximo de 100 aunque se pida más', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      const result = await service.listMovements({ limit: 500 });
+
+      expect(result.limit).toBe(100);
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.take).toBe(100);
+    });
+
+    it('filtra por productId/movementType/origin/createdByUserId', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listMovements({
+        productId: 'p-1',
+        movementType: InventoryMovementType.EXIT,
+        origin: InventoryMovementOrigin.MANUAL,
+        createdByUserId: 'user-9',
+      });
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({
+        productId: 'p-1',
+        movementType: InventoryMovementType.EXIT,
+        origin: InventoryMovementOrigin.MANUAL,
+        createdByUserId: 'user-9',
+      });
+    });
+
+    it('filtra por dateFrom/dateTo con límites inclusivos (gte/lte)', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+      const dateFrom = new Date('2026-01-01T00:00:00.000Z');
+      const dateTo = new Date('2026-01-31T23:59:59.999Z');
+
+      await service.listMovements({ dateFrom, dateTo });
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.where?.createdAt).toEqual({ gte: dateFrom, lte: dateTo });
+    });
+
+    it('busca por sku o name del producto (contains, insensitive)', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listMovements({ search: '  taladro  ' });
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.where?.product).toEqual({
+        OR: [
+          { sku: { contains: 'taladro', mode: 'insensitive' } },
+          { name: { contains: 'taladro', mode: 'insensitive' } },
+        ],
+      });
+    });
+
+    it('dateFrom > dateTo → 400, sin consultar la base', async () => {
+      const dateFrom = new Date('2026-02-01T00:00:00.000Z');
+      const dateTo = new Date('2026-01-01T00:00:00.000Z');
+
+      await expect(
+        service.listMovements({ dateFrom, dateTo }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.inventoryMovement.findMany).not.toHaveBeenCalled();
+    });
+
+    it('página vacía es una respuesta válida, no un error', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      const result = await service.listMovements({});
+
+      expect(result.data).toEqual([]);
+      expect(result.total).toBe(0);
+      expect(result.totalPages).toBe(0);
+    });
+  });
+
+  describe('findMovementById', () => {
+    it('retorna el movimiento existente, mapeado de forma segura', async () => {
+      prisma.inventoryMovement.findUnique.mockResolvedValue(makeMovementRow());
+
+      const result = await service.findMovementById('movement-1');
+
+      expect(result.id).toBe('movement-1');
+      expect(result.quantity).toBe('5.000');
+      const args = prisma.inventoryMovement.findUnique.mock.calls[0][0];
+      expect(args.select).toEqual(INVENTORY_MOVEMENT_SAFE_SELECT);
+    });
+
+    it('inexistente → 404', async () => {
+      prisma.inventoryMovement.findUnique.mockResolvedValue(null);
+
+      await expect(service.findMovementById('missing')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('listProductMovements', () => {
+    it('producto inexistente → 404, sin consultar movimientos', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.listProductMovements(PRODUCT_ID, {}),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.inventoryMovement.findMany).not.toHaveBeenCalled();
+    });
+
+    it('producto existente sin movimientos → página vacía (200, no 404)', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      const result = await service.listProductMovements(PRODUCT_ID, {});
+
+      expect(result.data).toEqual([]);
+      expect(result.total).toBe(0);
+    });
+
+    it('el productId de la ruta es la única fuente del filtro por producto', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listProductMovements(PRODUCT_ID, {});
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.where?.productId).toBe(PRODUCT_ID);
+    });
+
+    it('verifica existencia con una selección mínima (sin exigir estado activo)', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([makeMovementRow()]);
+      prisma.inventoryMovement.count.mockResolvedValue(1);
+
+      await service.listProductMovements(PRODUCT_ID, {});
+
+      const findUniqueArgs = prisma.product.findUnique.mock.calls[0][0];
+      expect(findUniqueArgs.select).toEqual({ id: true });
+    });
+
+    it('producto INACTIVE sigue visible: el historial es histórico', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([makeMovementRow()]);
+      prisma.inventoryMovement.count.mockResolvedValue(1);
+
+      const result = await service.listProductMovements(PRODUCT_ID, {});
+
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('orden estable createdAt DESC, id DESC', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listProductMovements(PRODUCT_ID, {});
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }]);
+    });
+  });
+
+  describe('getProductStock', () => {
+    it('producto inexistente → 404', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.ADMIN),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('SERVICE → 400 para cualquier rol', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({ productType: ProductType.SERVICE }),
+      );
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('isInventoryTracked=false → 400', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({ isInventoryTracked: false }),
+      );
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.ADMIN),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('SELLER con producto INACTIVE → 404', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({ status: ProductStatus.INACTIVE }),
+      );
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('SELLER con categoría INACTIVE → 404', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({ category: { status: CategoryStatus.INACTIVE } }),
+      );
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('SELLER con unidad INACTIVE → 404', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({
+          unit: {
+            status: UnitStatus.INACTIVE,
+            abbreviation: 'un',
+            allowDecimal: true,
+          },
+        }),
+      );
+
+      await expect(
+        service.getProductStock(PRODUCT_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('SELLER con producto/categoría/unidad ACTIVE → responde', async () => {
+      prisma.product.findUnique.mockResolvedValue(makeProductStockRow());
+
+      const result = await service.getProductStock(PRODUCT_ID, RoleName.SELLER);
+
+      expect(result.stockCurrent).toBe('10.000');
+      expect(result.stockMinimum).toBe('2.000');
+      expect(result.unitAbbreviation).toBe('un');
+    });
+
+    it.each([RoleName.ADMIN, RoleName.WAREHOUSE, RoleName.MANAGEMENT])(
+      '%s puede consultar el stock de un producto inactivo',
+      async (role) => {
+        prisma.product.findUnique.mockResolvedValue(
+          makeProductStockRow({ status: ProductStatus.INACTIVE }),
+        );
+
+        const result = await service.getProductStock(PRODUCT_ID, role);
+
+        expect(result.productId).toBe(PRODUCT_ID);
+      },
+    );
+
+    it('serializa stockCurrent/stockMinimum a 3 decimales', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        makeProductStockRow({
+          stockCurrent: new Prisma.Decimal('1'),
+          stockMinimum: new Prisma.Decimal('0'),
+        }),
+      );
+
+      const result = await service.getProductStock(PRODUCT_ID, RoleName.ADMIN);
+
+      expect(result.stockCurrent).toBe('1.000');
+      expect(result.stockMinimum).toBe('0.000');
+    });
+  });
+
+  describe('listLowStock', () => {
+    it('incluye las condiciones obligatorias (estado, tipo, categoría/unidad ACTIVE, comparación de columnas)', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([makeLowStockRow()])
+        .mockResolvedValueOnce([{ total: 1 }]);
+
+      const result = await service.listLowStock({});
+
+      expect(result.data).toHaveLength(1);
+      expect(result.total).toBe(1);
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      expect(rowsSql.text).toContain("p.status = 'ACTIVE'");
+      expect(rowsSql.text).toContain("p.product_type = 'PRODUCT'");
+      expect(rowsSql.text).toContain('p.is_inventory_tracked = true');
+      expect(rowsSql.text).toContain("c.status = 'ACTIVE'");
+      expect(rowsSql.text).toContain("u.status = 'ACTIVE'");
+      expect(rowsSql.text).toContain('p.stock_current <= p.stock_minimum');
+      expect(rowsSql.text).toContain(
+        'ORDER BY p.name ASC, p.sku ASC, p.id ASC',
+      );
+    });
+
+    it('usa la misma condición (WHERE) para filas y count, con LIMIT/OFFSET solo en filas', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0 }]);
+
+      await service.listLowStock({ categoryId: 'cat-1' });
+
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      const countSql = prisma.$queryRaw.mock.calls[1][0];
+      expect(rowsSql.values).toEqual(['cat-1', 20, 0]);
+      expect(countSql.values).toEqual(['cat-1']);
+      expect(countSql.text).toContain('COUNT(*)::int');
+    });
+
+    it('agrega categoryId/unitId/search como condiciones parametrizadas', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0 }]);
+
+      await service.listLowStock({
+        categoryId: 'cat-1',
+        unitId: 'unit-1',
+        search: 'taladro',
+      });
+
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      expect(rowsSql.values).toEqual(
+        expect.arrayContaining([
+          'cat-1',
+          'unit-1',
+          '%taladro%',
+          '%taladro%',
+          20,
+          0,
+        ]),
+      );
+    });
+
+    it('calcula LIMIT/OFFSET a partir de page/limit', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0 }]);
+
+      await service.listLowStock({ page: 3, limit: 10 });
+
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      expect(rowsSql.values).toEqual([10, 20]);
+    });
+
+    it('orden fijo name ASC, sku ASC, id ASC (no acepta orderBy del cliente)', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0 }]);
+
+      await service.listLowStock({});
+
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      expect(rowsSql.text).toContain(
+        'ORDER BY p.name ASC, p.sku ASC, p.id ASC',
+      );
+    });
+
+    it('serializa stockCurrent/stockMinimum a 3 decimales, total como number', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([
+          makeLowStockRow({
+            stockCurrent: new Prisma.Decimal('0'),
+            stockMinimum: new Prisma.Decimal('0'),
+          }),
+        ])
+        .mockResolvedValueOnce([{ total: 1 }]);
+
+      const result = await service.listLowStock({});
+
+      expect(result.data[0].stockCurrent).toBe('0.000');
+      expect(result.data[0].stockMinimum).toBe('0.000');
+      expect(typeof result.total).toBe('number');
+    });
   });
 });
