@@ -1,4 +1,6 @@
 import { config } from 'dotenv';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 /**
@@ -13,6 +15,18 @@ import { resolve } from 'node:path';
  * código de la aplicación.
  */
 process.env.NODE_ENV = 'test';
+
+/**
+ * Carpeta exclusiva de imágenes para este archivo de prueba: ruta bajo el
+ * directorio temporal del sistema operativo, nunca dentro de PRODUCT_UPLOAD_DIR
+ * de desarrollo. Deliberadamente NO se crea aquí (mkdir): LocalDiskImageStorageService
+ * la crea bajo demanda solo si el archivo de prueba realmente sube una imagen,
+ * así los archivos que no tocan imágenes no dejan ningún directorio huérfano.
+ */
+process.env.PRODUCT_UPLOAD_DIR = resolve(
+  tmpdir(),
+  `demosystem-e2e-uploads-${process.pid}-${randomUUID()}`,
+);
 
 const result = config({ path: resolve(__dirname, '../.env.test') });
 
