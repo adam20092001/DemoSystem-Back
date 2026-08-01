@@ -89,6 +89,55 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'previousImageId',
     'newImageId',
   ],
+  // Las 5 acciones de inventario comparten la misma whitelist: nunca se
+  // audita reason/notes/referenceType/referenceId. Decimal siempre como
+  // string de 3 decimales (lo normaliza StockMovementEngine antes de llamar
+  // a record()).
+  [AuditAction.INVENTORY_INITIAL_BALANCE_CREATED]: [
+    'movementId',
+    'productId',
+    'quantity',
+    'previousStock',
+    'newStock',
+    'movementType',
+    'origin',
+  ],
+  [AuditAction.INVENTORY_ENTRY_CREATED]: [
+    'movementId',
+    'productId',
+    'quantity',
+    'previousStock',
+    'newStock',
+    'movementType',
+    'origin',
+  ],
+  [AuditAction.INVENTORY_EXIT_CREATED]: [
+    'movementId',
+    'productId',
+    'quantity',
+    'previousStock',
+    'newStock',
+    'movementType',
+    'origin',
+  ],
+  [AuditAction.INVENTORY_ADJUSTMENT_IN_CREATED]: [
+    'movementId',
+    'productId',
+    'quantity',
+    'previousStock',
+    'newStock',
+    'movementType',
+    'origin',
+  ],
+  [AuditAction.INVENTORY_ADJUSTMENT_OUT_CREATED]: [
+    'movementId',
+    'productId',
+    'quantity',
+    'previousStock',
+    'newStock',
+    'movementType',
+    'origin',
+  ],
 };
 
 /**

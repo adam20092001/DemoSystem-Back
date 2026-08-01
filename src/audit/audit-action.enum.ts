@@ -3,7 +3,10 @@
  * Bloque B; LOGIN_SUCCESS y LOGIN_FAILED desde el Bloque C. Las de
  * CATEGORY_ y UNIT_ se usan desde la Fase 2, Bloque B; las de PRODUCT_
  * desde el Bloque C; las de PRODUCT_IMAGE_ y PRODUCT_PRIMARY_IMAGE_CHANGED
- * desde el Bloque D.
+ * desde el Bloque D. Las de INVENTORY_ se usan desde la Fase 3, Bloque B,
+ * resueltas internamente por StockMovementEngine (nunca por el DTO/
+ * controller): no existen acciones para SALE/SALE_CANCELLATION/PURCHASE/
+ * RETURN/REVERSAL porque esos orígenes/movimientos no se emiten en esta fase.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -31,4 +34,9 @@ export enum AuditAction {
   PRODUCT_IMAGE_ADDED = 'PRODUCT_IMAGE_ADDED',
   PRODUCT_IMAGE_REMOVED = 'PRODUCT_IMAGE_REMOVED',
   PRODUCT_PRIMARY_IMAGE_CHANGED = 'PRODUCT_PRIMARY_IMAGE_CHANGED',
+  INVENTORY_INITIAL_BALANCE_CREATED = 'INVENTORY_INITIAL_BALANCE_CREATED',
+  INVENTORY_ENTRY_CREATED = 'INVENTORY_ENTRY_CREATED',
+  INVENTORY_EXIT_CREATED = 'INVENTORY_EXIT_CREATED',
+  INVENTORY_ADJUSTMENT_IN_CREATED = 'INVENTORY_ADJUSTMENT_IN_CREATED',
+  INVENTORY_ADJUSTMENT_OUT_CREATED = 'INVENTORY_ADJUSTMENT_OUT_CREATED',
 }
