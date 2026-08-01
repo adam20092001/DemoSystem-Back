@@ -164,15 +164,20 @@ describe('Auth (e2e)', () => {
       expect(blockedUser.failedLoginAttempts).toBe(5);
       expect(blockedUser.status).toBe(UserStatus.BLOCKED);
       expect(blockedUser.blockedAt).not.toBeNull();
+      expect(finalAttempt.body).not.toHaveProperty('code');
 
-      // Incluso con la contraseña correcta, ya está bloqueado.
+      // Con la contraseña correcta, ahora que está bloqueado, responde 423
+      // (no 401): recién aquí es seguro distinguir el estado de la cuenta.
       const afterBlock = await request(app.getHttpServer())
         .post('/api/v1/auth/login')
         .send({ identifier: LOCKOUT_USERNAME, password: LOCKOUT_PASSWORD });
-      expect(afterBlock.status).toBe(401);
+      expect(afterBlock.status).toBe(423);
+      expect((afterBlock.body as { code: string }).code).toBe(
+        'ACCOUNT_BLOCKED',
+      );
     });
 
-    it('usuario INACTIVE responde 401 genérico', async () => {
+    it('usuario INACTIVE con contraseña correcta responde 401 genérico, sin ACCOUNT_BLOCKED', async () => {
       const response = await request(app.getHttpServer())
         .post('/api/v1/auth/login')
         .send({ identifier: INACTIVE_USERNAME, password: INACTIVE_PASSWORD });
@@ -181,16 +186,99 @@ describe('Auth (e2e)', () => {
       expect((response.body as { message: string }).message).toBe(
         'Credenciales inválidas',
       );
+      expect(response.body).not.toHaveProperty('code');
     });
 
-    it('usuario BLOCKED responde 401 genérico', async () => {
+    it('usuario INACTIVE con contraseña incorrecta responde 401 genérico', async () => {
       const response = await request(app.getHttpServer())
         .post('/api/v1/auth/login')
-        .send({ identifier: BLOCKED_USERNAME, password: BLOCKED_PASSWORD });
+        .send({
+          identifier: INACTIVE_USERNAME,
+          password: 'contraseña-incorrecta-inactive',
+        });
 
       expect(response.status).toBe(401);
       expect((response.body as { message: string }).message).toBe(
         'Credenciales inválidas',
+      );
+      expect(response.body).not.toHaveProperty('code');
+    });
+
+    it('usuario BLOCKED con contraseña correcta responde 423 ACCOUNT_BLOCKED, sin token/cookie, sin modificar al usuario', async () => {
+      const before = await prisma.user.findUniqueOrThrow({
+        where: { username: BLOCKED_USERNAME },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ identifier: BLOCKED_USERNAME, password: BLOCKED_PASSWORD });
+
+      expect(response.status).toBe(423);
+      const body = response.body as {
+        code: string;
+        message: string;
+        error: string;
+      };
+      expect(body.code).toBe('ACCOUNT_BLOCKED');
+      expect(body.message).toBe(
+        'La cuenta se encuentra bloqueada. Contacta al administrador.',
+      );
+      expect(body.error).toBe('Locked');
+      expect(response.body).not.toHaveProperty('token');
+      expect(response.body).not.toHaveProperty('passwordHash');
+      expect(response.headers['set-cookie']).toBeUndefined();
+
+      const after = await prisma.user.findUniqueOrThrow({
+        where: { username: BLOCKED_USERNAME },
+      });
+      expect(after.status).toBe(UserStatus.BLOCKED);
+      expect(after.lastLoginAt).toEqual(before.lastLoginAt);
+      expect(after.failedLoginAttempts).toBe(before.failedLoginAttempts);
+
+      const rows = await prisma.auditLog.findMany({
+        where: { action: AuditAction.LOGIN_FAILED, entityId: after.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      const blockedRow = rows.find(
+        (row) =>
+          (row.metadata as { reason: string }).reason === 'USER_BLOCKED',
+      );
+      expect(blockedRow).toBeDefined();
+    });
+
+    it('usuario BLOCKED con contraseña incorrecta responde 401 genérico, sin ACCOUNT_BLOCKED ni cambios', async () => {
+      const before = await prisma.user.findUniqueOrThrow({
+        where: { username: BLOCKED_USERNAME },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({
+          identifier: BLOCKED_USERNAME,
+          password: 'contraseña-incorrecta-blocked',
+        });
+
+      expect(response.status).toBe(401);
+      expect((response.body as { message: string }).message).toBe(
+        'Credenciales inválidas',
+      );
+      expect(response.body).not.toHaveProperty('code');
+      expect(JSON.stringify(response.body)).not.toContain('ACCOUNT_BLOCKED');
+      expect(response.headers['set-cookie']).toBeUndefined();
+
+      const after = await prisma.user.findUniqueOrThrow({
+        where: { username: BLOCKED_USERNAME },
+      });
+      expect(after.failedLoginAttempts).toBe(before.failedLoginAttempts);
+      expect(after.status).toBe(UserStatus.BLOCKED);
+
+      const rows = await prisma.auditLog.findMany({
+        where: { action: AuditAction.LOGIN_FAILED, entityId: after.id },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      });
+      expect((rows[0].metadata as { reason: string }).reason).toBe(
+        'INVALID_PASSWORD',
       );
     });
 

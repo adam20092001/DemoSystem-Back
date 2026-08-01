@@ -13,6 +13,7 @@ import { EnvironmentVariables } from '../config/env.validation';
 import { PrismaService } from '../database/prisma.service';
 import { toSafeUser, USER_SAFE_SELECT } from '../users/mappers/user.mapper';
 import { SafeUser } from '../users/types/safe-user';
+import { AccountBlockedException } from './exceptions/account-blocked.exception';
 import { TokenService } from './token.service';
 
 export interface LoginInput {
@@ -72,33 +73,66 @@ export class AuthService {
       throw new UnauthorizedException(GENERIC_CREDENTIALS_MESSAGE);
     }
 
-    if (found.status !== UserStatus.ACTIVE) {
-      const reason =
-        found.status === UserStatus.BLOCKED ? 'USER_BLOCKED' : 'USER_INACTIVE';
-      await this.auditService.record({
-        userId: found.id,
-        module: 'AUTH',
-        action: AuditAction.LOGIN_FAILED,
-        entityType: 'User',
-        entityId: found.id,
-        description: 'Intento de login con una cuenta no activa',
-        metadata: { reason },
-        ipAddress,
-      });
-      throw new UnauthorizedException(GENERIC_CREDENTIALS_MESSAGE);
-    }
-
+    // La contraseña se verifica ANTES de mirar el status: revelar que una
+    // cuenta está BLOCKED/INACTIVE a quien todavía no demostró conocer la
+    // contraseña equivaldría a confirmar que la cuenta existe y su estado.
     const passwordMatches = await this.passwordService.verify(
       found.passwordHash,
       input.password,
     );
 
     if (!passwordMatches) {
-      await this.registerFailedAttempt(
-        found.id,
-        found.failedLoginAttempts,
+      if (found.status === UserStatus.ACTIVE) {
+        // Único caso que cuenta intentos y puede bloquear: una cuenta ya
+        // BLOCKED o INACTIVE no tiene contador que incrementar ni acción
+        // adicional que tomar más allá de auditar el intento.
+        await this.registerFailedAttempt(
+          found.id,
+          found.failedLoginAttempts,
+          ipAddress,
+        );
+      } else {
+        await this.auditService.record({
+          userId: found.id,
+          module: 'AUTH',
+          action: AuditAction.LOGIN_FAILED,
+          entityType: 'User',
+          entityId: found.id,
+          description: 'Contraseña incorrecta',
+          metadata: { reason: 'INVALID_PASSWORD' },
+          ipAddress,
+        });
+      }
+      throw new UnauthorizedException(GENERIC_CREDENTIALS_MESSAGE);
+    }
+
+    // A partir de aquí la contraseña es correcta: recién ahora es seguro
+    // distinguir el estado de la cuenta en la respuesta.
+    if (found.status === UserStatus.BLOCKED) {
+      await this.auditService.record({
+        userId: found.id,
+        module: 'AUTH',
+        action: AuditAction.LOGIN_FAILED,
+        entityType: 'User',
+        entityId: found.id,
+        description: 'Intento de login sobre una cuenta bloqueada',
+        metadata: { reason: 'USER_BLOCKED' },
         ipAddress,
-      );
+      });
+      throw new AccountBlockedException();
+    }
+
+    if (found.status === UserStatus.INACTIVE) {
+      await this.auditService.record({
+        userId: found.id,
+        module: 'AUTH',
+        action: AuditAction.LOGIN_FAILED,
+        entityType: 'User',
+        entityId: found.id,
+        description: 'Intento de login sobre una cuenta inactiva',
+        metadata: { reason: 'USER_INACTIVE' },
+        ipAddress,
+      });
       throw new UnauthorizedException(GENERIC_CREDENTIALS_MESSAGE);
     }
 

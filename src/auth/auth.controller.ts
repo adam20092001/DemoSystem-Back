@@ -54,6 +54,23 @@ export class AuthController {
     description: 'Credenciales inválidas',
     type: ErrorResponseDto,
   })
+  @ApiResponse({
+    status: 423,
+    description:
+      'La contraseña es correcta pero la cuenta está BLOCKED. El campo ' +
+      'estable code="ACCOUNT_BLOCKED" permite al frontend distinguir este ' +
+      'caso sin depender del texto de message.',
+    schema: {
+      example: {
+        statusCode: 423,
+        message: 'La cuenta se encuentra bloqueada. Contacta al administrador.',
+        error: 'Locked',
+        code: 'ACCOUNT_BLOCKED',
+        timestamp: '2026-07-31T00:00:00.000Z',
+        path: '/api/v1/auth/login',
+      },
+    },
+  })
   @ApiTooManyRequestsResponse({
     description: 'Demasiados intentos de login',
     type: ErrorResponseDto,

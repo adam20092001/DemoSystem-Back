@@ -15,12 +15,15 @@ interface ResolvedError {
   statusCode: number;
   message: string | string[];
   error: string;
+  /** Código estable para el frontend (p. ej. "ACCOUNT_BLOCKED"). Opcional. */
+  code?: string;
 }
 
 /** Cuerpo que NestJS adjunta a sus HttpException estándar. */
 interface HttpExceptionBody {
   message?: string | string[];
   error?: string;
+  code?: string;
 }
 
 /** A partir de este código el fallo se considera no controlado y se registra. */
@@ -33,6 +36,7 @@ const HTTP_ERROR_LABELS: Record<number, string> = {
   404: 'Not Found',
   409: 'Conflict',
   422: 'Unprocessable Entity',
+  423: 'Locked',
   500: 'Internal Server Error',
   503: 'Service Unavailable',
 };
@@ -69,6 +73,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       error: resolved.error,
       timestamp: new Date().toISOString(),
       path: request.url,
+      ...(resolved.code !== undefined ? { code: resolved.code } : {}),
     };
 
     response.status(resolved.statusCode).json(body);
@@ -106,6 +111,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       statusCode,
       message: body.message ?? exception.message,
       error: body.error ?? label(statusCode),
+      ...(typeof body.code === 'string' ? { code: body.code } : {}),
     };
   }
 
