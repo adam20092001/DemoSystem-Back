@@ -1,10 +1,11 @@
 // Esquema de Prisma.
 //
 // Fase 1: roles, usuarios y auditoría mínima.
-// Fase 2, Bloque A: catálogo — categorías, unidades, productos,
-// especificaciones e imágenes. Sin servicios/controllers todavía; ese
-// trabajo llega en los Bloques B-D. Sin movimientos de inventario: eso es
-// Fase 3.
+// Fase 2: catálogo — categorías, unidades, productos, especificaciones e
+// imágenes.
+// Fase 3, Bloque A: modelo de movimientos de inventario (InventoryMovement),
+// restricciones e índices. Sin servicio, sin motor transaccional, sin
+// endpoints todavía; eso llega en los Bloques B-D.
 
 generator client {
   provider = "prisma-client-js"
@@ -48,6 +49,29 @@ enum ProductType {
   SERVICE
 }
 
+// El tipo representa únicamente la naturaleza y dirección del cambio de
+// stock. No se agregan SALE/PURCHASE/RETURN/REVERSAL como movementType:
+// eso mezclaría el eje "qué le pasa al stock" con el eje "por qué"
+// (InventoryMovementOrigin, abajo).
+enum InventoryMovementType {
+  ENTRY
+  EXIT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+}
+
+// PURCHASE/RETURN quedan fuera: Compras y Proveedores están fuera del MVP
+// (CLAUDE.md §7). SALE/SALE_CANCELLATION se declaran para que la futura
+// Fase de Ventas no requiera migrar el enum, pero en la Fase 3 solo se
+// emiten MANUAL e INITIAL_BALANCE.
+enum InventoryMovementOrigin {
+  MANUAL
+  INITIAL_BALANCE
+  SALE
+  SALE_CANCELLATION
+  OTHER
+}
+
 model Role {
   id          String   @id @default(uuid()) @db.Uuid
   name        RoleName @unique
@@ -60,22 +84,23 @@ model Role {
 }
 
 model User {
-  id                  String     @id @default(uuid()) @db.Uuid
-  firstName           String     @map("first_name") @db.VarChar(80)
-  lastName            String     @map("last_name") @db.VarChar(80)
-  username            String     @unique @db.VarChar(50)
-  email               String     @unique @db.VarChar(150)
-  passwordHash        String     @map("password_hash") @db.VarChar(255)
-  roleId              String     @map("role_id") @db.Uuid
-  role                Role       @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  status              UserStatus @default(ACTIVE)
-  mustChangePassword  Boolean    @default(true) @map("must_change_password")
-  failedLoginAttempts Int        @default(0) @map("failed_login_attempts")
-  blockedAt           DateTime?  @map("blocked_at")
-  lastLoginAt         DateTime?  @map("last_login_at")
-  createdAt           DateTime   @default(now()) @map("created_at")
-  updatedAt           DateTime   @updatedAt @map("updated_at")
+  id                  String              @id @default(uuid()) @db.Uuid
+  firstName           String              @map("first_name") @db.VarChar(80)
+  lastName            String              @map("last_name") @db.VarChar(80)
+  username            String              @unique @db.VarChar(50)
+  email               String              @unique @db.VarChar(150)
+  passwordHash        String              @map("password_hash") @db.VarChar(255)
+  roleId              String              @map("role_id") @db.Uuid
+  role                Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  status              UserStatus          @default(ACTIVE)
+  mustChangePassword  Boolean             @default(true) @map("must_change_password")
+  failedLoginAttempts Int                 @default(0) @map("failed_login_attempts")
+  blockedAt           DateTime?           @map("blocked_at")
+  lastLoginAt         DateTime?           @map("last_login_at")
+  createdAt           DateTime            @default(now()) @map("created_at")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
   auditLogs           AuditLog[]
+  inventoryMovements  InventoryMovement[]
 
   @@index([roleId])
   @@index([status])
@@ -160,6 +185,7 @@ model Product {
   status                ProductStatus          @default(ACTIVE)
   specifications        ProductSpecification[]
   images                ProductImage[]
+  movements             InventoryMovement[]
   createdAt             DateTime               @default(now()) @map("created_at")
   updatedAt             DateTime               @updatedAt @map("updated_at")
 
@@ -207,4 +233,46 @@ model ProductImage {
   @@index([productId])
   @@index([productId, isPrimary])
   @@map("product_images")
+}
+
+// --- Inventario (Fase 3, Bloque A) -----------------------------------------
+
+model InventoryMovement {
+  id        String  @id @default(uuid()) @db.Uuid
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  movementType InventoryMovementType   @map("movement_type")
+  // Sin @default: cualquier inserción debe declarar explícitamente su
+  // origen. Omitirlo no debe convertirse silenciosamente en MANUAL.
+  origin       InventoryMovementOrigin
+
+  quantity      Decimal @db.Decimal(14, 3)
+  previousStock Decimal @map("previous_stock") @db.Decimal(14, 3)
+  newStock      Decimal @map("new_stock") @db.Decimal(14, 3)
+
+  reason String  @db.VarChar(200)
+  notes  String? @db.VarChar(500)
+
+  // Referencia polimórfica sin FK: aún no existen sales/purchases. Misma
+  // técnica que AuditLog.entityType/entityId.
+  referenceType String? @map("reference_type") @db.VarChar(50)
+  referenceId   String? @map("reference_id") @db.VarChar(64)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: un movimiento confirmado es inmutable (no hay
+  // PATCH/DELETE). Sin deletedAt ni status: no hay borrado lógico de
+  // movimientos, la corrección es un movimiento compensatorio (Bloque B).
+  //
+  // Los 6 CHECK y el índice único parcial de saldo inicial se agregan a
+  // mano en migration.sql (el DSL de Prisma no los expresa), igual que en
+  // la Fase 2.
+  @@index([productId, createdAt])
+  @@index([createdAt])
+  @@index([createdByUserId, createdAt])
+  @@map("inventory_movements")
 }
