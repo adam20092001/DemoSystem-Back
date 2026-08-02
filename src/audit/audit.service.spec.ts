@@ -177,4 +177,40 @@ describe('sanitizeAuditMetadata', () => {
       sanitizeAuditMetadata(AuditAction.USER_CREATED, undefined),
     ).toBeUndefined();
   });
+
+  it.each([
+    AuditAction.INVENTORY_INITIAL_BALANCE_CREATED,
+    AuditAction.INVENTORY_ENTRY_CREATED,
+    AuditAction.INVENTORY_EXIT_CREATED,
+    AuditAction.INVENTORY_ADJUSTMENT_IN_CREATED,
+    AuditAction.INVENTORY_ADJUSTMENT_OUT_CREATED,
+  ])(
+    '%s acepta solo las 7 claves de inventario y descarta reason/notes/referenceId',
+    (action) => {
+      const metadata = {
+        movementId: 'movement-1',
+        productId: 'product-1',
+        quantity: '5.000',
+        previousStock: '10.000',
+        newStock: '15.000',
+        movementType: 'ENTRY',
+        origin: 'MANUAL',
+        reason: 'motivo sensible',
+        notes: 'nota sensible',
+        referenceId: 'ref-1',
+      } as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(action, metadata);
+
+      expect(sanitized).toEqual({
+        movementId: 'movement-1',
+        productId: 'product-1',
+        quantity: '5.000',
+        previousStock: '10.000',
+        newStock: '15.000',
+        movementType: 'ENTRY',
+        origin: 'MANUAL',
+      });
+    },
+  );
 });

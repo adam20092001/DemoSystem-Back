@@ -53,6 +53,10 @@ export function setupSwagger(app: INestApplication): boolean {
       'Especificaciones técnicas de un producto',
     )
     .addTag('Product Images', 'Imágenes de un producto')
+    .addTag(
+      'Inventory',
+      'Movimientos de stock, kardex, stock actual y stock bajo',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
