@@ -44,6 +44,8 @@ describe('Units (e2e)', () => {
   let prisma: PrismaClient;
   let adminCookie: string;
   let sellerCookie: string;
+  /** IDs de las unidades FILT_/FILF_ creadas por la prueba de filtro allowDecimal. */
+  const createdFilterUnitIds: string[] = [];
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
@@ -73,8 +75,39 @@ describe('Units (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
-    await prisma.$disconnect();
+    try {
+      if (createdFilterUnitIds.length > 0) {
+        // Nunca borrar a ciegas: si por alguna razón un producto llegara a
+        // referenciar una de estas unidades, no se oculta el residuo con un
+        // aviso silencioso — se falla la suite explícitamente, para que el
+        // problema real (una unidad fixture quedó en uso) se note y se
+        // corrija, en vez de acumularse sin que nadie lo detecte.
+        const referencingProducts = await prisma.product.count({
+          where: { unitId: { in: createdFilterUnitIds } },
+        });
+        if (referencingProducts > 0) {
+          throw new Error(
+            `No se pudieron limpiar las unidades FIL del E2E: ${referencingProducts} productos las referencian`,
+          );
+        }
+
+        // AuditLog no tiene FK hacia Unit (entityId es un string libre); se
+        // eliminan primero, dirigidas únicamente a los IDs recolectados por
+        // esta prueba, nunca con un deleteMany global.
+        await prisma.auditLog.deleteMany({
+          where: {
+            entityType: 'Unit',
+            entityId: { in: createdFilterUnitIds },
+          },
+        });
+        await prisma.unit.deleteMany({
+          where: { id: { in: createdFilterUnitIds } },
+        });
+      }
+    } finally {
+      await app.close();
+      await prisma.$disconnect();
+    }
   });
 
   describe('autorización', () => {
@@ -167,7 +200,7 @@ describe('Units (e2e)', () => {
   describe('GET /units — filtro allowDecimal', () => {
     it('allowDecimal=false filtra correctamente', async () => {
       const s = suffix();
-      await request(app.getHttpServer())
+      const withTrue = await request(app.getHttpServer())
         .post('/api/v1/units')
         .set('Cookie', adminCookie)
         .send({
@@ -185,10 +218,21 @@ describe('Units (e2e)', () => {
           abbreviation: 'ff',
           allowDecimal: false,
         });
+      createdFilterUnitIds.push(
+        (withTrue.body as SafeUnitBody).id,
+        (created.body as SafeUnitBody).id,
+      );
 
+      // Se busca por el sufijo único de esta ejecución (s), no por el
+      // prefijo genérico "FIL": ese prefijo coincide con las unidades FILT_/
+      // FILF_ acumuladas de cada ejecución anterior de esta prueba (nunca se
+      // eliminan, mismo patrón que products.e2e-spec.ts), y con más de 20
+      // coincidencias la unidad recién creada puede quedar fuera de la
+      // primera página por orden alfabético de code. Buscar por "s" aísla la
+      // consulta a exactamente las 2 unidades creadas en esta ejecución.
       const response = await request(app.getHttpServer())
         .get('/api/v1/units')
-        .query({ allowDecimal: 'false', search: `FIL` })
+        .query({ allowDecimal: 'false', search: s })
         .set('Cookie', adminCookie);
 
       expect(response.status).toBe(200);
