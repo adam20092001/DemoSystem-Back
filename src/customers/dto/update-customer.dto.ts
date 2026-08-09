@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { CustomerDocumentType } from '@prisma/client';
+import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsEnum,
@@ -7,6 +8,18 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
+
+/**
+ * Recorta espacios perimetrales antes de que @IsEmail() evalúe el valor
+ * crudo: sin esto, un email válido con espacios ("  x@x.com  ") sería
+ * rechazado aquí y nunca llegaría a CustomersService, que es quien aplica
+ * trim+lowercase como normalización de dominio (esta función solo recorta;
+ * el paso a minúsculas sigue siendo responsabilidad exclusiva del servicio).
+ * No toca null: @IsOptional() sigue tratándolo como "limpiar email".
+ */
+function trimEmail({ value }: { value: unknown }): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
 
 /**
  * code, customerType, customerStage, status e isGeneric nunca se aceptan
@@ -48,6 +61,7 @@ export class UpdateCustomerDto {
 
   @ApiPropertyOptional({ maxLength: 150, nullable: true })
   @IsOptional()
+  @Transform(trimEmail)
   @IsEmail()
   @MaxLength(150)
   email?: string | null;

@@ -4,6 +4,7 @@ import {
   CustomerStage,
   CustomerType,
 } from '@prisma/client';
+import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsEnum,
@@ -12,6 +13,17 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+
+/**
+ * Recorta espacios perimetrales antes de que @IsEmail() evalúe el valor
+ * crudo: sin esto, un email válido con espacios ("  x@x.com  ") sería
+ * rechazado aquí y nunca llegaría a CustomersService, que es quien aplica
+ * trim+lowercase como normalización de dominio (esta función solo recorta;
+ * el paso a minúsculas sigue siendo responsabilidad exclusiva del servicio).
+ */
+function trimEmail({ value }: { value: unknown }): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
 
 /**
  * Solo cubre la creación de clientes normales. id, code, isGeneric, status,
@@ -60,6 +72,7 @@ export class CreateCustomerDto {
 
   @ApiPropertyOptional({ maxLength: 150 })
   @IsOptional()
+  @Transform(trimEmail)
   @IsEmail()
   @MaxLength(150)
   email?: string;

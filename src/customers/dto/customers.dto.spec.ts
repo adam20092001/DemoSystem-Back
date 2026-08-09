@@ -130,6 +130,25 @@ describe('CreateCustomerDto', () => {
     expect(errors.some((error) => error.property === 'email')).toBe(true);
   });
 
+  it('email con espacios perimetrales se recorta antes de @IsEmail() y pasa la validación', async () => {
+    const instance = plainToInstance(CreateCustomerDto, {
+      ...basePerson,
+      email: '  Customer.Email@Example.COM  ',
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+    expect(instance.email).toBe('Customer.Email@Example.COM');
+  });
+
+  it('email de solo espacios no se vuelve válido (recorta a cadena vacía)', async () => {
+    const instance = plainToInstance(CreateCustomerDto, {
+      ...basePerson,
+      email: '   ',
+    });
+    const errors = await validate(instance);
+    expect(errors.some((error) => error.property === 'email')).toBe(true);
+  });
+
   it.each([
     ['name', 151],
     ['tradeName', 151],
@@ -229,6 +248,28 @@ describe('UpdateCustomerDto', () => {
     });
     const errors = await validate(instance);
     expect(errors.some((error) => error.property === 'email')).toBe(true);
+  });
+
+  it('email con espacios perimetrales se recorta antes de @IsEmail() y pasa la validación', async () => {
+    const instance = plainToInstance(UpdateCustomerDto, {
+      email: '  Customer.Email@Example.COM  ',
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+    expect(instance.email).toBe('Customer.Email@Example.COM');
+  });
+
+  it('email de solo espacios no se vuelve válido (recorta a cadena vacía)', async () => {
+    const instance = plainToInstance(UpdateCustomerDto, { email: '   ' });
+    const errors = await validate(instance);
+    expect(errors.some((error) => error.property === 'email')).toBe(true);
+  });
+
+  it('email null sigue siendo válido (limpiar el campo)', async () => {
+    const instance = plainToInstance(UpdateCustomerDto, { email: null });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+    expect(instance.email).toBeNull();
   });
 
   it.each([
