@@ -5,10 +5,12 @@
 // imágenes.
 // Fase 3: movimientos de inventario (InventoryMovement), motor transaccional
 // y endpoints de stock.
-// Fase 4, Bloque A: modelo de clientes (Customer), tipos, etapas y estados,
-// restricciones e índices, y el cliente genérico "Público general". Sin
-// servicio, sin controller, sin endpoints todavía; eso llega en los
-// Bloques B-D.
+// Fase 4: clientes (Customer), tipos, etapas y estados, restricciones e
+// índices, y el cliente genérico "Público general".
+// Fase 5, Bloque A: secuencias de documentos (DocumentSequence) y modelo de
+// cotizaciones (Quote, QuoteItem), snapshots de cliente/producto,
+// restricciones e índices. Sin servicio, sin controller, sin endpoints
+// todavía; eso llega en los Bloques B-D.
 
 generator client {
   provider = "prisma-client-js"
@@ -104,6 +106,10 @@ model User {
   updatedAt           DateTime            @updatedAt @map("updated_at")
   auditLogs           AuditLog[]
   inventoryMovements  InventoryMovement[]
+  // Cotizaciones donde este usuario es el emisor comercial (sellerId =
+  // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
+  // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
+  issuedQuotes        Quote[]
 
   @@index([roleId])
   @@index([status])
@@ -189,6 +195,7 @@ model Product {
   specifications        ProductSpecification[]
   images                ProductImage[]
   movements             InventoryMovement[]
+  quoteItems            QuoteItem[]
   createdAt             DateTime               @default(now()) @map("created_at")
   updatedAt             DateTime               @updatedAt @map("updated_at")
 
@@ -347,9 +354,13 @@ model Customer {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  // Cotizaciones emitidas a este cliente. La identidad del cliente queda
+  // además snapshotada en cada Quote (customerType/customerName/...), así
+  // que editar este registro nunca altera cotizaciones ya emitidas.
+  quotes Quote[]
+
   // Sin deletedAt: no hay borrado físico de clientes con historial (igual
-  // que el resto del dominio). Sin relaciones a cotización/venta/pago
-  // todavía; eso llega en fases futuras.
+  // que el resto del dominio).
   //
   // Las 6 CHECK y el índice único parcial funcional de documento se añaden a
   // mano en migration.sql (el DSL de Prisma no expresa CHECK, WHERE parcial,
@@ -358,4 +369,142 @@ model Customer {
   // customers_generic_code_consistency ya garantizan como máximo una fila.
   @@index([createdAt, id])
   @@map("customers")
+}
+
+// --- Secuencias de documentos y cotizaciones (Fase 5, Bloque A) ------------
+
+// SALE se declara ahora (sin sembrarse) para que la futura Fase de Ventas no
+// requiera migrar el enum, mismo precedente que InventoryMovementOrigin en
+// la Fase 3.
+enum DocumentType {
+  QUOTE
+  SALE
+}
+
+// EXPIRED es principalmente un estado EFECTIVO derivado de fecha (ver
+// Bloque B: effectiveStatus()); la columna status puede persistirlo si en
+// el futuro existiera un proceso que lo consolide, pero la Fase 5 no lo
+// escribe nunca. CONVERTED existe por compatibilidad de esquema con la
+// Fase 6; la Fase 5 no implementa la conversión.
+enum QuoteStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CONVERTED
+}
+
+// Secuencia transaccional mínima para correlativos generados en backend
+// (COT ahora, NV en la Fase 6). Sin CRUD de administración: eso es Fase 10.
+// current_number es el ÚLTIMO número emitido (no el próximo): el Bloque B
+// incrementa primero y luego formatea con el valor resultante.
+model DocumentSequence {
+  id            String       @id @default(uuid()) @db.Uuid
+  documentType  DocumentType @unique @map("document_type")
+  prefix        String       @db.VarChar(10)
+  currentNumber Int          @default(0) @map("current_number")
+  padding       Int          @default(6)
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  // Los 3 CHECK (current_number >= 0, padding entre 1 y 12, prefix no en
+  // blanco) se agregan a mano en migration.sql.
+  @@map("document_sequences")
+}
+
+model Quote {
+  id     String      @id @default(uuid()) @db.Uuid
+  // Generado exclusivamente en backend (DocumentSequenceService, Bloque B);
+  // sin generador/default en la base de datos.
+  number String      @unique @db.VarChar(30)
+  status QuoteStatus @default(PENDING)
+
+  customerId String   @map("customer_id") @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  // Snapshot de identidad del cliente (D4): un cliente válido para cotizar
+  // nunca es el genérico, así que customerType nunca es null aquí (a
+  // diferencia de Customer.customerType, que sí lo permite para "Público
+  // general"). documentType/documentNumber siguen siendo nullable porque un
+  // cliente normal puede legítimamente no tener documento registrado.
+  customerType           CustomerType          @map("customer_type")
+  customerDocumentType   CustomerDocumentType? @map("customer_document_type")
+  customerDocumentNumber String?               @map("customer_document_number") @db.VarChar(32)
+  customerName           String                @map("customer_name") @db.VarChar(150)
+  customerAddress        String?               @map("customer_address") @db.VarChar(300)
+
+  // Emisor comercial: el usuario autenticado que creó la cotización (D12).
+  // No se valida que tenga rol SELLER (un ADMIN también puede emitir); sin
+  // funcionalidad de reasignación en esta fase.
+  sellerId String @map("seller_id") @db.Uuid
+  seller   User   @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  // @db.Date: la vigencia es un concepto de día calendario, sin semántica de
+  // hora ni huso (ver utilidad de fecha de negocio America/Lima, Bloque B).
+  // Sin @default: el Bloque B siempre fija issueDate explícitamente a la
+  // fecha de negocio del momento de creación.
+  issueDate      DateTime @map("issue_date") @db.Date
+  expirationDate DateTime @map("expiration_date") @db.Date
+
+  subtotal       Decimal @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  // Siempre 0.00 en la Fase 5 (D5): IGV configurable llega en la Fase 10.
+  // Presente desde ahora para que activar el impuesto sea aditivo.
+  taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  total          Decimal @db.Decimal(14, 2)
+
+  notes String?     @db.VarChar(1000)
+  items QuoteItem[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Sin deletedAt: una cotización se rechaza, no se borra. Sin relación a
+  // Sale todavía: la Fase 6 añadirá Sale.quoteId @unique (aditivo).
+  //
+  // Los 9 CHECK de cabecera se agregan a mano en migration.sql (aritmética
+  // exacta, par de documento del snapshot, etc.).
+  @@index([customerId, createdAt])
+  @@index([sellerId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt, id])
+  @@index([expirationDate])
+  @@index([issueDate])
+  @@map("quotes")
+}
+
+model QuoteItem {
+  id      String @id @default(uuid()) @db.Uuid
+  quoteId String @map("quote_id") @db.Uuid
+  quote   Quote  @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  // Snapshot exigido por el documento maestro: nombre, SKU, unidad y precio.
+  // Un QuoteItem histórico conserva estos valores aunque el producto cambie
+  // de nombre, precio o se desactive después.
+  productSku       String @map("product_sku") @db.VarChar(40)
+  productName      String @map("product_name") @db.VarChar(150)
+  unitCode         String @map("unit_code") @db.VarChar(15)
+  unitName         String @map("unit_name") @db.VarChar(60)
+  unitAbbreviation String @map("unit_abbreviation") @db.VarChar(10)
+
+  quantity  Decimal @db.Decimal(14, 3)
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: un QuoteItem inmutable individualmente — la edición de
+  // Fase 5 reemplaza el conjunto completo de ítems (Bloque B), nunca un
+  // ítem suelto.
+  //
+  // D13: como máximo un ítem por producto por cotización. quoteId como
+  // prefijo izquierdo de este único compuesto ya cubre "cargar ítems de una
+  // cotización"; no se agrega un @@index([quoteId]) adicional (redundante).
+  // Los 3 CHECK (quantity > 0, unit_price >= 0, line_total >= 0) y el CHECK
+  // condicional de aritmética exacta se agregan a mano en migration.sql.
+  @@unique([quoteId, productId])
+  @@index([productId])
+  @@map("quote_items")
 }
