@@ -61,6 +61,11 @@ export function setupSwagger(app: INestApplication): boolean {
       'Customers',
       'Clientes y prospectos, incluido el cliente genérico "Público general"',
     )
+    .addTag(
+      'Quotes',
+      'Cotizaciones: propuestas comerciales que no reservan ni descuentan stock. ' +
+        'La conversión a venta pertenece a una fase posterior.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);

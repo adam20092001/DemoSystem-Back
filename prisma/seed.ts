@@ -1,4 +1,10 @@
-import { CustomerStage, CustomerStatus, PrismaClient, RoleName } from '@prisma/client';
+import {
+  CustomerStage,
+  CustomerStatus,
+  DocumentType,
+  PrismaClient,
+  RoleName,
+} from '@prisma/client';
 import { assertPasswordPolicy } from '../src/common/security/password-policy';
 import { hashPassword } from '../src/common/security/password.service';
 
@@ -196,12 +202,36 @@ async function seedGenericCustomer(): Promise<void> {
   console.log('Cliente genérico verificado: Público general (PUBLIC_GENERAL)');
 }
 
+/**
+ * Secuencia del correlativo COT (Fase 5, Bloque A). `update: {}` a propósito
+ * (igual que seedCategories()/seedUnits()): a diferencia del cliente
+ * genérico, current_number/prefix/padding son configuración operativa, no
+ * invariantes de dominio protegidas. Reejecutar el seed jamás debe tocar
+ * current_number — una vez emitido un COT, retroceder el contador
+ * produciría números duplicados. El upsert por documentType solo garantiza
+ * que la fila exista la primera vez; después queda intacta.
+ */
+async function seedDocumentSequences(): Promise<void> {
+  await prisma.documentSequence.upsert({
+    where: { documentType: DocumentType.QUOTE },
+    update: {},
+    create: {
+      documentType: DocumentType.QUOTE,
+      prefix: 'COT-',
+      currentNumber: 0,
+      padding: 6,
+    },
+  });
+  console.log('Secuencia de documento verificada: QUOTE (COT-)');
+}
+
 async function main(): Promise<void> {
   await seedRoles();
   await seedInitialAdmin();
   await seedCategories();
   await seedUnits();
   await seedGenericCustomer();
+  await seedDocumentSequences();
 }
 
 main()
