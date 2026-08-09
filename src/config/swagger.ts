@@ -57,6 +57,10 @@ export function setupSwagger(app: INestApplication): boolean {
       'Inventory',
       'Movimientos de stock, kardex, stock actual y stock bajo',
     )
+    .addTag(
+      'Customers',
+      'Clientes y prospectos, incluido el cliente genérico "Público general"',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
