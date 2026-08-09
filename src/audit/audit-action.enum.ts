@@ -7,6 +7,9 @@
  * resueltas internamente por StockMovementEngine (nunca por el DTO/
  * controller): no existen acciones para SALE/SALE_CANCELLATION/PURCHASE/
  * RETURN/REVERSAL porque esos orígenes/movimientos no se emiten en esta fase.
+ * Las de CUSTOMER_ se usan desde la Fase 4, Bloque B; el cliente genérico
+ * "Público general" nunca las genera (todos los métodos de mutación lo
+ * rechazan con 409).
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -39,4 +42,11 @@ export enum AuditAction {
   INVENTORY_EXIT_CREATED = 'INVENTORY_EXIT_CREATED',
   INVENTORY_ADJUSTMENT_IN_CREATED = 'INVENTORY_ADJUSTMENT_IN_CREATED',
   INVENTORY_ADJUSTMENT_OUT_CREATED = 'INVENTORY_ADJUSTMENT_OUT_CREATED',
+  CUSTOMER_CREATED = 'CUSTOMER_CREATED',
+  CUSTOMER_UPDATED = 'CUSTOMER_UPDATED',
+  CUSTOMER_ACTIVATED = 'CUSTOMER_ACTIVATED',
+  CUSTOMER_DEACTIVATED = 'CUSTOMER_DEACTIVATED',
+  CUSTOMER_BLOCKED = 'CUSTOMER_BLOCKED',
+  CUSTOMER_UNBLOCKED = 'CUSTOMER_UNBLOCKED',
+  CUSTOMER_STAGE_CHANGED = 'CUSTOMER_STAGE_CHANGED',
 }

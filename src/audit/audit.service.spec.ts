@@ -213,4 +213,79 @@ describe('sanitizeAuditMetadata', () => {
       });
     },
   );
+
+  it('CUSTOMER_CREATED conserva customerType/customerStage/documentType y descarta PII', () => {
+    const metadata = {
+      customerType: 'PERSON',
+      customerStage: 'PROSPECT',
+      documentType: 'DNI',
+      documentNumber: '12345678',
+      name: 'Juan Pérez',
+      email: 'juan@example.com',
+      phone: '999999999',
+      internalNotes: 'nota sensible',
+    } as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.CUSTOMER_CREATED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      customerType: 'PERSON',
+      customerStage: 'PROSPECT',
+      documentType: 'DNI',
+    });
+  });
+
+  it('CUSTOMER_UPDATED conserva solo updatedFields y descarta PII/desconocidas', () => {
+    const metadata = {
+      updatedFields: ['name', 'phone'],
+      name: 'Juan Pérez',
+      phone: '999999999',
+      unexpectedField: 'algo',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.CUSTOMER_UPDATED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({ updatedFields: ['name', 'phone'] });
+  });
+
+  it.each([
+    AuditAction.CUSTOMER_ACTIVATED,
+    AuditAction.CUSTOMER_DEACTIVATED,
+    AuditAction.CUSTOMER_BLOCKED,
+    AuditAction.CUSTOMER_UNBLOCKED,
+  ])('%s conserva solo previousStatus', (action) => {
+    const metadata = {
+      previousStatus: 'ACTIVE',
+      name: 'Juan Pérez',
+      documentNumber: '12345678',
+    } as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(action, metadata);
+
+    expect(sanitized).toEqual({ previousStatus: 'ACTIVE' });
+  });
+
+  it('CUSTOMER_STAGE_CHANGED conserva previousStage y customerStage', () => {
+    const metadata = {
+      previousStage: 'PROSPECT',
+      customerStage: 'CUSTOMER',
+      name: 'Juan Pérez',
+    } as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.CUSTOMER_STAGE_CHANGED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      previousStage: 'PROSPECT',
+      customerStage: 'CUSTOMER',
+    });
+  });
 });
