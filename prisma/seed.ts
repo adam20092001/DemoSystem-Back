@@ -203,13 +203,14 @@ async function seedGenericCustomer(): Promise<void> {
 }
 
 /**
- * Secuencia del correlativo COT (Fase 5, Bloque A). `update: {}` a propósito
- * (igual que seedCategories()/seedUnits()): a diferencia del cliente
- * genérico, current_number/prefix/padding son configuración operativa, no
- * invariantes de dominio protegidas. Reejecutar el seed jamás debe tocar
- * current_number — una vez emitido un COT, retroceder el contador
- * produciría números duplicados. El upsert por documentType solo garantiza
- * que la fila exista la primera vez; después queda intacta.
+ * Secuencias de correlativos COT (Fase 5) y NV (Fase 6, Bloque A). `update:
+ * {}` a propósito en ambas (igual que seedCategories()/seedUnits()): a
+ * diferencia del cliente genérico, current_number/prefix/padding son
+ * configuración operativa, no invariantes de dominio protegidas. Reejecutar
+ * el seed jamás debe tocar current_number — una vez emitido un COT o NV,
+ * retroceder el contador produciría números duplicados. El upsert por
+ * documentType solo garantiza que la fila exista la primera vez; después
+ * queda intacta.
  */
 async function seedDocumentSequences(): Promise<void> {
   await prisma.documentSequence.upsert({
@@ -223,6 +224,21 @@ async function seedDocumentSequences(): Promise<void> {
     },
   });
   console.log('Secuencia de documento verificada: QUOTE (COT-)');
+
+  // Secuencia del correlativo NV (Fase 6, Bloque A). Mismo criterio exacto
+  // que QUOTE: update: {} para no tocar jamás current_number en una
+  // reejecución del seed.
+  await prisma.documentSequence.upsert({
+    where: { documentType: DocumentType.SALE },
+    update: {},
+    create: {
+      documentType: DocumentType.SALE,
+      prefix: 'NV-',
+      currentNumber: 0,
+      padding: 6,
+    },
+  });
+  console.log('Secuencia de documento verificada: SALE (NV-)');
 }
 
 async function main(): Promise<void> {
