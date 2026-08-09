@@ -1,4 +1,4 @@
-import { PrismaClient, RoleName } from '@prisma/client';
+import { CustomerStage, CustomerStatus, PrismaClient, RoleName } from '@prisma/client';
 import { assertPasswordPolicy } from '../src/common/security/password-policy';
 import { hashPassword } from '../src/common/security/password.service';
 
@@ -160,11 +160,48 @@ async function seedUnits(): Promise<void> {
   console.log(`Unidades verificadas: ${SEED_UNITS.length}`);
 }
 
+/**
+ * Cliente genérico "Público general" (Fase 4, Bloque A). A diferencia del
+ * resto de seeds de este archivo, el `update` NO está vacío: los valores de
+ * sistema del genérico (nombre, isGeneric, ausencia de tipo/documento,
+ * etapa y estado) son invariantes de dominio, no datos editables por un
+ * administrador, así que cada ejecución del seed los restaura si alguien
+ * los alteró directamente en la base. Los campos de contacto opcionales
+ * (tradeName, contactName, phone, email, address, internalNotes) no se
+ * tocan en el update para no pisar anotaciones legítimas.
+ */
+async function seedGenericCustomer(): Promise<void> {
+  await prisma.customer.upsert({
+    where: { code: 'PUBLIC_GENERAL' },
+    update: {
+      name: 'Público general',
+      isGeneric: true,
+      customerType: null,
+      customerStage: CustomerStage.CUSTOMER,
+      status: CustomerStatus.ACTIVE,
+      documentType: null,
+      documentNumber: null,
+    },
+    create: {
+      code: 'PUBLIC_GENERAL',
+      name: 'Público general',
+      isGeneric: true,
+      customerType: null,
+      customerStage: CustomerStage.CUSTOMER,
+      status: CustomerStatus.ACTIVE,
+      documentType: null,
+      documentNumber: null,
+    },
+  });
+  console.log('Cliente genérico verificado: Público general (PUBLIC_GENERAL)');
+}
+
 async function main(): Promise<void> {
   await seedRoles();
   await seedInitialAdmin();
   await seedCategories();
   await seedUnits();
+  await seedGenericCustomer();
 }
 
 main()
