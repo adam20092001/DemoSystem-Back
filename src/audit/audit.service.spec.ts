@@ -288,4 +288,77 @@ describe('sanitizeAuditMetadata', () => {
       customerStage: 'CUSTOMER',
     });
   });
+
+  it('QUOTE_CREATED conserva quoteNumber/customerId/itemCount y descarta PII', () => {
+    const metadata = {
+      quoteNumber: 'COT-000001',
+      customerId: 'customer-1',
+      itemCount: 3,
+      customerName: 'Juan Pérez',
+      customerDocumentNumber: '12345678',
+      customerAddress: 'Av. Siempre Viva 123',
+      notes: 'Nota comercial sensible',
+      subtotal: '100.00',
+      discountAmount: '10.00',
+      taxAmount: '0.00',
+      total: '90.00',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.QUOTE_CREATED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      quoteNumber: 'COT-000001',
+      customerId: 'customer-1',
+      itemCount: 3,
+    });
+  });
+
+  it('QUOTE_UPDATED conserva quoteNumber/updatedFields/itemCount y descarta payload de ítems', () => {
+    const metadata = {
+      quoteNumber: 'COT-000002',
+      updatedFields: ['expirationDate', 'items'],
+      itemCount: 2,
+      items: [{ productName: 'Producto X', productSku: 'SKU-1' }],
+      productName: 'Producto X',
+      productSku: 'SKU-1',
+      subtotal: '50.00',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.QUOTE_UPDATED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      quoteNumber: 'COT-000002',
+      updatedFields: ['expirationDate', 'items'],
+      itemCount: 2,
+    });
+  });
+
+  it.each([AuditAction.QUOTE_ACCEPTED, AuditAction.QUOTE_REJECTED])(
+    '%s conserva solo quoteNumber/previousStatus y descarta montos/PII',
+    (action) => {
+      const metadata = {
+        quoteNumber: 'COT-000003',
+        previousStatus: 'PENDING',
+        customerName: 'Juan Pérez',
+        total: '90.00',
+        discountAmount: '10.00',
+        taxAmount: '0.00',
+        subtotal: '100.00',
+        unexpectedField: 'algo',
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(action, metadata);
+
+      expect(sanitized).toEqual({
+        quoteNumber: 'COT-000003',
+        previousStatus: 'PENDING',
+      });
+    },
+  );
 });

@@ -151,6 +151,14 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.CUSTOMER_BLOCKED]: ['previousStatus'],
   [AuditAction.CUSTOMER_UNBLOCKED]: ['previousStatus'],
   [AuditAction.CUSTOMER_STAGE_CHANGED]: ['previousStage', 'customerStage'],
+  // Nunca se audita PII de cliente (nombre/documento/dirección), payload de
+  // ítems, nombres/SKU de producto ni ningún monto (subtotal/discount/tax/
+  // total): la fila de Quote ya los conserva; el log solo necesita
+  // trazabilidad estructural.
+  [AuditAction.QUOTE_CREATED]: ['quoteNumber', 'customerId', 'itemCount'],
+  [AuditAction.QUOTE_UPDATED]: ['quoteNumber', 'updatedFields', 'itemCount'],
+  [AuditAction.QUOTE_ACCEPTED]: ['quoteNumber', 'previousStatus'],
+  [AuditAction.QUOTE_REJECTED]: ['quoteNumber', 'previousStatus'],
 };
 
 /**

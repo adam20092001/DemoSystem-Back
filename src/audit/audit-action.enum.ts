@@ -9,7 +9,11 @@
  * RETURN/REVERSAL porque esos orígenes/movimientos no se emiten en esta fase.
  * Las de CUSTOMER_ se usan desde la Fase 4, Bloque B; el cliente genérico
  * "Público general" nunca las genera (todos los métodos de mutación lo
- * rechazan con 409).
+ * rechazan con 409). Las de QUOTE_ se usan desde la Fase 5, Bloque B:
+ * QUOTE_CREATED/UPDATED/ACCEPTED/REJECTED. No existen QUOTE_EXPIRED (el
+ * vencimiento es un estado efectivo derivado, nunca persistido/escrito por
+ * ningún método de esta fase) ni QUOTE_CONVERTED (la conversión real es de
+ * la Fase 6; no hay evento que la produzca todavía).
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -49,4 +53,8 @@ export enum AuditAction {
   CUSTOMER_BLOCKED = 'CUSTOMER_BLOCKED',
   CUSTOMER_UNBLOCKED = 'CUSTOMER_UNBLOCKED',
   CUSTOMER_STAGE_CHANGED = 'CUSTOMER_STAGE_CHANGED',
+  QUOTE_CREATED = 'QUOTE_CREATED',
+  QUOTE_UPDATED = 'QUOTE_UPDATED',
+  QUOTE_ACCEPTED = 'QUOTE_ACCEPTED',
+  QUOTE_REJECTED = 'QUOTE_REJECTED',
 }
