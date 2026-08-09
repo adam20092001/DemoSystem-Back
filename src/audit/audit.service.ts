@@ -138,6 +138,19 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'movementType',
     'origin',
   ],
+  // Nunca se audita PII (documentNumber, name, tradeName, contactName,
+  // email, phone, address, internalNotes): solo metadatos estructurales.
+  [AuditAction.CUSTOMER_CREATED]: [
+    'customerType',
+    'customerStage',
+    'documentType',
+  ],
+  [AuditAction.CUSTOMER_UPDATED]: ['updatedFields'],
+  [AuditAction.CUSTOMER_ACTIVATED]: ['previousStatus'],
+  [AuditAction.CUSTOMER_DEACTIVATED]: ['previousStatus'],
+  [AuditAction.CUSTOMER_BLOCKED]: ['previousStatus'],
+  [AuditAction.CUSTOMER_UNBLOCKED]: ['previousStatus'],
+  [AuditAction.CUSTOMER_STAGE_CHANGED]: ['previousStage', 'customerStage'],
 };
 
 /**

@@ -3,9 +3,12 @@
 // Fase 1: roles, usuarios y auditoría mínima.
 // Fase 2: catálogo — categorías, unidades, productos, especificaciones e
 // imágenes.
-// Fase 3, Bloque A: modelo de movimientos de inventario (InventoryMovement),
-// restricciones e índices. Sin servicio, sin motor transaccional, sin
-// endpoints todavía; eso llega en los Bloques B-D.
+// Fase 3: movimientos de inventario (InventoryMovement), motor transaccional
+// y endpoints de stock.
+// Fase 4, Bloque A: modelo de clientes (Customer), tipos, etapas y estados,
+// restricciones e índices, y el cliente genérico "Público general". Sin
+// servicio, sin controller, sin endpoints todavía; eso llega en los
+// Bloques B-D.
 
 generator client {
   provider = "prisma-client-js"
@@ -275,4 +278,84 @@ model InventoryMovement {
   @@index([createdAt])
   @@index([createdByUserId, createdAt])
   @@map("inventory_movements")
+}
+
+// --- Clientes (Fase 4, Bloque A) --------------------------------------------
+
+enum CustomerType {
+  PERSON
+  COMPANY
+}
+
+enum CustomerStage {
+  PROSPECT
+  CUSTOMER
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum CustomerDocumentType {
+  DNI
+  RUC
+  CE
+  PASSPORT
+  OTHER
+}
+
+model Customer {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Gestionado por el sistema: nunca aceptado en un DTO de escritura. null
+  // para todo cliente normal de esta fase (sin generador de correlativos
+  // CUS-000001 todavía, eso es responsabilidad de la Fase 10); el único
+  // valor no nulo en esta fase es 'PUBLIC_GENERAL', reservado para el
+  // cliente genérico (ver CHECK customers_generic_code_consistency).
+  code String? @unique @db.VarChar(30)
+
+  // Nullable únicamente porque el cliente genérico "Público general" no
+  // tiene tipo (ver CHECK customers_type_generic_consistency). Todo cliente
+  // normal exige un valor explícito.
+  customerType CustomerType? @map("customer_type")
+
+  // Sin @default: un prospecto vs. un cliente es una decisión comercial que
+  // el llamador siempre debe declarar explícitamente (mismo criterio que
+  // InventoryMovement.origin en la Fase 3). PROSPECT -> CUSTOMER es la única
+  // transición permitida; CUSTOMER -> PROSPECT no existe en ningún endpoint.
+  customerStage CustomerStage @map("customer_stage")
+
+  documentType   CustomerDocumentType? @map("document_type")
+  documentNumber String?               @map("document_number") @db.VarChar(32)
+
+  name          String  @db.VarChar(150)
+  tradeName     String? @map("trade_name") @db.VarChar(150)
+  contactName   String? @map("contact_name") @db.VarChar(120)
+  phone         String? @db.VarChar(30)
+  email         String? @db.VarChar(150)
+  address       String? @db.VarChar(300)
+  internalNotes String? @map("internal_notes") @db.VarChar(1000)
+
+  // Identifica estructuralmente a "Público general": la aplicación nunca
+  // debe resolverlo comparando name o code.
+  isGeneric Boolean @default(false) @map("is_generic")
+
+  status CustomerStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Sin deletedAt: no hay borrado físico de clientes con historial (igual
+  // que el resto del dominio). Sin relaciones a cotización/venta/pago
+  // todavía; eso llega en fases futuras.
+  //
+  // Las 6 CHECK y el índice único parcial funcional de documento se añaden a
+  // mano en migration.sql (el DSL de Prisma no expresa CHECK, WHERE parcial,
+  // UPPER() ni BTRIM()), igual que en las Fases 2 y 3. No se crea un índice
+  // único parcial adicional para el genérico: code @unique +
+  // customers_generic_code_consistency ya garantizan como máximo una fila.
+  @@index([createdAt, id])
+  @@map("customers")
 }
