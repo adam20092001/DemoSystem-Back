@@ -10,6 +10,7 @@ import { HealthModule } from './health/health.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { ProductsModule } from './products/products.module';
 import { QuotesModule } from './quotes/quotes.module';
+import { SalesModule } from './sales/sales.module';
 import { UnitsModule } from './units/units.module';
 import { UsersModule } from './users/users.module';
 
@@ -31,6 +32,7 @@ import { UsersModule } from './users/users.module';
     InventoryModule,
     CustomersModule,
     QuotesModule,
+    SalesModule,
     HealthModule,
   ],
 })
