@@ -361,4 +361,116 @@ describe('sanitizeAuditMetadata', () => {
       });
     },
   );
+
+  it('SALE_CONFIRMED (DIRECT) conserva saleNumber/source/itemCount, sin quoteId ni montos/PII', () => {
+    const metadata = {
+      saleNumber: 'NV-000001',
+      source: 'DIRECT',
+      itemCount: 2,
+      customerName: 'Juan Pérez',
+      customerDocumentNumber: '12345678',
+      productName: 'Producto X',
+      items: [{ productSku: 'SKU-1' }],
+      subtotal: '100.00',
+      discountAmount: '10.00',
+      taxAmount: '0.00',
+      total: '90.00',
+      paidAmount: '0.00',
+      balanceDue: '90.00',
+      stockCurrent: '5.000',
+      payment: { method: 'CASH' },
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.SALE_CONFIRMED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleNumber: 'NV-000001',
+      source: 'DIRECT',
+      itemCount: 2,
+    });
+  });
+
+  it('SALE_CONFIRMED (QUOTE) conserva quoteId cuando el llamador lo incluye', () => {
+    const metadata = {
+      saleNumber: 'NV-000002',
+      source: 'QUOTE',
+      quoteId: 'quote-1',
+      itemCount: 1,
+      customerAddress: 'Av. Siempre Viva 123',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.SALE_CONFIRMED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleNumber: 'NV-000002',
+      source: 'QUOTE',
+      quoteId: 'quote-1',
+      itemCount: 1,
+    });
+  });
+
+  it('SALE_CANCELLED conserva solo saleNumber/previousStatus, sin el motivo de anulación', () => {
+    const metadata = {
+      saleNumber: 'NV-000003',
+      previousStatus: 'ACTIVE',
+      cancellationReason: 'Cliente se arrepintió del pedido',
+      notes: 'algo',
+      unexpectedField: 'x',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.SALE_CANCELLED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleNumber: 'NV-000003',
+      previousStatus: 'ACTIVE',
+    });
+  });
+
+  it('SALE_DELIVERY_STATUS_CHANGED conserva saleNumber/previousDeliveryStatus/deliveryStatus', () => {
+    const metadata = {
+      saleNumber: 'NV-000004',
+      previousDeliveryStatus: 'PENDING',
+      deliveryStatus: 'DELIVERED',
+      customerName: 'Juan Pérez',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleNumber: 'NV-000004',
+      previousDeliveryStatus: 'PENDING',
+      deliveryStatus: 'DELIVERED',
+    });
+  });
+
+  it('QUOTE_CONVERTED conserva solo quoteNumber/saleNumber', () => {
+    const metadata = {
+      quoteNumber: 'COT-000005',
+      saleNumber: 'NV-000005',
+      customerName: 'Juan Pérez',
+      total: '90.00',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.QUOTE_CONVERTED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      quoteNumber: 'COT-000005',
+      saleNumber: 'NV-000005',
+    });
+  });
 });

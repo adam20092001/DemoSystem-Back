@@ -128,8 +128,22 @@ export class StockMovementEngine {
       throw new NotFoundException('Producto no encontrado');
     }
 
-    this.validateLockedProduct(locked);
-    this.validateQuantityAgainstUnit(command.quantity, locked.allowDecimal);
+    // La reversa histórica de una venta anulada (Fase 6, D22 aprobado) es
+    // autoritativa por sí misma: el movimiento SALE original ya demostró
+    // que ese producto/cantidad se descontó legítimamente en su momento. El
+    // estado comercial VIGENTE del catálogo (activo/categoría/unidad/tipo
+    // SERVICE/seguimiento de inventario, incluida allowDecimal) no es motivo
+    // válido para impedir una reversa histórica. Bypass exclusivo de
+    // SALE_CANCELLATION: ningún otro origen actual o futuro (ni siquiera
+    // SALE, que sigue exigiendo catálogo vigente activo) omite estas dos
+    // validaciones. Todo lo demás del método (forma/rango de quantity,
+    // combinación origin/movementType, par de referencia, aritmética y
+    // límites de stock) se sigue evaluando exactamente igual para
+    // SALE_CANCELLATION que para cualquier otro origen.
+    if (command.origin !== InventoryMovementOrigin.SALE_CANCELLATION) {
+      this.validateLockedProduct(locked);
+      this.validateQuantityAgainstUnit(command.quantity, locked.allowDecimal);
+    }
 
     if (command.origin === InventoryMovementOrigin.INITIAL_BALANCE) {
       await this.validateInitialBalance(

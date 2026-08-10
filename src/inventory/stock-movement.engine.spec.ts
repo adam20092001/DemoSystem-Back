@@ -527,6 +527,205 @@ describe('StockMovementEngine', () => {
       expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
       expect(auditService.record).not.toHaveBeenCalled();
     });
+
+    it('origin SALE (venta normal) también rechaza producto/categoría/unidad inactivos, igual que MANUAL', async () => {
+      setupLock(makeLockedRow({ productStatus: ProductStatus.INACTIVE }));
+
+      const error = await captureError(
+        makeCommand({
+          origin: InventoryMovementOrigin.SALE,
+          movementType: InventoryMovementType.EXIT,
+          referenceType: 'Sale',
+          referenceId: 'sale-1',
+        }),
+      );
+
+      assertErrorType(error, 'Conflict');
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('origin SALE también rechaza SERVICE/no inventariado/allowDecimal, igual que MANUAL', async () => {
+      setupLock(
+        makeLockedRow({
+          productType: ProductType.SERVICE,
+        }),
+      );
+
+      const error = await captureError(
+        makeCommand({
+          origin: InventoryMovementOrigin.SALE,
+          movementType: InventoryMovementType.EXIT,
+          referenceType: 'Sale',
+          referenceId: 'sale-1',
+        }),
+      );
+
+      assertErrorType(error, 'BadRequest');
+    });
+  });
+
+  /**
+   * D22 aprobado (Fase 6, Bloque B): la reversa histórica de una venta
+   * anulada (SALE_CANCELLATION) debe restituir stock a pesar del estado
+   * comercial VIGENTE del catálogo, porque el movimiento SALE original ya
+   * demostró la legitimidad histórica. El bypass es EXCLUSIVO de este
+   * origen; el bloque anterior ya prueba que SALE (venta normal) sigue
+   * exigiendo catálogo activo.
+   */
+  describe('reversa histórica de venta anulada (SALE_CANCELLATION)', () => {
+    function reversalCommand(
+      overrides: Partial<StockMovementCommand> = {},
+    ): StockMovementCommand {
+      return makeCommand({
+        origin: InventoryMovementOrigin.SALE_CANCELLATION,
+        movementType: InventoryMovementType.ENTRY,
+        referenceType: 'Sale',
+        referenceId: 'sale-1',
+        ...overrides,
+      });
+    }
+
+    it('permite la reversa aunque el producto esté INACTIVE', async () => {
+      setupLock(makeLockedRow({ productStatus: ProductStatus.INACTIVE }));
+      tx.inventoryMovement.create.mockResolvedValue(
+        makeMovementRow({
+          origin: InventoryMovementOrigin.SALE_CANCELLATION,
+        }),
+      );
+
+      await expect(
+        engine.apply(txClient, reversalCommand()),
+      ).resolves.toBeDefined();
+      expect(tx.product.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('permite la reversa aunque la categoría esté INACTIVE', async () => {
+      setupLock(makeLockedRow({ categoryStatus: CategoryStatus.INACTIVE }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, reversalCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('permite la reversa aunque la unidad esté INACTIVE', async () => {
+      setupLock(makeLockedRow({ unitStatus: UnitStatus.INACTIVE }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, reversalCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('permite la reversa fraccionaria aunque allowDecimal ahora sea false', async () => {
+      setupLock(makeLockedRow({ allowDecimal: false }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(
+          txClient,
+          reversalCommand({ quantity: new Prisma.Decimal('1.500') }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    it('permite la reversa aunque isInventoryTracked ahora sea false', async () => {
+      setupLock(makeLockedRow({ isInventoryTracked: false }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, reversalCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('permite la reversa aunque el producto ahora sea SERVICE', async () => {
+      setupLock(makeLockedRow({ productType: ProductType.SERVICE }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, reversalCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('producto inexistente sigue siendo 404 incluso en reversa histórica', async () => {
+      tx.$queryRaw.mockResolvedValue([]);
+
+      const error = await captureError(reversalCommand());
+
+      assertErrorType(error, 'NotFound');
+    });
+
+    it('quantity inválida (0) sigue rechazándose en reversa histórica, antes del lock', async () => {
+      const error = await captureError(
+        reversalCommand({ quantity: new Prisma.Decimal(0) }),
+      );
+
+      assertErrorType(error, 'BadRequest');
+      expect(tx.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('EXIT + SALE_CANCELLATION sigue siendo una combinación inválida (solo ENTRY)', async () => {
+      const error = await captureError(
+        reversalCommand({ movementType: InventoryMovementType.EXIT }),
+      );
+
+      assertErrorType(error, 'BadRequest');
+      expect(tx.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('referencia incompleta sigue rechazándose en reversa histórica', async () => {
+      const error = await captureError(
+        reversalCommand({ referenceType: 'Sale', referenceId: null }),
+      );
+
+      assertErrorType(error, 'BadRequest');
+      expect(tx.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('desbordamiento de MAX_STOCK_VALUE sigue rechazándose en reversa histórica', async () => {
+      setupLock(makeLockedRow({ stockCurrent: MAX_STOCK_VALUE }));
+
+      const error = await captureError(
+        reversalCommand({ quantity: new Prisma.Decimal('1.000') }),
+      );
+
+      assertErrorType(error, 'Conflict');
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('suma la cantidad al stock ACTUAL (no restaura previousStock original)', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('7.000') }));
+      tx.inventoryMovement.create.mockResolvedValue(
+        makeMovementRow({
+          origin: InventoryMovementOrigin.SALE_CANCELLATION,
+          previousStock: new Prisma.Decimal('7.000'),
+          newStock: new Prisma.Decimal('10.000'),
+        }),
+      );
+
+      await engine.apply(
+        txClient,
+        reversalCommand({ quantity: new Prisma.Decimal('3.000') }),
+      );
+
+      const updateArgs = tx.product.update.mock.calls[0][0];
+      expect(
+        updateArgs.data.stockCurrent.equals(new Prisma.Decimal('10')),
+      ).toBe(true);
+    });
+
+    it('resuelve INVENTORY_ENTRY_CREATED (misma acción que un ENTRY normal)', async () => {
+      setupLock();
+      tx.inventoryMovement.create.mockResolvedValue(
+        makeMovementRow({ origin: InventoryMovementOrigin.SALE_CANCELLATION }),
+      );
+
+      await engine.apply(txClient, reversalCommand());
+
+      expect(auditService.record.mock.calls[0][0].action).toBe(
+        AuditAction.INVENTORY_ENTRY_CREATED,
+      );
+    });
   });
 
   describe('saldo inicial', () => {

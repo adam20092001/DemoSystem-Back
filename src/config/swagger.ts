@@ -66,6 +66,14 @@ export function setupSwagger(app: INestApplication): boolean {
       'Cotizaciones: propuestas comerciales que no reservan ni descuentan stock. ' +
         'La conversión a venta pertenece a una fase posterior.',
     )
+    .addTag(
+      'Sales',
+      'Ventas directas o desde cotización: confirmación inmediata (sin borrador), ' +
+        'descuento real de stock, anulación con reversa histórica y nota de venta ' +
+        'interna no fiscal. Los campos de resumen de pago (paymentStatus/paidAmount/' +
+        'balanceDue) preparan la integración con Pagos de una fase posterior; ' +
+        'todavía no existe ningún endpoint de registro de pagos.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);

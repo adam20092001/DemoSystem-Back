@@ -11,6 +11,12 @@
 // cotizaciones (Quote, QuoteItem), snapshots de cliente/producto,
 // restricciones e índices. Sin servicio, sin controller, sin endpoints
 // todavía; eso llega en los Bloques B-D.
+// Fase 6, Bloque A: modelo de ventas (Sale, SaleItem), snapshot de cliente
+// (con customerType nullable por Público general), relación opcional y
+// única con Quote, campos resumen de pago preparados para la Fase 7
+// (paymentStatus/paidAmount/balanceDue, sin modelo Payment todavía),
+// restricciones e índices. Sin servicio, sin controller, sin endpoints
+// todavía; eso llega en los Bloques B-D.
 
 generator client {
   provider = "prisma-client-js"
@@ -110,6 +116,12 @@ model User {
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
   issuedQuotes        Quote[]
+  // Ventas donde este usuario es el vendedor (D10, Fase 6): directa = actor
+  // autenticado; desde cotización = Quote.sellerId (no necesariamente quien
+  // ejecuta la conversión). Dos relaciones nombradas porque Sale referencia
+  // User dos veces (vendedor y quien anula).
+  soldSales           Sale[]              @relation("SaleSeller")
+  cancelledSales      Sale[]              @relation("SaleCancelledBy")
 
   @@index([roleId])
   @@index([status])
@@ -196,6 +208,7 @@ model Product {
   images                ProductImage[]
   movements             InventoryMovement[]
   quoteItems            QuoteItem[]
+  saleItems             SaleItem[]
   createdAt             DateTime               @default(now()) @map("created_at")
   updatedAt             DateTime               @updatedAt @map("updated_at")
 
@@ -358,6 +371,9 @@ model Customer {
   // además snapshotada en cada Quote (customerType/customerName/...), así
   // que editar este registro nunca altera cotizaciones ya emitidas.
   quotes Quote[]
+  // Ventas de este cliente. Igual que Quote, la identidad queda snapshotada
+  // en cada Sale (Fase 6).
+  sales  Sale[]
 
   // Sin deletedAt: no hay borrado físico de clientes con historial (igual
   // que el resto del dominio).
@@ -458,8 +474,14 @@ model Quote {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  // Sin deletedAt: una cotización se rechaza, no se borra. Sin relación a
-  // Sale todavía: la Fase 6 añadirá Sale.quoteId @unique (aditivo).
+  // Venta generada a partir de esta cotización (Fase 6): a lo sumo una,
+  // impuesta por Sale.quoteId @unique. null mientras no se haya convertido.
+  // Tras una conversión exitosa, Quote.status pasa a CONVERTED en la misma
+  // transacción (Bloque B de la Fase 6); esta relación nunca se usa para
+  // reabrir ni reutilizar la cotización.
+  sale Sale?
+
+  // Sin deletedAt: una cotización se rechaza, no se borra.
   //
   // Los 9 CHECK de cabecera se agregan a mano en migration.sql (aritmética
   // exacta, par de documento del snapshot, etc.).
@@ -507,4 +529,154 @@ model QuoteItem {
   @@unique([quoteId, productId])
   @@index([productId])
   @@map("quote_items")
+}
+
+// --- Ventas / POS (Fase 6, Bloque A) ----------------------------------------
+
+enum SaleStatus {
+  ACTIVE
+  CANCELLED
+}
+
+// Resumen de pago de la venta. UNPAID/PAID son los únicos valores que el
+// servicio de la Fase 6 produce (D1, D18): sin modelo Payment todavía,
+// ninguna venta puede terminar en PARTIALLY_PAID de forma operativa.
+// PARTIALLY_PAID existe para que la Fase 7 no requiera migrar el enum: una
+// vez exista Payment, este campo se recalculará transaccionalmente desde los
+// pagos ACTIVE.
+enum SalePaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+
+// NOT_APPLICABLE: ningún ítem de la venta es inventariable actualmente al
+// confirmar (D12). Estado de entrega separado del estado de la venta: la
+// anulación no lo modifica (D13/§34 del plan aprobado).
+enum SaleDeliveryStatus {
+  NOT_APPLICABLE
+  PENDING
+  DELIVERED
+  OBSERVED
+}
+
+model Sale {
+  id     String     @id @default(uuid()) @db.Uuid
+  // Generado exclusivamente en backend (DocumentSequenceService, Bloque B);
+  // sin generador/default en la base de datos. Formato NV-000001 (D3).
+  number String     @unique @db.VarChar(30)
+  status SaleStatus @default(ACTIVE)
+
+  // Resumen de pago (D1/D18, preparación para la Fase 7): en la Fase 6,
+  // total > 0 => UNPAID (paidAmount=0, balanceDue=total); total = 0 => PAID
+  // (paidAmount=0, balanceDue=0). Sin fila Payment: nunca se reclama dinero
+  // recibido sin trazabilidad.
+  paymentStatus  SalePaymentStatus  @map("payment_status")
+  deliveryStatus SaleDeliveryStatus @map("delivery_status")
+
+  customerId String   @map("customer_id") @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  // Snapshot de identidad del cliente (D7). A diferencia de Quote,
+  // customerType es NULLABLE aquí: Público general (isGeneric=true) tiene
+  // customerType=null y SÍ puede vender (a diferencia de Quote, que lo
+  // prohíbe por completo). Ver CHECK sales_customer_type_generic_consistency.
+  customerIsGeneric      Boolean               @map("customer_is_generic")
+  customerType           CustomerType?         @map("customer_type")
+  customerDocumentType   CustomerDocumentType? @map("customer_document_type")
+  customerDocumentNumber String?               @map("customer_document_number") @db.VarChar(32)
+  customerName           String                @map("customer_name") @db.VarChar(150)
+  customerAddress        String?               @map("customer_address") @db.VarChar(300)
+
+  // Vendedor comercial (D10): venta directa = actor autenticado; venta desde
+  // cotización = Quote.sellerId (no necesariamente quien ejecuta la
+  // conversión, que queda trazado en AuditLog.userId).
+  sellerId String @map("seller_id") @db.Uuid
+  seller   User   @relation("SaleSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+
+  // Cotización de origen (D11): nullable + UNIQUE implementa "una cotización
+  // -> a lo sumo una venta". null en toda venta directa. onDelete Restrict:
+  // una cotización convertida nunca puede eliminarse físicamente.
+  quoteId String? @unique @map("quote_id") @db.Uuid
+  quote   Quote?  @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+
+  subtotal       Decimal @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  // Siempre 0.00 en la Fase 6, igual que Quote.taxAmount (D5 heredado de la
+  // Fase 5): IGV configurable llega en la Fase 10.
+  taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  total          Decimal @db.Decimal(14, 2)
+
+  paidAmount Decimal @default(0) @map("paid_amount") @db.Decimal(14, 2)
+  balanceDue Decimal @map("balance_due") @db.Decimal(14, 2)
+
+  // Instante real de confirmación (no @db.Date: a diferencia de la vigencia
+  // de Quote, este es un momento exacto, no un día calendario). Sin
+  // @default: el Bloque B lo fija explícitamente al confirmar.
+  confirmedAt DateTime @map("confirmed_at")
+
+  // Anulación (D-cancelación): los tres campos son NULL mientras
+  // status=ACTIVE y los tres están poblados cuando status=CANCELLED (ver
+  // CHECK sales_cancellation_consistency). Motivo obligatorio, sin duplicar
+  // su texto libre en AuditLog.
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(200)
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("SaleCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+
+  items SaleItem[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Sin deletedAt: una venta se anula, no se borra. Sin notes: "nota de
+  // venta interna" es el documento HTML imprimible (Bloque C), no una
+  // columna de texto libre. Sin relación a Payment: modelo diferido a la
+  // Fase 7 (D1).
+  //
+  // Las 18 CHECK de cabecera se agregan a mano en migration.sql (aritmética
+  // exacta, snapshot de cliente, consistencia de pago/anulación, etc.).
+  @@index([customerId, confirmedAt])
+  @@index([sellerId, confirmedAt])
+  @@index([status, confirmedAt])
+  @@index([paymentStatus, confirmedAt])
+  @@index([deliveryStatus, confirmedAt])
+  @@index([confirmedAt, id])
+  @@map("sales")
+}
+
+model SaleItem {
+  id     String @id @default(uuid()) @db.Uuid
+  saleId String @map("sale_id") @db.Uuid
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  // Snapshot idéntico en forma a QuoteItem. En una venta desde cotización se
+  // copia EXACTAMENTE del QuoteItem de origen (D9): nunca se repricea desde
+  // Product.salePrice vigente.
+  productSku       String @map("product_sku") @db.VarChar(40)
+  productName      String @map("product_name") @db.VarChar(150)
+  unitCode         String @map("unit_code") @db.VarChar(15)
+  unitName         String @map("unit_name") @db.VarChar(60)
+  unitAbbreviation String @map("unit_abbreviation") @db.VarChar(10)
+
+  quantity  Decimal @db.Decimal(14, 3)
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: una venta confirmada no se edita (se anula y se crea
+  // otra), así que un SaleItem es inmutable desde su creación.
+  //
+  // Como máximo un ítem por producto por venta (D21). saleId como prefijo
+  // izquierdo de este único compuesto ya cubre "cargar ítems de una venta";
+  // no se agrega un @@index([saleId]) adicional (redundante). Los 3 CHECK
+  // (quantity > 0, unit_price >= 0, line_total >= 0) y el CHECK de
+  // aritmética exacta se agregan a mano en migration.sql.
+  @@unique([saleId, productId])
+  @@index([productId])
+  @@map("sale_items")
 }

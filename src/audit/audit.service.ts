@@ -159,6 +159,29 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.QUOTE_UPDATED]: ['quoteNumber', 'updatedFields', 'itemCount'],
   [AuditAction.QUOTE_ACCEPTED]: ['quoteNumber', 'previousStatus'],
   [AuditAction.QUOTE_REJECTED]: ['quoteNumber', 'previousStatus'],
+  // Fase 6, Bloque B. La conversión registra QUOTE_CONVERTED (entityType
+  // Quote) además de SALE_CONFIRMED (entityType Sale) en la misma
+  // transacción; ninguna de las dos duplica montos ni PII.
+  [AuditAction.QUOTE_CONVERTED]: ['quoteNumber', 'saleNumber'],
+  // `source` distingue DIRECT de QUOTE; `quoteId` se omite por completo del
+  // objeto de metadata en una venta directa (no se envía como null) para
+  // que sanitizeAuditMetadata() nunca lo incluya. Nunca PII de cliente,
+  // nombres/SKU de producto, ni ningún monto: la fila de Sale ya los
+  // conserva.
+  [AuditAction.SALE_CONFIRMED]: [
+    'saleNumber',
+    'source',
+    'quoteId',
+    'itemCount',
+  ],
+  // El motivo de anulación (texto libre) ya persiste en Sale.cancellationReason;
+  // nunca se duplica en Audit.
+  [AuditAction.SALE_CANCELLED]: ['saleNumber', 'previousStatus'],
+  [AuditAction.SALE_DELIVERY_STATUS_CHANGED]: [
+    'saleNumber',
+    'previousDeliveryStatus',
+    'deliveryStatus',
+  ],
 };
 
 /**

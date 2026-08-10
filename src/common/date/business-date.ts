@@ -109,3 +109,45 @@ export function isExpired(
       : fromPrismaDate(expirationDate);
   return expirationDateOnly < businessDate;
 }
+
+/**
+ * Medianoche de un día de negocio en America/Lima, expresada como el
+ * instante UTC exacto (Fase 6, Bloque B: filtros de rango sobre
+ * Sale.confirmedAt, que es un instante real, no @db.Date como Quote). Como
+ * America/Lima es UTC-5 fijo todo el año (ver BUSINESS_TIMEZONE arriba), la
+ * medianoche de cualquier día de negocio corresponde siempre a las 05:00 UTC
+ * del mismo día calendario — sin necesidad de resolver el offset en tiempo
+ * de ejecución ni de manejar casos de horario de verano.
+ */
+const LIMA_UTC_OFFSET_HOURS = 5;
+
+/**
+ * Instante UTC exacto del inicio (00:00:00.000) del día de negocio
+ * `dateOnly` en America/Lima. Límite inferior INCLUSIVO al filtrar por un
+ * instante real: `confirmedAt >= startOfBusinessDayUtc(desde)`.
+ */
+export function startOfBusinessDayUtc(dateOnly: string): Date {
+  if (!isValidDateOnly(dateOnly)) {
+    throw new BadRequestException(
+      `Fecha inválida: "${dateOnly}". Se espera una fecha real en formato YYYY-MM-DD.`,
+    );
+  }
+  const [year, month, day] = dateOnly.split('-').map(Number);
+  return new Date(
+    Date.UTC(year, month - 1, day, LIMA_UTC_OFFSET_HOURS, 0, 0, 0),
+  );
+}
+
+/**
+ * Instante UTC exacto del inicio del día de negocio SIGUIENTE a `dateOnly`
+ * en America/Lima. Límite superior EXCLUSIVO al filtrar por un instante
+ * real: `confirmedAt < endOfBusinessDayExclusiveUtc(hasta)`, de modo que
+ * todo el día `dateOnly` completo queda incluido sin comparar contra una
+ * marca de tiempo ambigua (p. ej. "23:59:59.999"). Un día de negocio en
+ * America/Lima dura exactamente 24 horas (sin horario de verano), así que
+ * sumar 24h en milisegundos al inicio del día es exacto.
+ */
+export function endOfBusinessDayExclusiveUtc(dateOnly: string): Date {
+  const start = startOfBusinessDayUtc(dateOnly);
+  return new Date(start.getTime() + 24 * 60 * 60 * 1000);
+}
