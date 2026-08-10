@@ -5,15 +5,24 @@
  * desde el Bloque C; las de PRODUCT_IMAGE_ y PRODUCT_PRIMARY_IMAGE_CHANGED
  * desde el Bloque D. Las de INVENTORY_ se usan desde la Fase 3, Bloque B,
  * resueltas internamente por StockMovementEngine (nunca por el DTO/
- * controller): no existen acciones para SALE/SALE_CANCELLATION/PURCHASE/
- * RETURN/REVERSAL porque esos orígenes/movimientos no se emiten en esta fase.
- * Las de CUSTOMER_ se usan desde la Fase 4, Bloque B; el cliente genérico
- * "Público general" nunca las genera (todos los métodos de mutación lo
- * rechazan con 409). Las de QUOTE_ se usan desde la Fase 5, Bloque B:
- * QUOTE_CREATED/UPDATED/ACCEPTED/REJECTED. No existen QUOTE_EXPIRED (el
+ * controller): no existen acciones separadas para SALE/SALE_CANCELLATION
+ * (siguen resolviéndose a INVENTORY_EXIT_CREATED/INVENTORY_ENTRY_CREATED
+ * según movementType, igual que MANUAL) ni para PURCHASE/RETURN/REVERSAL,
+ * fuera de alcance del MVP. Las de CUSTOMER_ se usan desde la Fase 4,
+ * Bloque B; el cliente genérico "Público general" nunca las genera (todos
+ * los métodos de mutación lo rechazan con 409), salvo CUSTOMER_STAGE_CHANGED,
+ * que además reutiliza la Fase 6 (Bloque B) al confirmar una venta con un
+ * cliente PROSPECT. Las de QUOTE_ se usan desde la Fase 5, Bloque B:
+ * QUOTE_CREATED/UPDATED/ACCEPTED/REJECTED. No existe QUOTE_EXPIRED (el
  * vencimiento es un estado efectivo derivado, nunca persistido/escrito por
- * ningún método de esta fase) ni QUOTE_CONVERTED (la conversión real es de
- * la Fase 6; no hay evento que la produzca todavía).
+ * ningún método). QUOTE_CONVERTED se agrega en la Fase 6, Bloque B: la
+ * conversión real (QuotesService no la implementa; SalesService la posee
+ * por completo dentro de su propia transacción, ver D17 del plan aprobado).
+ * Las de SALE_ se usan desde la Fase 6, Bloque B (SalesService): venta
+ * directa o desde cotización (SALE_CONFIRMED, con `source` en metadata),
+ * anulación (SALE_CANCELLED) y cambio de estado de entrega
+ * (SALE_DELIVERY_STATUS_CHANGED). No existen acciones de Payment: el modelo
+ * Payment no existe todavía (Fase 7).
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -57,4 +66,8 @@ export enum AuditAction {
   QUOTE_UPDATED = 'QUOTE_UPDATED',
   QUOTE_ACCEPTED = 'QUOTE_ACCEPTED',
   QUOTE_REJECTED = 'QUOTE_REJECTED',
+  QUOTE_CONVERTED = 'QUOTE_CONVERTED',
+  SALE_CONFIRMED = 'SALE_CONFIRMED',
+  SALE_CANCELLED = 'SALE_CANCELLED',
+  SALE_DELIVERY_STATUS_CHANGED = 'SALE_DELIVERY_STATUS_CHANGED',
 }

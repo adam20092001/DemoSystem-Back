@@ -1,8 +1,10 @@
 import {
   businessToday,
+  endOfBusinessDayExclusiveUtc,
   fromPrismaDate,
   isExpired,
   isValidDateOnly,
+  startOfBusinessDayUtc,
   toPrismaDate,
 } from './business-date';
 
@@ -113,5 +115,58 @@ describe('isExpired', () => {
   it('acepta un Date (columna @db.Date) además de un string', () => {
     const expirationDate = toPrismaDate('2026-03-14');
     expect(isExpired(expirationDate, '2026-03-15')).toBe(true);
+  });
+});
+
+describe('startOfBusinessDayUtc', () => {
+  it('la medianoche de Lima corresponde a las 05:00 UTC del mismo día calendario', () => {
+    const result = startOfBusinessDayUtc('2026-03-15');
+    expect(result.toISOString()).toBe('2026-03-15T05:00:00.000Z');
+  });
+
+  it('lanza BadRequestException para una fecha inválida (30 de febrero)', () => {
+    expect(() => startOfBusinessDayUtc('2026-02-30')).toThrow();
+  });
+
+  it('lanza BadRequestException para formato inválido', () => {
+    expect(() => startOfBusinessDayUtc('15-03-2026')).toThrow();
+  });
+
+  it('funciona en el cambio de año calendario', () => {
+    const result = startOfBusinessDayUtc('2026-01-01');
+    expect(result.toISOString()).toBe('2026-01-01T05:00:00.000Z');
+  });
+});
+
+describe('endOfBusinessDayExclusiveUtc', () => {
+  it('es el inicio del día de negocio SIGUIENTE, no el mismo día', () => {
+    const result = endOfBusinessDayExclusiveUtc('2026-03-15');
+    expect(result.toISOString()).toBe('2026-03-16T05:00:00.000Z');
+  });
+
+  it('cruza correctamente el fin de mes', () => {
+    const result = endOfBusinessDayExclusiveUtc('2026-01-31');
+    expect(result.toISOString()).toBe('2026-02-01T05:00:00.000Z');
+  });
+
+  it('lanza BadRequestException para una fecha inválida', () => {
+    expect(() => endOfBusinessDayExclusiveUtc('2026-02-30')).toThrow();
+  });
+
+  it('un instante confirmado a las 23:00 hora Lima del día "hasta" queda incluido en el rango [desde, hasta)', () => {
+    // 2026-03-15 23:00 en Lima (UTC-5) = 2026-03-16 04:00 UTC: todavía antes
+    // del inicio del día siguiente (2026-03-16T05:00:00Z), así que un filtro
+    // confirmedAt < endOfBusinessDayExclusiveUtc('2026-03-15') lo incluye.
+    const confirmedAt = new Date('2026-03-16T04:00:00.000Z');
+    const exclusiveEnd = endOfBusinessDayExclusiveUtc('2026-03-15');
+    expect(confirmedAt.getTime() < exclusiveEnd.getTime()).toBe(true);
+  });
+
+  it('un instante ya en el día de negocio siguiente en Lima queda excluido', () => {
+    // 2026-03-16 00:00 en Lima = 2026-03-16 05:00 UTC: ya es el día
+    // siguiente en Lima, debe quedar excluido del filtro sobre "2026-03-15".
+    const confirmedAt = new Date('2026-03-16T05:00:00.000Z');
+    const exclusiveEnd = endOfBusinessDayExclusiveUtc('2026-03-15');
+    expect(confirmedAt.getTime() < exclusiveEnd.getTime()).toBe(false);
   });
 });
