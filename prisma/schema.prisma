@@ -122,6 +122,11 @@ model User {
   // User dos veces (vendedor y quien anula).
   soldSales           Sale[]              @relation("SaleSeller")
   cancelledSales      Sale[]              @relation("SaleCancelledBy")
+  // Pagos (Fase 7, Bloque A): dos relaciones nombradas porque Payment
+  // referencia User dos veces (quien registra y quien anula), mismo
+  // criterio que soldSales/cancelledSales arriba.
+  createdPayments     Payment[]           @relation("PaymentCreatedBy")
+  cancelledPayments   Payment[]           @relation("PaymentCancelledBy")
 
   @@index([roleId])
   @@index([status])
@@ -626,13 +631,19 @@ model Sale {
 
   items SaleItem[]
 
+  // Pagos asociados (Fase 7, Bloque A: solo el modelo/relación; sin lógica
+  // de negocio todavía). paidAmount/balanceDue/paymentStatus arriba siguen
+  // siendo los campos de resumen escritos por la aplicación (Bloque B en
+  // adelante reconciliará su valor contra SUM(payments ACTIVE) para ventas
+  // ACTIVE); esta relación no introduce columnas de resumen duplicadas.
+  payments Payment[]
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Sin deletedAt: una venta se anula, no se borra. Sin notes: "nota de
   // venta interna" es el documento HTML imprimible (Bloque C), no una
-  // columna de texto libre. Sin relación a Payment: modelo diferido a la
-  // Fase 7 (D1).
+  // columna de texto libre.
   //
   // Las 18 CHECK de cabecera se agregan a mano en migration.sql (aritmética
   // exacta, snapshot de cliente, consistencia de pago/anulación, etc.).
@@ -679,4 +690,91 @@ model SaleItem {
   @@unique([saleId, productId])
   @@index([productId])
   @@map("sale_items")
+}
+
+// Métodos de cobro (Fase 7, §16 del Documento Maestro, texto verbatim).
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  BANK_DEPOSIT
+  CARD
+  DIGITAL_WALLET
+  OTHER
+}
+
+// Ciclo de vida de un pago individual. Concepto deliberadamente distinto de
+// SalePaymentStatus (resumen agregado de la venta): un Payment ACTIVE/
+// CANCELLED es un hecho financiero atómico; SalePaymentStatus es un
+// UNPAID/PARTIALLY_PAID/PAID derivado de la suma de pagos ACTIVE.
+enum PaymentStatus {
+  ACTIVE
+  CANCELLED
+}
+
+// Distingue una anulación manual (administrador, con motivo obligatorio) de
+// la anulación automática en cascada al anular la venta que lo contiene
+// (Bloque B: SalesService.cancel -> PaymentEngine.cancelAllActiveForSale).
+enum PaymentCancellationSource {
+  MANUAL
+  SALE_CANCELLATION
+}
+
+/**
+ * Pago asociado a una venta (Fase 7, Bloque A: solo modelo + migración +
+ * constraints; sin PaymentEngine/PaymentsService/lógica de negocio todavía,
+ * ver Bloque B). Todo pago pertenece a una venta: no hay pagos sueltos.
+ * Nunca se edita ni se elimina físicamente: se anula (ACTIVE -> CANCELLED)
+ * y se registra uno nuevo si corresponde.
+ */
+model Payment {
+  id String @id @default(uuid()) @db.Uuid
+
+  saleId String @map("sale_id") @db.Uuid
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  method PaymentMethod
+
+  amount Decimal @db.Decimal(14, 2)
+
+  // Referencia operativa genérica (número de operación/depósito/voucher).
+  // Obligatoria a nivel de base de datos solo para BANK_TRANSFER/
+  // BANK_DEPOSIT/CARD (CHECK payments_reference_required_by_method,
+  // migration.sql); opcional para CASH/DIGITAL_WALLET/OTHER. Nunca PAN/CVV/
+  // credenciales bancarias.
+  reference String? @db.VarChar(100)
+
+  status PaymentStatus @default(ACTIVE)
+
+  // Instante real de cobro. Sin @default: el Bloque B lo fija explícitamente
+  // al registrar (mismo criterio que Sale.confirmedAt); el cliente nunca lo
+  // controla ni puede retrofechar.
+  paidAt DateTime @map("paid_at")
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("PaymentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  // Anulación (ver CHECK payments_cancellation_consistency, migration.sql):
+  // los cuatro campos son NULL mientras status=ACTIVE y los cuatro están
+  // poblados cuando status=CANCELLED, con cancellationReason obligatorio y
+  // no vacío únicamente cuando cancellationSource=MANUAL (NULL cuando es
+  // SALE_CANCELLATION, para no duplicar el motivo de anulación de la venta).
+  cancelledAt        DateTime?                  @map("cancelled_at")
+  cancellationReason String?                    @map("cancellation_reason") @db.VarChar(200)
+  cancelledByUserId  String?                    @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?                      @relation("PaymentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationSource PaymentCancellationSource? @map("cancellation_source")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  // A diferencia de SaleItem/QuoteItem (inmutables desde su creación), un
+  // Payment sí muta legítimamente una vez: ACTIVE -> CANCELLED.
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Las 4 CHECK (monto positivo, referencia no vacía, referencia obligatoria
+  // por método, consistencia de anulación) se agregan a mano en
+  // migration.sql, mismo criterio que Sale/Quote/InventoryMovement.
+  @@index([saleId, paidAt])
+  @@index([paidAt, id])
+  @@index([status, paidAt])
+  @@index([createdByUserId, paidAt])
+  @@map("payments")
 }
