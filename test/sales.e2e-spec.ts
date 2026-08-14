@@ -75,6 +75,10 @@ const SAFE_SALE_DETAIL_KEYS = [
   'balanceDue',
   'items',
   'inventoryMovements',
+  // Fase 7, Bloque B: SafeSale gana `payments[]` (historial ACTIVE +
+  // CANCELLED). Ningún DTO HTTP acepta `payment` todavía (llega en el
+  // Bloque C), así que en todas las ventas de este spec queda `[]`.
+  'payments',
   'confirmedAt',
   'cancelledAt',
   'cancellationReason',
@@ -190,6 +194,10 @@ interface SafeSaleBody {
   balanceDue: string;
   items: SafeSaleItemBody[];
   inventoryMovements: SafeSaleMovementBody[];
+  // Fase 7, Bloque B: siempre [] en este spec (sin DTO HTTP para poblarlo
+  // todavía). Tipado laxo a propósito: el contrato completo de pago llega
+  // en Block C/D con su propio spec.
+  payments: unknown[];
   confirmedAt: string;
   cancelledAt: string | null;
   cancellationReason: string | null;
@@ -4240,15 +4248,15 @@ describe('Sales (e2e)', () => {
   // Sin artefactos de Payment / sin efecto lateral de inventario en lectura
   // ==================================================================
   describe('sin artefactos de Payment; sin efecto lateral de inventario en lectura o entrega', () => {
-    it('ninguna respuesta de Sale expone un arreglo de pagos ni un paymentId', async () => {
+    it('Fase 7 Bloque B: payments siempre [] (sin DTO HTTP para poblarlo todavía) y nunca un paymentId', async () => {
       const sale = await createDirectSale(adminCookie, {
         items: [{ productId: productA.id, quantity: '1.000' }],
       });
       const response = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', adminCookie);
+      expect((response.body as SafeSaleBody).payments).toEqual([]);
       const serialized = JSON.stringify(response.body);
-      expect(serialized).not.toMatch(/"payments"/);
       expect(serialized).not.toMatch(/"paymentId"/);
     });
 

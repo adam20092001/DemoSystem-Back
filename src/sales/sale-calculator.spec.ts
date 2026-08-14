@@ -141,25 +141,89 @@ describe('sale-calculator (reexport de las primitivas Decimal de quote-calculato
   });
 
   describe('deriveSalePaymentSummary', () => {
-    it('total > 0 -> UNPAID, paidAmount=0.00, balanceDue=total', () => {
-      const summary = deriveSalePaymentSummary(new Prisma.Decimal('149.90'));
-      expect(summary.paymentStatus).toBe(SalePaymentStatus.UNPAID);
-      expect(summary.paidAmount.toFixed(2)).toBe('0.00');
-      expect(summary.balanceDue.toFixed(2)).toBe('149.90');
+    describe('sin segundo argumento (comportamiento exacto de la Fase 6)', () => {
+      it('total > 0 -> UNPAID, paidAmount=0.00, balanceDue=total', () => {
+        const summary = deriveSalePaymentSummary(new Prisma.Decimal('149.90'));
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('0.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('149.90');
+      });
+
+      it('total = 0 -> PAID, paidAmount=0.00, balanceDue=0.00', () => {
+        const summary = deriveSalePaymentSummary(new Prisma.Decimal('0.00'));
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('0.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('0.00');
+      });
+
+      it('nunca produce PARTIALLY_PAID', () => {
+        const positive = deriveSalePaymentSummary(new Prisma.Decimal('10.00'));
+        const zero = deriveSalePaymentSummary(new Prisma.Decimal('0.00'));
+        expect(positive.paymentStatus).not.toBe(
+          SalePaymentStatus.PARTIALLY_PAID,
+        );
+        expect(zero.paymentStatus).not.toBe(SalePaymentStatus.PARTIALLY_PAID);
+      });
     });
 
-    it('total = 0 -> PAID, paidAmount=0.00, balanceDue=0.00', () => {
-      const summary = deriveSalePaymentSummary(new Prisma.Decimal('0.00'));
-      expect(summary.paymentStatus).toBe(SalePaymentStatus.PAID);
-      expect(summary.paidAmount.toFixed(2)).toBe('0.00');
-      expect(summary.balanceDue.toFixed(2)).toBe('0.00');
-    });
+    describe('con paidAmount explícito (Fase 7, Bloque B)', () => {
+      it('total=0, paidAmount=0 -> PAID/0.00/0.00 (evaluado como paidAmount==total)', () => {
+        const summary = deriveSalePaymentSummary(
+          new Prisma.Decimal('0.00'),
+          new Prisma.Decimal('0.00'),
+        );
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('0.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('0.00');
+      });
 
-    it('nunca produce PARTIALLY_PAID', () => {
-      const positive = deriveSalePaymentSummary(new Prisma.Decimal('10.00'));
-      const zero = deriveSalePaymentSummary(new Prisma.Decimal('0.00'));
-      expect(positive.paymentStatus).not.toBe(SalePaymentStatus.PARTIALLY_PAID);
-      expect(zero.paymentStatus).not.toBe(SalePaymentStatus.PARTIALLY_PAID);
+      it('100/0 -> UNPAID, balanceDue=100.00', () => {
+        const summary = deriveSalePaymentSummary(
+          new Prisma.Decimal('100.00'),
+          new Prisma.Decimal('0.00'),
+        );
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('0.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('100.00');
+      });
+
+      it('100/40 -> PARTIALLY_PAID, balanceDue=60.00', () => {
+        const summary = deriveSalePaymentSummary(
+          new Prisma.Decimal('100.00'),
+          new Prisma.Decimal('40.00'),
+        );
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('40.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('60.00');
+      });
+
+      it('100/100 -> PAID, balanceDue=0.00', () => {
+        const summary = deriveSalePaymentSummary(
+          new Prisma.Decimal('100.00'),
+          new Prisma.Decimal('100.00'),
+        );
+        expect(summary.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(summary.paidAmount.toFixed(2)).toBe('100.00');
+        expect(summary.balanceDue.toFixed(2)).toBe('0.00');
+      });
+
+      it('paidAmount negativo -> ConflictException (invariante interno, nunca 400)', () => {
+        expect(() =>
+          deriveSalePaymentSummary(
+            new Prisma.Decimal('100.00'),
+            new Prisma.Decimal('-1.00'),
+          ),
+        ).toThrow();
+      });
+
+      it('paidAmount > total -> ConflictException (sobrepago, invariante interno)', () => {
+        expect(() =>
+          deriveSalePaymentSummary(
+            new Prisma.Decimal('100.00'),
+            new Prisma.Decimal('100.01'),
+          ),
+        ).toThrow();
+      });
     });
   });
 

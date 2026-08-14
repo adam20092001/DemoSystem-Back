@@ -21,8 +21,16 @@
  * Las de SALE_ se usan desde la Fase 6, Bloque B (SalesService): venta
  * directa o desde cotización (SALE_CONFIRMED, con `source` en metadata),
  * anulación (SALE_CANCELLED) y cambio de estado de entrega
- * (SALE_DELIVERY_STATUS_CHANGED). No existen acciones de Payment: el modelo
- * Payment no existe todavía (Fase 7).
+ * (SALE_DELIVERY_STATUS_CHANGED). Las de PAYMENT_ se agregan en la Fase 7,
+ * Bloque B: PaymentEngine es su ÚNICO emisor (nunca PaymentsService/
+ * SalesService directamente) — PAYMENT_REGISTERED al crear un pago (pago
+ * posterior o pago inicial embebido en la confirmación de una venta) y
+ * PAYMENT_CANCELLED al anularlo, tanto en anulación MANUAL de un pago
+ * individual como en la anulación automática en cascada de todos los pagos
+ * ACTIVE de una venta anulada (PaymentEngine.cancelAllActiveForSale). No
+ * existe SALE_PAYMENT_STATUS_CHANGED: el cambio de resumen de pago de la
+ * venta es derivado de estas dos acciones, auditarlo por separado sería
+ * ruido redundante.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -70,4 +78,6 @@ export enum AuditAction {
   SALE_CONFIRMED = 'SALE_CONFIRMED',
   SALE_CANCELLED = 'SALE_CANCELLED',
   SALE_DELIVERY_STATUS_CHANGED = 'SALE_DELIVERY_STATUS_CHANGED',
+  PAYMENT_REGISTERED = 'PAYMENT_REGISTERED',
+  PAYMENT_CANCELLED = 'PAYMENT_CANCELLED',
 }

@@ -33,6 +33,16 @@ import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import { DocumentSequenceService } from '../document-sequences/document-sequence.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
+import {
+  PAYMENT_SAFE_SELECT,
+  PaymentSafeRow,
+} from '../payments/mappers/payment.mapper';
+import {
+  normalizePaymentReference,
+  parsePaymentAmount,
+} from '../payments/payment-calculator';
+import { PaymentEngine } from '../payments/payment.engine';
+import { InitialPaymentInput } from '../payments/types/payment.input';
 import { effectiveStatus } from '../quotes/quote-calculator';
 import {
   SALE_DETAIL_SELECT,
@@ -175,6 +185,7 @@ export class SalesService {
     private readonly auditService: AuditService,
     private readonly documentSequenceService: DocumentSequenceService,
     private readonly stockMovementEngine: StockMovementEngine,
+    private readonly paymentEngine: PaymentEngine,
   ) {}
 
   // ==================================================================
@@ -192,6 +203,7 @@ export class SalesService {
       productId: item.productId,
       quantity: parseQuantity(item.quantity),
     }));
+    const initialPayment = this.parseInitialPayment(input.payment);
 
     return this.prisma.$transaction(async (tx) => {
       const customer = await this.lockCustomerForSale(tx, input.customerId);
@@ -230,8 +242,17 @@ export class SalesService {
       assertDiscountWithinSubtotal(discountAmount, subtotal);
       const total = calculateTotal(subtotal, discountAmount, SALE_TAX_AMOUNT);
 
+      if (
+        initialPayment !== undefined &&
+        initialPayment.amount.greaterThan(total)
+      ) {
+        throw new ConflictException(
+          'El monto del pago inicial no puede superar el total de la venta',
+        );
+      }
+
       const { paymentStatus, paidAmount, balanceDue } =
-        deriveSalePaymentSummary(total);
+        deriveSalePaymentSummary(total, initialPayment?.amount);
       this.assertCustomerDebtRules(customer, balanceDue);
       const deliveryStatus = deriveDeliveryStatus(
         lines.some((line) => line.isInventoryTracked),
@@ -281,6 +302,16 @@ export class SalesService {
         select: SALE_DETAIL_SELECT,
       });
 
+      const payments = await this.registerInitialPayment(
+        tx,
+        created.id,
+        number,
+        initialPayment,
+        paidAmount,
+        input.actorUserId,
+        input.ipAddress ?? null,
+      );
+
       await this.applyOutboundMovements(
         tx,
         created.id,
@@ -314,7 +345,7 @@ export class SalesService {
       });
 
       const movements = await this.fetchSaleInventoryMovements(tx, created.id);
-      return toSafeSale(created, movements);
+      return toSafeSale(created, movements, payments);
     });
   }
 
@@ -324,6 +355,7 @@ export class SalesService {
 
   async createFromQuote(input: ConvertQuoteToSaleInput): Promise<SafeSale> {
     const businessDate = businessToday();
+    const initialPayment = this.parseInitialPayment(input.payment);
 
     return this.prisma.$transaction(async (tx) => {
       const quote = await this.lockQuoteForConversion(tx, input.quoteId);
@@ -418,8 +450,17 @@ export class SalesService {
       const taxAmount = quote.taxAmount;
       const total = quote.total;
 
+      if (
+        initialPayment !== undefined &&
+        initialPayment.amount.greaterThan(total)
+      ) {
+        throw new ConflictException(
+          'El monto del pago inicial no puede superar el total de la venta',
+        );
+      }
+
       const { paymentStatus, paidAmount, balanceDue } =
-        deriveSalePaymentSummary(total);
+        deriveSalePaymentSummary(total, initialPayment?.amount);
       this.assertCustomerDebtRules(customer, balanceDue);
       const deliveryStatus = deriveDeliveryStatus(
         lines.some((line) => line.isInventoryTracked),
@@ -474,6 +515,16 @@ export class SalesService {
         select: SALE_DETAIL_SELECT,
       });
 
+      const payments = await this.registerInitialPayment(
+        tx,
+        created.id,
+        number,
+        initialPayment,
+        paidAmount,
+        input.actorUserId,
+        input.ipAddress ?? null,
+      );
+
       await this.applyOutboundMovements(
         tx,
         created.id,
@@ -525,7 +576,7 @@ export class SalesService {
       });
 
       const movements = await this.fetchSaleInventoryMovements(tx, created.id);
-      return toSafeSale(created, movements);
+      return toSafeSale(created, movements, payments);
     });
   }
 
@@ -571,6 +622,17 @@ export class SalesService {
           referenceId: sale.id,
         });
       }
+
+      // Anula en cascada todos los pagos ACTIVE de la venta (Fase 7, Bloque
+      // B). El resumen de pago de Sale NO se recalcula: queda congelado con
+      // sus valores previos a la anulación (§44/§45 del plan aprobado); por
+      // eso NO se llama a paymentEngine.recalculateSaleSummary() aquí.
+      await this.paymentEngine.cancelAllActiveForSale(tx, {
+        saleId: sale.id,
+        saleNumber: sale.number,
+        actorUserId: input.actorUserId,
+        ipAddress: input.ipAddress ?? null,
+      });
 
       const cancelledAt = new Date();
       const updated = await tx.sale.update({
@@ -957,6 +1019,90 @@ export class SalesService {
       throw new NotFoundException('La venta no existe');
     }
     return row;
+  }
+
+  // ==================================================================
+  // Helpers privados — pago inicial (Fase 7, Bloque B)
+  // ==================================================================
+
+  /**
+   * Parseo/normalización PURA, fuera de la transacción (mismo criterio que
+   * discountAmount/items más arriba): si el pago inicial es malformado, la
+   * venta falla con 400 sin llegar a abrir transacción. La validación de
+   * "monto > total" es una regla de estado en vivo (necesita `total`
+   * calculado) y se evalúa dentro de la transacción, no aquí.
+   */
+  private parseInitialPayment(payment: InitialPaymentInput | undefined):
+    | {
+        method: InitialPaymentInput['method'];
+        amount: Prisma.Decimal;
+        reference: string | null;
+      }
+    | undefined {
+    if (payment === undefined) {
+      return undefined;
+    }
+    const amount = parsePaymentAmount(payment.amount);
+    const reference = normalizePaymentReference(
+      payment.method,
+      payment.reference,
+    );
+    return { method: payment.method, amount, reference };
+  }
+
+  /**
+   * Registra el pago inicial (si existe) dentro de la MISMA transacción de
+   * confirmación de la venta, después del INSERT de Sale (que ya lleva el
+   * resumen de pago FINAL — D1 aprobado) y antes de los movimientos de
+   * inventario. Reconcilia SUM(Payment ACTIVE) contra el paidAmount ya
+   * calculado como defensa en profundidad (§39 del plan aprobado): con
+   * exactamente un pago inicial posible, un desajuste solo puede significar
+   * un error interno, nunca una entrada del cliente — 409, y toda la
+   * transacción de la venta revierte. Retorna el arreglo (0 o 1 elemento)
+   * listo para toSafeSale(): `created.payments` (de tx.sale.create) está
+   * vacío por construcción en este punto, así que nunca se reutiliza aquí.
+   */
+  private async registerInitialPayment(
+    tx: Prisma.TransactionClient,
+    saleId: string,
+    saleNumber: string,
+    payment:
+      | {
+          method: InitialPaymentInput['method'];
+          amount: Prisma.Decimal;
+          reference: string | null;
+        }
+      | undefined,
+    expectedPaidAmount: Prisma.Decimal,
+    actorUserId: string,
+    ipAddress: string | null,
+  ): Promise<PaymentSafeRow[]> {
+    if (payment === undefined) {
+      return [];
+    }
+
+    await this.paymentEngine.register(tx, {
+      saleId,
+      saleNumber,
+      method: payment.method,
+      amount: payment.amount,
+      reference: payment.reference,
+      actorUserId,
+      ipAddress,
+    });
+
+    const activeSum = await this.paymentEngine.sumActiveForSale(tx, saleId);
+    if (!activeSum.equals(expectedPaidAmount)) {
+      throw new ConflictException(
+        'Inconsistencia interna en el resumen de pago al confirmar la venta',
+      );
+    }
+
+    return tx.payment.findMany({
+      where: { saleId },
+      select: PAYMENT_SAFE_SELECT,
+      orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+    });
   }
 
   // ==================================================================

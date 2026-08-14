@@ -1,5 +1,10 @@
 import { Prisma } from '@prisma/client';
 import {
+  PAYMENT_SAFE_SELECT,
+  PaymentSafeRow,
+  toSafePayment,
+} from '../../payments/mappers/payment.mapper';
+import {
   SafeSale,
   SafeSaleInventoryMovement,
   SafeSaleItem,
@@ -77,6 +82,14 @@ export const SALE_DETAIL_SELECT = {
   paidAmount: true,
   balanceDue: true,
   items: { select: SALE_ITEM_SELECT },
+  // Relación real (a diferencia de InventoryMovement, sin referencia
+  // polimórfica): se puede anidar directamente. ACTIVE y CANCELLED, sin
+  // filtro por status (Fase 7, Bloque B, §46 del plan aprobado: la
+  // anulación de venta anula sus pagos pero la historia se conserva).
+  payments: {
+    select: PAYMENT_SAFE_SELECT,
+    orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+  },
   confirmedAt: true,
   cancelledAt: true,
   cancellationReason: true,
@@ -174,10 +187,18 @@ export function toSafeSaleInventoryMovement(
  * Mapper puro: no consulta la base. Recibe la fila de detalle YA
  * seleccionada y los movimientos de inventario YA consultados por
  * separado (§53 del plan aprobado), y los combina en el contrato seguro.
+ * `payments` por defecto usa `row.payments` (ya viene anidado en
+ * SALE_DETAIL_SELECT, correcto para findOne/cancel/markDelivered/
+ * markObserved). Solo createDirect/createFromQuote lo pasan explícito: el
+ * `row` que reciben proviene de `tx.sale.create()`, cuya lectura anidada de
+ * `payments` ocurre ANTES de que PaymentEngine.register() inserte el pago
+ * inicial, así que `row.payments` estaría vacío por construcción — nunca
+ * por error de estos dos únicos llamadores.
  */
 export function toSafeSale(
   row: SaleDetailRow,
   movements: SaleInventoryMovementRow[],
+  payments: PaymentSafeRow[] = row.payments,
 ): SafeSale {
   return {
     id: row.id,
@@ -206,6 +227,7 @@ export function toSafeSale(
 
     items: row.items.map(toSafeSaleItem),
     inventoryMovements: movements.map(toSafeSaleInventoryMovement),
+    payments: payments.map(toSafePayment),
 
     confirmedAt: row.confirmedAt,
     cancelledAt: row.cancelledAt,

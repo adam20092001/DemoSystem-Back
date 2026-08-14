@@ -23,6 +23,7 @@ import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
+import { PaymentEngine } from '../payments/payment.engine';
 import { SalesService } from './sales.service';
 
 const ACTOR_ID = 'actor-1';
@@ -178,6 +179,7 @@ function makeSaleDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
     paidAmount: new Prisma.Decimal('0.00'),
     balanceDue: new Prisma.Decimal('10.00'),
     items: [makeSaleItemRow()],
+    payments: [],
     confirmedAt: new Date('2026-03-15T12:00:00.000Z'),
     cancelledAt: null,
     cancellationReason: null,
@@ -198,6 +200,31 @@ function makeMovementRow(overrides: Partial<Record<string, unknown>> = {}) {
     previousStock: new Prisma.Decimal('50.000'),
     newStock: new Prisma.Decimal('49.000'),
     createdAt: new Date('2026-03-15T12:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function makePaymentRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'payment-1',
+    saleId: SALE_ID,
+    method: 'CASH',
+    amount: new Prisma.Decimal('10.00'),
+    reference: null,
+    status: 'ACTIVE',
+    paidAt: new Date('2026-03-15T12:00:00.000Z'),
+    createdBy: {
+      id: ACTOR_ID,
+      username: 'admin',
+      firstName: 'Ana',
+      lastName: 'Admin',
+    },
+    cancelledAt: null,
+    cancellationReason: null,
+    cancellationSource: null,
+    cancelledBy: null,
+    createdAt: new Date('2026-03-15T12:00:00.000Z'),
+    updatedAt: new Date('2026-03-15T12:00:00.000Z'),
     ...overrides,
   };
 }
@@ -260,6 +287,9 @@ function createTxMock() {
     inventoryMovement: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
     },
+    payment: {
+      findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+    },
   };
 }
 
@@ -293,11 +323,25 @@ function createEngineMock() {
   return { apply: jest.fn<Promise<unknown>, [unknown, unknown]>() };
 }
 
+function createPaymentEngineMock() {
+  return {
+    register: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    sumActiveForSale: jest.fn<Promise<Prisma.Decimal>, [unknown, string]>(),
+    recalculateSaleSummary: jest.fn<
+      Promise<unknown>,
+      [unknown, string, Prisma.Decimal]
+    >(),
+    cancel: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    cancelAllActiveForSale: jest.fn<Promise<unknown[]>, [unknown, unknown]>(),
+  };
+}
+
 describe('SalesService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let sequenceService: ReturnType<typeof createSequenceServiceMock>;
   let engine: ReturnType<typeof createEngineMock>;
+  let paymentEngine: ReturnType<typeof createPaymentEngineMock>;
   let service: SalesService;
 
   beforeEach(() => {
@@ -312,12 +356,25 @@ describe('SalesService', () => {
     sequenceService.next.mockResolvedValue('NV-000001');
     engine = createEngineMock();
     engine.apply.mockResolvedValue(makeMovementRow());
+    paymentEngine = createPaymentEngineMock();
+    paymentEngine.register.mockResolvedValue(makePaymentRow());
+    paymentEngine.sumActiveForSale.mockResolvedValue(new Prisma.Decimal(0));
+    paymentEngine.recalculateSaleSummary.mockResolvedValue({
+      paymentStatus: SalePaymentStatus.PAID,
+      paidAmount: new Prisma.Decimal(0),
+      balanceDue: new Prisma.Decimal(0),
+    });
+    paymentEngine.cancel.mockResolvedValue(
+      makePaymentRow({ status: 'CANCELLED' }),
+    );
+    paymentEngine.cancelAllActiveForSale.mockResolvedValue([]);
 
     service = new SalesService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
       sequenceService,
       engine as unknown as StockMovementEngine,
+      paymentEngine as unknown as PaymentEngine,
     );
 
     prisma.tx.$queryRaw.mockImplementation(
@@ -335,6 +392,7 @@ describe('SalesService', () => {
     prisma.tx.quoteItem.findMany.mockResolvedValue([makeQuoteItemRow()]);
     prisma.tx.customer.update.mockResolvedValue(makeCustomerRow());
     prisma.tx.inventoryMovement.findMany.mockResolvedValue([]);
+    prisma.tx.payment.findMany.mockResolvedValue([makePaymentRow()]);
     prisma.inventoryMovement.findMany.mockResolvedValue([]);
     prisma.sale.findUnique.mockResolvedValue(makeSaleDetailRow());
   });
@@ -1011,6 +1069,222 @@ describe('SalesService', () => {
         expect(actions).not.toContain('PAYMENT_CANCELLED');
       });
     });
+
+    // ==================================================================
+    // Pago inicial (Fase 7, Bloque B)
+    // ==================================================================
+    describe('pago inicial', () => {
+      it('sin payment: preserva exactamente el comportamiento de la Fase 6 (UNPAID/0.00/total)', async () => {
+        await service.createDirect(validDirectInput);
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: {
+            paymentStatus: string;
+            paidAmount: Prisma.Decimal;
+            balanceDue: Prisma.Decimal;
+          };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+        expect(call.data.paidAmount.toFixed(2)).toBe('0.00');
+        expect(call.data.balanceDue.toFixed(2)).toBe('10.00');
+        expect(paymentEngine.register).not.toHaveBeenCalled();
+      });
+
+      it('pago parcial: Sale se INSERTA ya con el resumen final (PARTIALLY_PAID), antes de registrar el pago', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('4.00'),
+        );
+        await service.createDirect({
+          ...validDirectInput,
+          payment: { method: 'CASH', amount: '4.00' },
+        });
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: {
+            paymentStatus: string;
+            paidAmount: Prisma.Decimal;
+            balanceDue: Prisma.Decimal;
+          };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+        expect(call.data.paidAmount.toFixed(2)).toBe('4.00');
+        expect(call.data.balanceDue.toFixed(2)).toBe('6.00');
+      });
+
+      it('pago total: PAID/total/0.00', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await service.createDirect({
+          ...validDirectInput,
+          payment: { method: 'CASH', amount: '10.00' },
+        });
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: {
+            paymentStatus: string;
+            paidAmount: Prisma.Decimal;
+            balanceDue: Prisma.Decimal;
+          };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(call.data.paidAmount.toFixed(2)).toBe('10.00');
+        expect(call.data.balanceDue.toFixed(2)).toBe('0.00');
+      });
+
+      it('pago inicial > total -> 409, sin llegar a insertar la venta', async () => {
+        await expect(
+          service.createDirect({
+            ...validDirectInput,
+            payment: { method: 'CASH', amount: '999.00' },
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+      });
+
+      it('PaymentEngine.register se invoca DESPUÉS del INSERT de Sale, con el mismo tx', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('4.00'),
+        );
+        const callOrder: string[] = [];
+        prisma.tx.sale.create.mockImplementation(() => {
+          callOrder.push('sale.create');
+          return Promise.resolve(makeSaleDetailRow());
+        });
+        paymentEngine.register.mockImplementation(() => {
+          callOrder.push('payment.register');
+          return Promise.resolve(makePaymentRow());
+        });
+        await service.createDirect({
+          ...validDirectInput,
+          payment: { method: 'CASH', amount: '4.00' },
+        });
+        expect(callOrder).toEqual(['sale.create', 'payment.register']);
+        expect(paymentEngine.register).toHaveBeenCalledWith(
+          prisma.tx,
+          expect.objectContaining({
+            saleId: SALE_ID,
+            saleNumber: 'NV-000001',
+            method: 'CASH',
+            actorUserId: ACTOR_ID,
+          }),
+        );
+      });
+
+      it('reconcilia SUM(ACTIVE) contra el paidAmount calculado: desajuste -> 409 y no continúa (aborta antes de mover stock)', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('999.00'),
+        );
+        await expect(
+          service.createDirect({
+            ...validDirectInput,
+            payment: { method: 'CASH', amount: '4.00' },
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(engine.apply).not.toHaveBeenCalled();
+      });
+
+      it('SalesService nunca emite PAYMENT_REGISTERED directamente (PaymentEngine es el único emisor)', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('4.00'),
+        );
+        await service.createDirect({
+          ...validDirectInput,
+          payment: { method: 'CASH', amount: '4.00' },
+        });
+        const actions = auditService.record.mock.calls.map(
+          (call) => call[0].action,
+        );
+        expect(actions).not.toContain(AuditAction.PAYMENT_REGISTERED);
+      });
+
+      describe('Público general', () => {
+        function genericInput(overrides: Record<string, unknown> = {}) {
+          return {
+            ...validDirectInput,
+            customerId: 'generic-customer',
+            ...overrides,
+          };
+        }
+
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeGenericCustomerRow(),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('sin pago -> 409', async () => {
+          await expect(
+            service.createDirect(genericInput()),
+          ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('pago parcial -> 409', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createDirect(
+              genericInput({ payment: { method: 'CASH', amount: '4.00' } }),
+            ),
+          ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('pago total -> éxito', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createDirect(
+              genericInput({ payment: { method: 'CASH', amount: '10.00' } }),
+            ),
+          ).resolves.toBeDefined();
+        });
+      });
+
+      describe('cliente BLOCKED', () => {
+        function blockedInput(overrides: Record<string, unknown> = {}) {
+          return { ...validDirectInput, ...overrides };
+        }
+
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow({ status: CustomerStatus.BLOCKED }),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('sin pago -> 409', async () => {
+          await expect(
+            service.createDirect(blockedInput()),
+          ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('pago parcial -> 409', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createDirect(
+              blockedInput({ payment: { method: 'CASH', amount: '4.00' } }),
+            ),
+          ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('pago total -> éxito', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createDirect(
+              blockedInput({ payment: { method: 'CASH', amount: '10.00' } }),
+            ),
+          ).resolves.toBeDefined();
+        });
+      });
+    });
   });
 
   // ====================================================================
@@ -1488,6 +1762,112 @@ describe('SalesService', () => {
         expect(actions).not.toContain('PAYMENT_REGISTERED');
       });
     });
+
+    // ==================================================================
+    // Pago inicial (Fase 7, Bloque B)
+    // ==================================================================
+    describe('pago inicial', () => {
+      it('sin payment: preserva el comportamiento previo (UNPAID/0.00/total copiado del Quote)', async () => {
+        await service.createFromQuote(validConvertInput);
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: {
+            paymentStatus: string;
+            paidAmount: Prisma.Decimal;
+            balanceDue: Prisma.Decimal;
+          };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+        expect(call.data.paidAmount.toFixed(2)).toBe('0.00');
+        expect(call.data.balanceDue.toFixed(2)).toBe('10.00');
+      });
+
+      it('pago total: PAID/total/0.00; nunca repriecia montos del Quote', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await service.createFromQuote({
+          ...validConvertInput,
+          payment: { method: 'CASH', amount: '10.00' },
+        });
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: {
+            paymentStatus: string;
+            paidAmount: Prisma.Decimal;
+            balanceDue: Prisma.Decimal;
+            subtotal: Prisma.Decimal;
+            total: Prisma.Decimal;
+          };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(call.data.paidAmount.toFixed(2)).toBe('10.00');
+        expect(call.data.balanceDue.toFixed(2)).toBe('0.00');
+        expect(call.data.subtotal.toFixed(2)).toBe('10.00');
+        expect(call.data.total.toFixed(2)).toBe('10.00');
+      });
+
+      it('pago inicial > total del Quote -> 409, Quote NO se convierte', async () => {
+        await expect(
+          service.createFromQuote({
+            ...validConvertInput,
+            payment: { method: 'CASH', amount: '999.00' },
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+      });
+
+      describe('cliente BLOCKED', () => {
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow({ status: CustomerStatus.BLOCKED }),
+              quote: makeQuoteRow(),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('pago parcial -> 409, Quote no se convierte', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              payment: { method: 'CASH', amount: '4.00' },
+            }),
+          ).rejects.toBeInstanceOf(ConflictException);
+          expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        });
+
+        it('pago total -> éxito, Quote se convierte', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              payment: { method: 'CASH', amount: '10.00' },
+            }),
+          ).resolves.toBeDefined();
+          expect(prisma.tx.quote.update).toHaveBeenCalled();
+        });
+      });
+
+      it('sellerId sigue siendo Quote.sellerId, nunca el actor de la conversión, con o sin pago inicial', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await service.createFromQuote({
+          ...validConvertInput,
+          payment: { method: 'CASH', amount: '10.00' },
+        });
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { sellerId: string };
+        };
+        expect(call.data.sellerId).toBe(QUOTE_SELLER_ID);
+        expect(call.data.sellerId).not.toBe(ACTOR_ID);
+      });
+    });
   });
 
   // ====================================================================
@@ -1685,6 +2065,55 @@ describe('SalesService', () => {
         previousStatus: SaleStatus.ACTIVE,
       });
       expect(call?.[0].client).toBe(prisma.tx);
+    });
+
+    // ==================================================================
+    // Pagos (Fase 7, Bloque B)
+    // ==================================================================
+    describe('anulación de pagos activos', () => {
+      it('invoca PaymentEngine.cancelAllActiveForSale con el mismo tx y el actor de la anulación', async () => {
+        await service.cancel(validCancelInput);
+        expect(paymentEngine.cancelAllActiveForSale).toHaveBeenCalledWith(
+          prisma.tx,
+          expect.objectContaining({
+            saleId: SALE_ID,
+            saleNumber: 'NV-000001',
+            actorUserId: ACTOR_ID,
+          }),
+        );
+      });
+
+      it('se invoca ANTES de marcar la venta como CANCELLED', async () => {
+        const callOrder: string[] = [];
+        paymentEngine.cancelAllActiveForSale.mockImplementation(() => {
+          callOrder.push('payments.cancelAll');
+          return Promise.resolve([]);
+        });
+        prisma.tx.sale.update.mockImplementation(() => {
+          callOrder.push('sale.update');
+          return Promise.resolve(makeSaleDetailRow());
+        });
+        await service.cancel(validCancelInput);
+        expect(callOrder).toEqual(['payments.cancelAll', 'sale.update']);
+      });
+
+      it('NUNCA llama a PaymentEngine.recalculateSaleSummary (el resumen de pago queda congelado)', async () => {
+        await service.cancel(validCancelInput);
+        expect(paymentEngine.recalculateSaleSummary).not.toHaveBeenCalled();
+      });
+
+      it('SalesService nunca emite PAYMENT_CANCELLED directamente (PaymentEngine es el único emisor)', async () => {
+        await service.cancel(validCancelInput);
+        const actions = auditService.record.mock.calls.map(
+          (call) => call[0].action,
+        );
+        expect(actions).not.toContain(AuditAction.PAYMENT_CANCELLED);
+      });
+
+      it('venta sin pagos activos: no-op válido, la anulación de la venta continúa normalmente', async () => {
+        paymentEngine.cancelAllActiveForSale.mockResolvedValue([]);
+        await expect(service.cancel(validCancelInput)).resolves.toBeDefined();
+      });
     });
   });
 
