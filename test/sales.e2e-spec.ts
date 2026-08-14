@@ -4202,8 +4202,14 @@ describe('Sales (e2e)', () => {
       };
       expect(doc.tags.some((tag) => tag.name === 'Sales')).toBe(true);
 
-      const salePaths = Object.keys(doc.paths).filter((path) =>
-        path.includes('sales'),
+      // Fase 7, Bloque C: excluye explícitamente las rutas de Pagos
+      // anidadas bajo /sales/{saleId}/payments... (registradas por
+      // PaymentsController, un controller distinto) — de lo contrario el
+      // simple filtro por substring "sales" las contaría también, aunque
+      // SalesController en sí sigue exponiendo exactamente 7 paths/8
+      // operaciones, sin cambios.
+      const salePaths = Object.keys(doc.paths).filter(
+        (path) => path.includes('sales') && !path.includes('payments'),
       );
       expect(new Set(salePaths).size).toBe(7);
       let totalOps = 0;
@@ -4223,7 +4229,7 @@ describe('Sales (e2e)', () => {
       expect(printContentTypes).toContain('text/html');
     });
 
-    it('documentación de frontera de pago: paidAmount se documenta como siempre "0.00" (cierto en la Fase 6); balanceDue NO se documenta con esa misma afirmación falsa', async () => {
+    it('documentación de frontera de pago (Fase 7, Bloque C): paidAmount/balanceDue ya NO se documentan como "siempre 0.00" — reflejan la reconciliación dinámica contra Payment', async () => {
       const response = await request(app.getHttpServer()).get('/api/docs-json');
       const doc = response.body as {
         components: {
@@ -4237,7 +4243,12 @@ describe('Sales (e2e)', () => {
       expect(saleSchema).toBeDefined();
       const paidAmountDescription =
         saleSchema.properties?.paidAmount?.description ?? '';
-      expect(paidAmountDescription).toMatch(/0\.00/);
+      // La afirmación obsoleta de la Fase 6 ("Siempre 0.00 en la Fase 6:
+      // sin registros de Payment todavía") debe haber desaparecido; la
+      // documentación ahora explica la reconciliación contra los pagos
+      // ACTIVE de la venta.
+      expect(paidAmountDescription).not.toMatch(/siempre.*0\.00.*fase 6/i);
+      expect(paidAmountDescription.toLowerCase()).toMatch(/active/);
       const balanceDueDescription =
         saleSchema.properties?.balanceDue?.description ?? '';
       expect(balanceDueDescription).not.toMatch(/siempre.*0\.00/i);

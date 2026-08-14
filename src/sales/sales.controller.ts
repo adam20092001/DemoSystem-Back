@@ -33,6 +33,7 @@ import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import { CancelSaleDto } from './dto/cancel-sale.dto';
+import { ConvertQuoteToSaleDto } from './dto/convert-quote-to-sale.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import {
@@ -71,19 +72,19 @@ export class SalesController {
   @ApiOperation({
     summary: 'Registrar una venta directa (nace confirmada)',
     description:
-      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: en la Fase 6 no existe todavía un registro de pago trazable (llega en una fase posterior), así que una venta de total positivo a esos clientes no puede confirmarse por ahora.',
+      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse.',
   })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload inválido, sin ítems, producto repetido o cantidad/descuento inválidos.',
+      'Payload inválido, sin ítems, producto repetido, cantidad/descuento inválidos, o pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método).',
   })
   @ApiNotFoundResponse({
     description: 'El cliente o algún producto no existe.',
   })
   @ApiConflictResponse({
     description:
-      'Cliente/producto/categoría/unidad inactivos, stock insuficiente, o saldo pendiente positivo con cliente genérico/bloqueado.',
+      'Cliente/producto/categoría/unidad inactivos, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente genérico/bloqueado.',
   })
   @Roles(...WRITE_ROLES)
   @Post()
@@ -99,6 +100,13 @@ export class SalesController {
         productId: item.productId,
         quantity: item.quantity,
       })),
+      payment: dto.payment
+        ? {
+            method: dto.payment.method,
+            amount: dto.payment.amount,
+            reference: dto.payment.reference,
+          }
+        : undefined,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
@@ -108,27 +116,38 @@ export class SalesController {
     summary:
       'Confirmar una venta a partir de una cotización PENDIENTE o ACEPTADA',
     description:
-      'Sin cuerpo comercial: el precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente.',
+      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`); sin cuerpo, `{}` y `{ payment: {...} }` son todos válidos.',
   })
   @ApiParam({ name: 'quoteId', format: 'uuid' })
   @ApiCreatedResponse({ type: SaleResponseDto })
-  @ApiBadRequestResponse({ description: 'quoteId inválido.' })
+  @ApiBadRequestResponse({
+    description:
+      'quoteId inválido, o pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método).',
+  })
   @ApiNotFoundResponse({
     description: 'La cotización, el cliente o algún producto no existe.',
   })
   @ApiConflictResponse({
     description:
-      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, stock insuficiente, o saldo pendiente positivo con cliente genérico/bloqueado.',
+      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente bloqueado.',
   })
   @Roles(...WRITE_ROLES)
   @Post('from-quote/:quoteId')
   fromQuote(
     @Param('quoteId', ParseUUIDPipe) quoteId: string,
+    @Body() dto: ConvertQuoteToSaleDto,
     @CurrentUser() actor: AuthenticatedUser,
     @Req() request: Request,
   ): Promise<SafeSale> {
     return this.salesService.createFromQuote({
       quoteId,
+      payment: dto?.payment
+        ? {
+            method: dto.payment.method,
+            amount: dto.payment.amount,
+            reference: dto.payment.reference,
+          }
+        : undefined,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });

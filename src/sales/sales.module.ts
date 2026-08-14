@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { InventoryModule } from '../inventory/inventory.module';
-import { PaymentEngine } from '../payments/payment.engine';
+import { PaymentsModule } from '../payments/payments.module';
 import { SaleDocumentRenderer } from './printing/sale-document.renderer';
 import { SalesController } from './sales.controller';
 import { SalesService } from './sales.service';
@@ -18,20 +18,18 @@ import { SalesService } from './sales.service';
  * del plan aprobado: SalesService posee la conversión, sin dependencia de
  * inyección hacia Quotes).
  *
- * PaymentEngine (Fase 7, Bloque B) se declara aquí como provider directo,
- * NO importado desde un PaymentsModule (que no existe todavía — Bloque C):
- * PaymentEngine solo depende de AuditService (global), así que registrarlo
- * localmente es autosuficiente y evita crear un módulo entero solo para
- * exponer un provider. Cuando el Bloque C introduzca PaymentsModule, este
- * import se reemplazará por `imports: [..., PaymentsModule]` con
- * PaymentsModule exportando PaymentEngine (mismo patrón ya usado para
- * StockMovementEngine vía InventoryModule) — SalesModule seguirá sin
- * importar PaymentsModule -> SalesModule en sentido inverso.
+ * PaymentEngine (Fase 7) se importa desde PaymentsModule (Bloque C), que lo
+ * exporta — mismo patrón ya usado para StockMovementEngine vía
+ * InventoryModule. Reemplaza el registro temporal directo en
+ * `providers: [..., PaymentEngine]` del Bloque B (cuando PaymentsModule
+ * todavía no existía): ahora PaymentsModule es el ÚNICO propietario del
+ * provider, sin duplicación. PaymentsModule NUNCA importa SalesModule, así
+ * que no hay ciclo y no hace falta forwardRef.
  */
 @Module({
-  imports: [DocumentSequencesModule, InventoryModule],
+  imports: [DocumentSequencesModule, InventoryModule, PaymentsModule],
   controllers: [SalesController],
-  providers: [SalesService, SaleDocumentRenderer, PaymentEngine],
+  providers: [SalesService, SaleDocumentRenderer],
   exports: [SalesService],
 })
 export class SalesModule {}

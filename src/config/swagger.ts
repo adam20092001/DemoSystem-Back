@@ -70,9 +70,26 @@ export function setupSwagger(app: INestApplication): boolean {
       'Sales',
       'Ventas directas o desde cotización: confirmación inmediata (sin borrador), ' +
         'descuento real de stock, anulación con reversa histórica y nota de venta ' +
-        'interna no fiscal. Los campos de resumen de pago (paymentStatus/paidAmount/' +
-        'balanceDue) preparan la integración con Pagos de una fase posterior; ' +
-        'todavía no existe ningún endpoint de registro de pagos.',
+        'interna no fiscal. Admiten un pago inicial opcional al confirmar. Los ' +
+        'campos de resumen de pago (paymentStatus/paidAmount/balanceDue) se ' +
+        'recalculan desde los pagos ACTIVE de la venta (módulo Pagos); para una ' +
+        'venta ANULADA quedan congelados con su valor histórico previo a la ' +
+        'anulación.',
+    )
+    .addTag(
+      'Payments',
+      'Cobros aplicados a una venta (Documento Maestro §16): pago completo o ' +
+        'parcial al confirmar la venta o en un momento posterior, y anulación ' +
+        'manual con motivo obligatorio. Un pago nunca se edita ni se elimina ' +
+        'físicamente. No existe un endpoint de detalle de pago independiente: el ' +
+        'historial completo de una venta se consulta en su detalle ' +
+        '(GET /sales/:id).',
+    )
+    .addTag(
+      'Accounts Receivable',
+      'Consulta de solo lectura de ventas ACTIVE con saldo pendiente positivo, ' +
+        'deuda más antigua primero. No es un libro contable formal ni sustituye ' +
+        'la contabilidad básica de una fase posterior.',
     )
     .build();
 

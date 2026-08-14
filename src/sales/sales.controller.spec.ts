@@ -108,28 +108,110 @@ describe('SalesController', () => {
         expect.objectContaining({ discountAmount: '5.00' }),
       );
     });
+
+    it('sin payment: se delega payment=undefined (Fase 6 preservada)', async () => {
+      service.createDirect.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.create(dto, ACTOR, request);
+
+      expect(service.createDirect).toHaveBeenCalledWith(
+        expect.objectContaining({ payment: undefined }),
+      );
+    });
+
+    it('con payment: delega method/amount/reference mapeados (Fase 7, Bloque C)', async () => {
+      service.createDirect.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.create(
+        {
+          ...dto,
+          payment: { method: 'CASH', amount: '10.00', reference: undefined },
+        },
+        ACTOR,
+        request,
+      );
+
+      expect(service.createDirect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payment: { method: 'CASH', amount: '10.00', reference: undefined },
+        }),
+      );
+    });
+
+    it('el actor autenticado sigue siendo el único origen de actorUserId, incluso con payment presente', async () => {
+      service.createDirect.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.create(
+        { ...dto, payment: { method: 'CASH', amount: '10.00' } },
+        ACTOR,
+        request,
+      );
+
+      expect(service.createDirect).toHaveBeenCalledWith(
+        expect.objectContaining({ actorUserId: 'actor-id' }),
+      );
+    });
   });
 
   describe('fromQuote', () => {
-    it('delega quoteId + actor/IP, sin cuerpo comercial', async () => {
+    it('sin cuerpo (undefined): delega quoteId + actor/IP, sin payment', async () => {
       service.createFromQuote.mockResolvedValue(SAMPLE_SALE);
       const request = { ip: '203.0.113.5' } as unknown as Request;
 
-      const result = await controller.fromQuote('quote-1', ACTOR, request);
+      const result = await controller.fromQuote(
+        'quote-1',
+        undefined as never,
+        ACTOR,
+        request,
+      );
 
       expect(service.createFromQuote).toHaveBeenCalledWith({
         quoteId: 'quote-1',
+        payment: undefined,
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_SALE);
     });
 
+    it('cuerpo {} (sin payment): delega sin payment', async () => {
+      service.createFromQuote.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.fromQuote('quote-1', {}, ACTOR, request);
+
+      expect(service.createFromQuote).toHaveBeenCalledWith(
+        expect.objectContaining({ payment: undefined }),
+      );
+    });
+
+    it('cuerpo con payment: delega method/amount/reference mapeados', async () => {
+      service.createFromQuote.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.fromQuote(
+        'quote-1',
+        { payment: { method: 'CASH', amount: '10.00', reference: undefined } },
+        ACTOR,
+        request,
+      );
+
+      expect(service.createFromQuote).toHaveBeenCalledWith({
+        quoteId: 'quote-1',
+        payment: { method: 'CASH', amount: '10.00', reference: undefined },
+        actorUserId: 'actor-id',
+        ipAddress: '203.0.113.5',
+      });
+    });
+
     it('ipAddress ausente se envía como null', async () => {
       service.createFromQuote.mockResolvedValue(SAMPLE_SALE);
       const request = {} as unknown as Request;
 
-      await controller.fromQuote('quote-1', ACTOR, request);
+      await controller.fromQuote('quote-1', {}, ACTOR, request);
 
       expect(service.createFromQuote).toHaveBeenCalledWith(
         expect.objectContaining({ ipAddress: null }),

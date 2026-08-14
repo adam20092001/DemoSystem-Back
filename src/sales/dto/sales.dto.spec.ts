@@ -9,6 +9,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { createValidationPipe } from '../../common/pipes/validation.pipe';
 import { CancelSaleDto } from './cancel-sale.dto';
+import { ConvertQuoteToSaleDto } from './convert-quote-to-sale.dto';
 import { CreateSaleDto } from './create-sale.dto';
 import { ListSalesQueryDto } from './list-sales-query.dto';
 
@@ -202,6 +203,84 @@ describe('CreateSaleDto', () => {
           items: [{ productId: VALID_UUID_2, quantity: '1', [field]: 'x' }],
         },
         field,
+      );
+    });
+  });
+
+  describe('pago inicial anidado (Fase 7, Bloque C)', () => {
+    it('sin payment: válido (comportamiento de la Fase 6 preservado)', async () => {
+      const instance = plainToInstance(CreateSaleDto, baseValid);
+      const errors = await validate(instance);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('payment válido (CASH sin referencia): no reporta errores', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payment: { method: 'CASH', amount: '10.00' },
+      });
+      const errors = await validate(instance);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('payment válido con referencia: no reporta errores', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payment: {
+          method: 'BANK_TRANSFER',
+          amount: '10.00',
+          reference: 'OP-000123',
+        },
+      });
+      const errors = await validate(instance);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('payment.method inválido reporta error anidado', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payment: { method: 'NOT_A_METHOD', amount: '10.00' },
+      });
+      const errors = await validate(instance);
+      expect(errors.some((e) => e.property === 'payment')).toBe(true);
+    });
+
+    it.each([
+      ['negativo', '-10.00'],
+      ['notación científica', '1e2'],
+      ['coma decimal', '10,00'],
+      ['más de 2 decimales', '10.999'],
+    ])(
+      'payment.amount malformado (%s) reporta error anidado',
+      async (_label, amount) => {
+        const instance = plainToInstance(CreateSaleDto, {
+          ...baseValid,
+          payment: { method: 'CASH', amount },
+        });
+        const errors = await validate(instance);
+        expect(errors.some((e) => e.property === 'payment')).toBe(true);
+      },
+    );
+
+    it('campo no declarado dentro de payment -> 400 por whitelist', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        {
+          ...baseValid,
+          payment: { method: 'CASH', amount: '10.00', paidAt: '2026-01-01' },
+        },
+        'paidAt',
+      );
+    });
+
+    it('payment.status/saleId/createdBy no se aceptan (400 por whitelist)', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        {
+          ...baseValid,
+          payment: { method: 'CASH', amount: '10.00', status: 'ACTIVE' },
+        },
+        'status',
       );
     });
   });
@@ -425,6 +504,72 @@ describe('ListSalesQueryDto', () => {
           field,
         );
       },
+    );
+  });
+});
+
+describe('ConvertQuoteToSaleDto', () => {
+  it('sin cuerpo (undefined): el ValidationPipe real lo acepta (todos los campos son opcionales)', async () => {
+    const pipe = createValidationPipe();
+    await expect(
+      pipe.transform(undefined, {
+        type: 'body',
+        metatype: ConvertQuoteToSaleDto,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('cuerpo {} : válido, sin errores', async () => {
+    const instance = plainToInstance(ConvertQuoteToSaleDto, {});
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('cuerpo con payment válido: sin errores', async () => {
+    const instance = plainToInstance(ConvertQuoteToSaleDto, {
+      payment: { method: 'CASH', amount: '10.00' },
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('payment.amount malformado reporta error anidado', async () => {
+    const instance = plainToInstance(ConvertQuoteToSaleDto, {
+      payment: { method: 'CASH', amount: '-10.00' },
+    });
+    const errors = await validate(instance);
+    expect(errors.some((e) => e.property === 'payment')).toBe(true);
+  });
+
+  it('customerId no se acepta -> 400 por whitelist', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      { customerId: VALID_UUID },
+      'customerId',
+    );
+  });
+
+  it('discountAmount no se acepta -> 400 por whitelist', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      { discountAmount: '10.00' },
+      'discountAmount',
+    );
+  });
+
+  it('items no se acepta -> 400 por whitelist', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      { items: [{ productId: VALID_UUID_2, quantity: '1' }] },
+      'items',
+    );
+  });
+
+  it('campo desconocido dentro de payment -> 400 por whitelist', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      { payment: { method: 'CASH', amount: '10.00', saleId: VALID_UUID } },
+      'saleId',
     );
   });
 });
