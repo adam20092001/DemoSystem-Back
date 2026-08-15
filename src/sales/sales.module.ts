@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { SaleDocumentRenderer } from './printing/sale-document.renderer';
 import { SalesController } from './sales.controller';
 import { SalesService } from './sales.service';
@@ -16,9 +17,17 @@ import { SalesService } from './sales.service';
  * puras de quote-calculator.ts (effectiveStatus), nunca QuotesService (D17
  * del plan aprobado: SalesService posee la conversión, sin dependencia de
  * inyección hacia Quotes).
+ *
+ * PaymentEngine (Fase 7) se importa desde PaymentsModule (Bloque C), que lo
+ * exporta — mismo patrón ya usado para StockMovementEngine vía
+ * InventoryModule. Reemplaza el registro temporal directo en
+ * `providers: [..., PaymentEngine]` del Bloque B (cuando PaymentsModule
+ * todavía no existía): ahora PaymentsModule es el ÚNICO propietario del
+ * provider, sin duplicación. PaymentsModule NUNCA importa SalesModule, así
+ * que no hay ciclo y no hace falta forwardRef.
  */
 @Module({
-  imports: [DocumentSequencesModule, InventoryModule],
+  imports: [DocumentSequencesModule, InventoryModule, PaymentsModule],
   controllers: [SalesController],
   providers: [SalesService, SaleDocumentRenderer],
   exports: [SalesService],

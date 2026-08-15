@@ -8,6 +8,9 @@ import {
   DocumentType,
   InventoryMovementOrigin,
   InventoryMovementType,
+  PaymentCancellationSource,
+  PaymentMethod,
+  PaymentStatus,
   Prisma,
   PrismaClient,
   ProductStatus,
@@ -75,6 +78,10 @@ const SAFE_SALE_DETAIL_KEYS = [
   'balanceDue',
   'items',
   'inventoryMovements',
+  // Fase 7, Bloque B: SafeSale gana `payments[]` (historial ACTIVE +
+  // CANCELLED). Ningún DTO HTTP acepta `payment` todavía (llega en el
+  // Bloque C), así que en todas las ventas de este spec queda `[]`.
+  'payments',
   'confirmedAt',
   'cancelledAt',
   'cancellationReason',
@@ -190,6 +197,10 @@ interface SafeSaleBody {
   balanceDue: string;
   items: SafeSaleItemBody[];
   inventoryMovements: SafeSaleMovementBody[];
+  // Fase 7, Bloque B: siempre [] en este spec (sin DTO HTTP para poblarlo
+  // todavía). Tipado laxo a propósito: el contrato completo de pago llega
+  // en Block C/D con su propio spec.
+  payments: unknown[];
   confirmedAt: string;
   cancelledAt: string | null;
   cancellationReason: string | null;
@@ -226,6 +237,34 @@ interface PaginatedBody<T> {
   limit: number;
   total: number;
   totalPages: number;
+}
+
+/** Forma segura de un pago anidado en `SafeSaleBody.payments` (Fase 7, Bloque D). Espejo de PaymentResponseDto. */
+interface SafeSalePaymentItem {
+  id: string;
+  saleId: string;
+  method: PaymentMethod;
+  amount: string;
+  reference: string | null;
+  status: PaymentStatus;
+  paidAt: string;
+  createdBy: {
+    id: string;
+    username: string;
+    firstName: string;
+    lastName: string;
+  };
+  cancelledAt: string | null;
+  cancellationReason: string | null;
+  cancellationSource: PaymentCancellationSource | null;
+  cancelledBy: {
+    id: string;
+    username: string;
+    firstName: string;
+    lastName: string;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface FixtureProduct {
@@ -795,11 +834,28 @@ describe('Sales (e2e)', () => {
     try {
       const allSaleIds = [...createdSaleIds, ...directSaleIds];
       if (allSaleIds.length > 0) {
+        // Fase 7, Bloque D: varias ventas propias ahora tienen Payment
+        // asociado (pago inicial / posterior). Payment -> Sale es RESTRICT,
+        // así que hay que retirar primero el AuditLog de cada Payment propio
+        // y luego los propios Payment, antes de poder borrar la Sale.
+        const ownedPayments = await prisma.payment.findMany({
+          where: { saleId: { in: allSaleIds } },
+          select: { id: true },
+        });
+        const ownedPaymentIds = ownedPayments.map((p) => p.id);
+        if (ownedPaymentIds.length > 0) {
+          await prisma.auditLog.deleteMany({
+            where: { entityType: 'Payment', entityId: { in: ownedPaymentIds } },
+          });
+        }
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Sale', entityId: { in: allSaleIds } },
         });
         await prisma.inventoryMovement.deleteMany({
           where: { referenceType: 'Sale', referenceId: { in: allSaleIds } },
+        });
+        await prisma.payment.deleteMany({
+          where: { saleId: { in: allSaleIds } },
         });
         await prisma.sale.deleteMany({ where: { id: { in: allSaleIds } } });
       }
@@ -4194,8 +4250,14 @@ describe('Sales (e2e)', () => {
       };
       expect(doc.tags.some((tag) => tag.name === 'Sales')).toBe(true);
 
-      const salePaths = Object.keys(doc.paths).filter((path) =>
-        path.includes('sales'),
+      // Fase 7, Bloque C: excluye explícitamente las rutas de Pagos
+      // anidadas bajo /sales/{saleId}/payments... (registradas por
+      // PaymentsController, un controller distinto) — de lo contrario el
+      // simple filtro por substring "sales" las contaría también, aunque
+      // SalesController en sí sigue exponiendo exactamente 7 paths/8
+      // operaciones, sin cambios.
+      const salePaths = Object.keys(doc.paths).filter(
+        (path) => path.includes('sales') && !path.includes('payments'),
       );
       expect(new Set(salePaths).size).toBe(7);
       let totalOps = 0;
@@ -4215,7 +4277,7 @@ describe('Sales (e2e)', () => {
       expect(printContentTypes).toContain('text/html');
     });
 
-    it('documentación de frontera de pago: paidAmount se documenta como siempre "0.00" (cierto en la Fase 6); balanceDue NO se documenta con esa misma afirmación falsa', async () => {
+    it('documentación de frontera de pago (Fase 7, Bloque C): paidAmount/balanceDue ya NO se documentan como "siempre 0.00" — reflejan la reconciliación dinámica contra Payment', async () => {
       const response = await request(app.getHttpServer()).get('/api/docs-json');
       const doc = response.body as {
         components: {
@@ -4229,7 +4291,12 @@ describe('Sales (e2e)', () => {
       expect(saleSchema).toBeDefined();
       const paidAmountDescription =
         saleSchema.properties?.paidAmount?.description ?? '';
-      expect(paidAmountDescription).toMatch(/0\.00/);
+      // La afirmación obsoleta de la Fase 6 ("Siempre 0.00 en la Fase 6:
+      // sin registros de Payment todavía") debe haber desaparecido; la
+      // documentación ahora explica la reconciliación contra los pagos
+      // ACTIVE de la venta.
+      expect(paidAmountDescription).not.toMatch(/siempre.*0\.00.*fase 6/i);
+      expect(paidAmountDescription.toLowerCase()).toMatch(/active/);
       const balanceDueDescription =
         saleSchema.properties?.balanceDue?.description ?? '';
       expect(balanceDueDescription).not.toMatch(/siempre.*0\.00/i);
@@ -4240,15 +4307,15 @@ describe('Sales (e2e)', () => {
   // Sin artefactos de Payment / sin efecto lateral de inventario en lectura
   // ==================================================================
   describe('sin artefactos de Payment; sin efecto lateral de inventario en lectura o entrega', () => {
-    it('ninguna respuesta de Sale expone un arreglo de pagos ni un paymentId', async () => {
+    it('sin pago inicial en el body: payments=[] (el comportamiento CON pago inicial se cubre en Fase 7, Bloque D, más abajo)', async () => {
       const sale = await createDirectSale(adminCookie, {
         items: [{ productId: productA.id, quantity: '1.000' }],
       });
       const response = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', adminCookie);
+      expect((response.body as SafeSaleBody).payments).toEqual([]);
       const serialized = JSON.stringify(response.body);
-      expect(serialized).not.toMatch(/"payments"/);
       expect(serialized).not.toMatch(/"paymentId"/);
     });
 
@@ -4273,6 +4340,1096 @@ describe('Sales (e2e)', () => {
 
       const after = await prisma.inventoryMovement.count();
       expect(after).toBe(before);
+    });
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — pago inicial en venta directa
+  // ==================================================================
+  describe('Fase 7, Bloque D — pago inicial en venta directa', () => {
+    let productD100: FixtureProduct;
+    let productDInsufficient: FixtureProduct;
+    let productDMultiA: FixtureProduct;
+    let productDMultiB: FixtureProduct;
+    let prospectInitialPayment: FixtureCustomer;
+    let prospectOverpayRollback: FixtureCustomer;
+
+    async function createDedicatedProduct(
+      data: Partial<Prisma.ProductUncheckedCreateInput>,
+    ): Promise<FixtureProduct> {
+      const suffix = nextSuffix();
+      const row = await prisma.product.create({
+        data: {
+          sku: `E2ES-PAYD-${suffix}`,
+          name: `Producto Pago Inicial E2E ${suffix}`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId: unitDecimalId,
+          isInventoryTracked: true,
+          status: ProductStatus.ACTIVE,
+          ...data,
+        },
+      });
+      createdProductIds.push(row.id);
+      return {
+        id: row.id,
+        sku: row.sku,
+        name: row.name,
+        salePrice: row.salePrice.toFixed(2),
+      };
+    }
+
+    beforeAll(async () => {
+      productD100 = await createDedicatedProduct({
+        salePrice: new Prisma.Decimal('100.00'),
+        stockCurrent: new Prisma.Decimal('500.000'),
+      });
+      productDInsufficient = await createDedicatedProduct({
+        salePrice: new Prisma.Decimal('100.00'),
+        stockCurrent: new Prisma.Decimal('1.000'),
+      });
+      productDMultiA = await createDedicatedProduct({
+        salePrice: new Prisma.Decimal('50.00'),
+        stockCurrent: new Prisma.Decimal('500.000'),
+      });
+      productDMultiB = await createDedicatedProduct({
+        salePrice: new Prisma.Decimal('50.00'),
+        stockCurrent: new Prisma.Decimal('1.000'),
+      });
+
+      const prospectASuffix = nextSuffix();
+      const prospectA = await prisma.customer.create({
+        data: {
+          customerType: CustomerType.PERSON,
+          customerStage: CustomerStage.PROSPECT,
+          status: CustomerStatus.ACTIVE,
+          name: `Prospecto Pago Inicial E2E ${prospectASuffix}`,
+        },
+      });
+      createdCustomerIds.push(prospectA.id);
+      prospectInitialPayment = { id: prospectA.id, name: prospectA.name };
+
+      const prospectBSuffix = nextSuffix();
+      const prospectB = await prisma.customer.create({
+        data: {
+          customerType: CustomerType.PERSON,
+          customerStage: CustomerStage.PROSPECT,
+          status: CustomerStatus.ACTIVE,
+          name: `Prospecto Sobrepago Rollback E2E ${prospectBSuffix}`,
+        },
+      });
+      createdCustomerIds.push(prospectB.id);
+      prospectOverpayRollback = { id: prospectB.id, name: prospectB.name };
+    });
+
+    it('sin pago inicial: UNPAID, paidAmount 0.00, balanceDue = total, payments=[]', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+      expect(sale.paidAmount).toBe('0.00');
+      expect(sale.balanceDue).toBe('100.00');
+      expect(sale.payments).toEqual([]);
+    });
+
+    it('pago inicial parcial (40 de 100): PARTIALLY_PAID, paidAmount 40.00, balanceDue 60.00, payments=[1 ACTIVE 40.00]; el Payment ya existe dentro de la misma respuesta (misma transacción)', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '40.00' },
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      expect(sale.paidAmount).toBe('40.00');
+      expect(sale.balanceDue).toBe('60.00');
+      expect(sale.payments).toHaveLength(1);
+      const payment = sale.payments[0] as SafeSalePaymentItem;
+      expect(payment.status).toBe(PaymentStatus.ACTIVE);
+      expect(payment.amount).toBe('40.00');
+      const row = await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+      expect(row.saleId).toBe(sale.id);
+    });
+
+    it('pago inicial completo (100 de 100): PAID, paidAmount 100.00, balanceDue 0.00, payments=[1 ACTIVE 100.00]', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.paidAmount).toBe('100.00');
+      expect(sale.balanceDue).toBe('0.00');
+      expect(sale.payments).toHaveLength(1);
+    });
+
+    it('Público general: sin pago → 409; pago parcial (40) → 409; pago total (100) → éxito PAID/balance 0/1 pago ACTIVE', async () => {
+      const noPayment = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            customerId: genericCustomerId,
+            items: [{ productId: productD100.id, quantity: '1.000' }],
+          }),
+        );
+      expect(noPayment.status).toBe(409);
+
+      const partial = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            customerId: genericCustomerId,
+            items: [{ productId: productD100.id, quantity: '1.000' }],
+            payment: { method: 'CASH', amount: '40.00' },
+          }),
+        );
+      expect(partial.status).toBe(409);
+
+      const full = await createDirectSale(adminCookie, {
+        customerId: genericCustomerId,
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+      expect(full.customerIsGeneric).toBe(true);
+      expect(full.balanceDue).toBe('0.00');
+      expect(full.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(full.payments).toHaveLength(1);
+    });
+
+    it('Público general con total 0 (descuento total): éxito sin ningún Payment', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        customerId: genericCustomerId,
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        discountAmount: '100.00',
+      });
+      expect(sale.total).toBe('0.00');
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.payments).toEqual([]);
+    });
+
+    it('cliente BLOCKED: sin pago → 409; pago parcial → 409; pago total → éxito; el cliente permanece BLOCKED (sin mutación de estado)', async () => {
+      const before = await prisma.customer.findUniqueOrThrow({
+        where: { id: blockedCustomer.id },
+      });
+      expect(before.status).toBe(CustomerStatus.BLOCKED);
+
+      const noPayment = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            customerId: blockedCustomer.id,
+            items: [{ productId: productD100.id, quantity: '1.000' }],
+          }),
+        );
+      expect(noPayment.status).toBe(409);
+
+      const partial = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            customerId: blockedCustomer.id,
+            items: [{ productId: productD100.id, quantity: '1.000' }],
+            payment: { method: 'CASH', amount: '40.00' },
+          }),
+        );
+      expect(partial.status).toBe(409);
+
+      const full = await createDirectSale(adminCookie, {
+        customerId: blockedCustomer.id,
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+      expect(full.paymentStatus).toBe(SalePaymentStatus.PAID);
+
+      const after = await prisma.customer.findUniqueOrThrow({
+        where: { id: blockedCustomer.id },
+      });
+      expect(after.status).toBe(CustomerStatus.BLOCKED);
+    });
+
+    it('pago inicial > total (100.01 de 100): 409, rollback atómico total — sin Sale/SaleItem/Payment, NV sin consumir, PROSPECT sin promover', async () => {
+      const before = await prisma.customer.findUniqueOrThrow({
+        where: { id: prospectOverpayRollback.id },
+      });
+      expect(before.customerStage).toBe(CustomerStage.PROSPECT);
+      const nvBefore = await currentSaleSequenceNumber();
+      const salesBefore = await prisma.sale.count();
+      const paymentsBefore = await prisma.payment.count();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            customerId: prospectOverpayRollback.id,
+            items: [{ productId: productD100.id, quantity: '1.000' }],
+            payment: { method: 'CASH', amount: '100.01' },
+          }),
+        );
+      expect(response.status).toBe(409);
+
+      expect(await prisma.sale.count()).toBe(salesBefore);
+      expect(await prisma.payment.count()).toBe(paymentsBefore);
+      expect(await currentSaleSequenceNumber()).toBe(nvBefore);
+
+      const after = await prisma.customer.findUniqueOrThrow({
+        where: { id: prospectOverpayRollback.id },
+      });
+      expect(after.customerStage).toBe(CustomerStage.PROSPECT);
+      const stageAudits = await fetchAuditRows(
+        AuditAction.CUSTOMER_STAGE_CHANGED,
+        'Customer',
+        prospectOverpayRollback.id,
+      );
+      expect(stageAudits).toHaveLength(0);
+    });
+
+    it('prospecto + pago inicial exitoso: promovido a CUSTOMER; exactamente 1 CUSTOMER_STAGE_CHANGED, 1 PAYMENT_REGISTERED y 1 SALE_CONFIRMED', async () => {
+      const before = await prisma.customer.findUniqueOrThrow({
+        where: { id: prospectInitialPayment.id },
+      });
+      expect(before.customerStage).toBe(CustomerStage.PROSPECT);
+
+      const sale = await createDirectSale(adminCookie, {
+        customerId: prospectInitialPayment.id,
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+
+      const after = await prisma.customer.findUniqueOrThrow({
+        where: { id: prospectInitialPayment.id },
+      });
+      expect(after.customerStage).toBe(CustomerStage.CUSTOMER);
+
+      const stageAudits = await fetchAuditRows(
+        AuditAction.CUSTOMER_STAGE_CHANGED,
+        'Customer',
+        prospectInitialPayment.id,
+      );
+      expect(stageAudits).toHaveLength(1);
+
+      const payment = sale.payments[0] as SafeSalePaymentItem;
+      const paymentAudits = await fetchAuditRows(
+        AuditAction.PAYMENT_REGISTERED,
+        'Payment',
+        payment.id,
+      );
+      expect(paymentAudits).toHaveLength(1);
+
+      const confirmAudits = await fetchAuditRows(
+        AuditAction.SALE_CONFIRMED,
+        'Sale',
+        sale.id,
+      );
+      expect(confirmAudits).toHaveLength(1);
+    });
+
+    it('stock insuficiente con pago inicial válido: 409, rollback total — sin Sale/SaleItem/Payment/movimiento, stock sin cambios', async () => {
+      const stockBefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productDInsufficient.id },
+      });
+      const paymentsBefore = await prisma.payment.count();
+      const movementsBefore = await prisma.inventoryMovement.count();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            items: [{ productId: productDInsufficient.id, quantity: '2.000' }],
+            payment: { method: 'CASH', amount: '50.00' },
+          }),
+        );
+      expect(response.status).toBe(409);
+
+      expect(await prisma.payment.count()).toBe(paymentsBefore);
+      expect(await prisma.inventoryMovement.count()).toBe(movementsBefore);
+      const stockAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productDInsufficient.id },
+      });
+      expect(stockAfter.stockCurrent.toFixed(3)).toBe(
+        stockBefore.stockCurrent.toFixed(3),
+      );
+    });
+
+    it('dos ítems (A suficiente, B insuficiente) con pago inicial válido: 409, ningún stock cambia (ni el de A), sin Payment', async () => {
+      const stockABefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productDMultiA.id },
+      });
+      const stockBBefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productDMultiB.id },
+      });
+      const paymentsBefore = await prisma.payment.count();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateSaleBody({
+            items: [
+              { productId: productDMultiA.id, quantity: '2.000' },
+              { productId: productDMultiB.id, quantity: '2.000' },
+            ],
+            payment: { method: 'CASH', amount: '50.00' },
+          }),
+        );
+      expect(response.status).toBe(409);
+
+      expect(await prisma.payment.count()).toBe(paymentsBefore);
+      const stockAAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productDMultiA.id },
+      });
+      const stockBAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productDMultiB.id },
+      });
+      expect(stockAAfter.stockCurrent.toFixed(3)).toBe(
+        stockABefore.stockCurrent.toFixed(3),
+      );
+      expect(stockBAfter.stockCurrent.toFixed(3)).toBe(
+        stockBBefore.stockCurrent.toFixed(3),
+      );
+    });
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — pago inicial en conversión de cotización
+  // ==================================================================
+  describe('Fase 7, Bloque D — pago inicial en conversión de cotización', () => {
+    let productQD: FixtureProduct;
+    let productQDInsufficient: FixtureProduct;
+
+    beforeAll(async () => {
+      const suffixA = nextSuffix();
+      const rowA = await prisma.product.create({
+        data: {
+          sku: `E2ES-PAYQ-${suffixA}`,
+          name: `Producto Pago Cotizacion E2E ${suffixA}`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId: unitDecimalId,
+          salePrice: new Prisma.Decimal('100.00'),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('500.000'),
+        },
+      });
+      createdProductIds.push(rowA.id);
+      productQD = {
+        id: rowA.id,
+        sku: rowA.sku,
+        name: rowA.name,
+        salePrice: rowA.salePrice.toFixed(2),
+      };
+
+      const suffixB = nextSuffix();
+      const rowB = await prisma.product.create({
+        data: {
+          sku: `E2ES-PAYQ-${suffixB}`,
+          name: `Producto Pago Cotizacion Insuficiente E2E ${suffixB}`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId: unitDecimalId,
+          salePrice: new Prisma.Decimal('100.00'),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('1.000'),
+        },
+      });
+      createdProductIds.push(rowB.id);
+      productQDInsufficient = {
+        id: rowB.id,
+        sku: rowB.sku,
+        name: rowB.name,
+        salePrice: rowB.salePrice.toFixed(2),
+      };
+    });
+
+    it('sin pago (preserva el comportamiento de la Fase 6): UNPAID, paidAmount 0, balanceDue = total, payments=[]; Quote CONVERTED', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productQD, '1.000')],
+      });
+      const sale = await convertQuoteOrThrow(adminCookie, quote.id);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+      expect(sale.paidAmount).toBe('0.00');
+      expect(sale.balanceDue).toBe(sale.total);
+      expect(sale.payments).toEqual([]);
+      const quoteRow = await prisma.quote.findUniqueOrThrow({
+        where: { id: quote.id },
+      });
+      expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
+    });
+
+    it('pago parcial (40 de 100): PARTIALLY_PAID 40/60, 1 pago ACTIVE, stock descontado una vez, Quote CONVERTED, todo en una transacción', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productQD, '1.000')],
+      });
+      const stockBefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productQD.id },
+      });
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '40.00' } });
+      expect(response.status).toBe(201);
+      const sale = response.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      expect(sale.paidAmount).toBe('40.00');
+      expect(sale.balanceDue).toBe('60.00');
+      expect(sale.payments).toHaveLength(1);
+
+      const stockAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productQD.id },
+      });
+      expect(
+        stockBefore.stockCurrent.minus(stockAfter.stockCurrent).toFixed(3),
+      ).toBe('1.000');
+      const exits = await prisma.inventoryMovement.count({
+        where: {
+          referenceType: 'Sale',
+          referenceId: sale.id,
+          origin: InventoryMovementOrigin.SALE,
+        },
+      });
+      expect(exits).toBe(1);
+    });
+
+    it('pago total (100 de 100): PAID, 1 pago ACTIVE, Quote CONVERTED', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productQD, '1.000')],
+      });
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '100.00' } });
+      expect(response.status).toBe(201);
+      const sale = response.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.payments).toHaveLength(1);
+    });
+
+    it('pago inicial válido pero conversión falla por stock insuficiente vigente: 409, rollback total — sin Sale/Payment/mutación de stock; Quote sin cambios; NV sin consumir', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productQDInsufficient, '5.000')],
+      });
+      const stockBefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productQDInsufficient.id },
+      });
+      const nvBefore = await currentSaleSequenceNumber();
+      const paymentsBefore = await prisma.payment.count();
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '50.00' } });
+      expect(response.status).toBe(409);
+
+      expect(await prisma.payment.count()).toBe(paymentsBefore);
+      expect(await currentSaleSequenceNumber()).toBe(nvBefore);
+      const stockAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productQDInsufficient.id },
+      });
+      expect(stockAfter.stockCurrent.toFixed(3)).toBe(
+        stockBefore.stockCurrent.toFixed(3),
+      );
+      const quoteRow = await prisma.quote.findUniqueOrThrow({
+        where: { id: quote.id },
+      });
+      expect(quoteRow.status).toBe(QuoteStatus.PENDING);
+      const convertedAudits = await fetchAuditRows(
+        AuditAction.QUOTE_CONVERTED,
+        'Quote',
+        quote.id,
+      );
+      expect(convertedAudits).toHaveLength(0);
+    });
+
+    it('el pago inicial nunca reprecia ni reescribe el historial comercial de la cotización: solo afecta paymentStatus/paidAmount/balanceDue/payments[]', async () => {
+      const snapshotSuffix = nextSuffix();
+      const customer = await prisma.customer.create({
+        data: {
+          customerType: CustomerType.PERSON,
+          customerStage: CustomerStage.CUSTOMER,
+          status: CustomerStatus.ACTIVE,
+          name: `Cliente Snapshot Pago E2E ${snapshotSuffix}`,
+          documentType: CustomerDocumentType.DNI,
+          documentNumber: `SNPP${snapshotSuffix}`,
+        },
+      });
+      createdCustomerIds.push(customer.id);
+      const originalCustomerName = customer.name;
+
+      const dedicatedSuffix = nextSuffix();
+      const dedicatedProduct = await prisma.product.create({
+        data: {
+          sku: `E2ES-SNPP-${dedicatedSuffix}`,
+          name: `Producto Snapshot Pago E2E ${dedicatedSuffix}`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId: unitDecimalId,
+          salePrice: new Prisma.Decimal('30.00'),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('50.000'),
+        },
+      });
+      createdProductIds.push(dedicatedProduct.id);
+      const productSnapshot: FixtureProduct = {
+        id: dedicatedProduct.id,
+        sku: dedicatedProduct.sku,
+        name: dedicatedProduct.name,
+        salePrice: dedicatedProduct.salePrice.toFixed(2),
+      };
+
+      const quote = await createDirectQuote({
+        customerId: customer.id,
+        customerType: CustomerType.PERSON,
+        customerDocumentType: CustomerDocumentType.DNI,
+        customerDocumentNumber: `SNPP${snapshotSuffix}`,
+        customerName: originalCustomerName,
+        items: [quoteItemFor(productSnapshot, '1.000')],
+      });
+
+      // Mutaciones vivas DESPUÉS de emitir la cotización, ANTES de convertir.
+      await prisma.customer.update({
+        where: { id: customer.id },
+        data: { name: 'Nombre Cambiado Después De La Cotizacion' },
+      });
+      await prisma.product.update({
+        where: { id: dedicatedProduct.id },
+        data: {
+          salePrice: new Prisma.Decimal('999.00'),
+          sku: `E2ES-SNPP-CAMBIADO-${nextSuffix()}`,
+        },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '10.00' } });
+      expect(response.status).toBe(201);
+      const sale = response.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+
+      // Snapshot comercial: EXACTAMENTE el de la cotización, nunca el vigente.
+      expect(sale.customerName).toBe(originalCustomerName);
+      expect(sale.customerName).not.toBe(
+        'Nombre Cambiado Después De La Cotizacion',
+      );
+      expect(sale.items[0].productSku).toBe(productSnapshot.sku);
+      expect(sale.items[0].unitPrice).toBe('30.00');
+      expect(sale.total).toBe('30.00');
+
+      // Solo el resumen de pago cambia por el pago inicial.
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      expect(sale.paidAmount).toBe('10.00');
+      expect(sale.balanceDue).toBe('20.00');
+      expect(sale.payments).toHaveLength(1);
+    });
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — anulación de venta en cascada sobre pagos
+  // ==================================================================
+  describe('Fase 7, Bloque D — anulación de venta en cascada sobre pagos', () => {
+    let productCancelD: FixtureProduct;
+
+    beforeAll(async () => {
+      const suffix = nextSuffix();
+      const row = await prisma.product.create({
+        data: {
+          sku: `E2ES-CANCD-${suffix}`,
+          name: `Producto Anulacion Cascada Pago E2E ${suffix}`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId: unitDecimalId,
+          salePrice: new Prisma.Decimal('100.00'),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('500.000'),
+        },
+      });
+      createdProductIds.push(row.id);
+      productCancelD = {
+        id: row.id,
+        sku: row.sku,
+        name: row.name,
+        salePrice: row.salePrice.toFixed(2),
+      };
+    });
+
+    it('venta con UN pago (parcial) y stock rastreado: anular → Sale CANCELLED; Payment CANCELLED/SALE_CANCELLATION/reason null/cancelledBy=ADMIN; stock restaurado; movimiento SALE original preservado; movimiento SALE_CANCELLATION creado; resumen congelado (no 0/total)', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productCancelD.id, quantity: '2.000' }],
+        payment: { method: 'CASH', amount: '40.00' },
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      const paymentBefore = sale.payments[0] as SafeSalePaymentItem;
+      const stockAfterSale = await prisma.product.findUniqueOrThrow({
+        where: { id: productCancelD.id },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación con pago activo' });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeSaleBody;
+      expect(body.status).toBe(SaleStatus.CANCELLED);
+
+      // Resumen congelado: EXACTAMENTE los valores previos a la anulación.
+      expect(body.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      expect(body.paidAmount).toBe('40.00');
+      // Total = 100.00 * 2.000 = 200.00; balance congelado = 200.00 - 40.00.
+      expect(body.balanceDue).toBe('160.00');
+
+      expect(body.payments).toHaveLength(1);
+      const paymentAfter = body.payments[0] as SafeSalePaymentItem;
+      expect(paymentAfter.id).toBe(paymentBefore.id);
+      expect(paymentAfter.status).toBe(PaymentStatus.CANCELLED);
+      expect(paymentAfter.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+      expect(paymentAfter.cancellationReason).toBeNull();
+      expect(paymentAfter.cancelledBy?.id).toBe(adminId);
+
+      const stockAfterCancel = await prisma.product.findUniqueOrThrow({
+        where: { id: productCancelD.id },
+      });
+      expect(stockAfterCancel.stockCurrent.toFixed(3)).toBe(
+        stockAfterSale.stockCurrent
+          .plus(new Prisma.Decimal('2.000'))
+          .toFixed(3),
+      );
+      const originalExit = await prisma.inventoryMovement.findFirst({
+        where: {
+          referenceType: 'Sale',
+          referenceId: sale.id,
+          origin: InventoryMovementOrigin.SALE,
+        },
+      });
+      expect(originalExit).not.toBeNull();
+      const reversal = await prisma.inventoryMovement.findFirst({
+        where: {
+          referenceType: 'Sale',
+          referenceId: sale.id,
+          origin: InventoryMovementOrigin.SALE_CANCELLATION,
+        },
+      });
+      expect(reversal).not.toBeNull();
+
+      const cancelAudits = await fetchAuditRows(
+        AuditAction.PAYMENT_CANCELLED,
+        'Payment',
+        paymentBefore.id,
+      );
+      expect(cancelAudits).toHaveLength(1);
+      const metadata = cancelAudits[0].metadata as Record<string, unknown>;
+      expect(metadata.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+      expect(metadata).not.toHaveProperty('amount');
+      expect(metadata).not.toHaveProperty('reference');
+      expect(metadata).not.toHaveProperty('reason');
+    });
+
+    it('venta con TRES pagos (20 ACTIVE, 30 ACTIVE, 10 ya CANCELLED manualmente): anular → los 2 ACTIVE pasan a CANCELLED/SALE_CANCELLATION; el ya cancelado no se toca; exactamente 2 nuevas auditorías PAYMENT_CANCELLED', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productCancelD.id, quantity: '1.000' }],
+      });
+      const p20 = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', adminCookie)
+        .send({ method: 'CASH', amount: '20.00' });
+      const p30 = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', adminCookie)
+        .send({ method: 'CASH', amount: '30.00' });
+      const p10 = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', adminCookie)
+        .send({ method: 'CASH', amount: '10.00' });
+      const p10Id = (p10.body as { payment: { id: string } }).payment.id;
+      const manualCancel = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments/${p10Id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación manual previa' });
+      expect(manualCancel.status).toBe(200);
+      const p10RowBefore = await prisma.payment.findUniqueOrThrow({
+        where: { id: p10Id },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación con múltiples pagos' });
+      expect(response.status).toBe(200);
+
+      const p20Id = (p20.body as { payment: { id: string } }).payment.id;
+      const p30Id = (p30.body as { payment: { id: string } }).payment.id;
+      const p20Row = await prisma.payment.findUniqueOrThrow({
+        where: { id: p20Id },
+      });
+      const p30Row = await prisma.payment.findUniqueOrThrow({
+        where: { id: p30Id },
+      });
+      expect(p20Row.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+      expect(p30Row.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+
+      const p10RowAfter = await prisma.payment.findUniqueOrThrow({
+        where: { id: p10Id },
+      });
+      expect(p10RowAfter.cancellationSource).toBe(
+        PaymentCancellationSource.MANUAL,
+      );
+      expect(p10RowAfter.cancelledAt?.getTime()).toBe(
+        p10RowBefore.cancelledAt?.getTime(),
+      );
+
+      const cascadeAudits20 = await fetchAuditRows(
+        AuditAction.PAYMENT_CANCELLED,
+        'Payment',
+        p20Id,
+      );
+      const cascadeAudits30 = await fetchAuditRows(
+        AuditAction.PAYMENT_CANCELLED,
+        'Payment',
+        p30Id,
+      );
+      expect(cascadeAudits20).toHaveLength(1);
+      expect(cascadeAudits30).toHaveLength(1);
+      const p10Audits = await fetchAuditRows(
+        AuditAction.PAYMENT_CANCELLED,
+        'Payment',
+        p10Id,
+      );
+      // Solo la manual previa; la cascada no crea una segunda para éste.
+      expect(p10Audits).toHaveLength(1);
+    });
+
+    it('venta genérica totalmente pagada: anular la venta funciona (aunque la anulación manual de su pago esté prohibida); Payment se anula en cascada; resumen congelado en PAID; sin violar sales_generic_no_debt', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        customerId: genericCustomerId,
+        items: [{ productId: productCancelD.id, quantity: '1.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+      expect(sale.customerIsGeneric).toBe(true);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación de venta genérica pagada' });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeSaleBody;
+      expect(body.status).toBe(SaleStatus.CANCELLED);
+      expect(body.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(body.balanceDue).toBe('0.00');
+      const payment = body.payments[0] as SafeSalePaymentItem;
+      expect(payment.status).toBe(PaymentStatus.CANCELLED);
+      expect(payment.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+    });
+
+    it('venta desde cotización con pago inicial: anular → Payment CANCELLED/SALE_CANCELLATION; Quote permanece CONVERTED; quoteId sin cambios; segunda conversión de la misma cotización → 409', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productCancelD, '1.000')],
+      });
+      const conversionResponse = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '40.00' } });
+      expect(conversionResponse.status).toBe(201);
+      const sale = conversionResponse.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+
+      const cancelResponse = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación de venta desde cotización con pago' });
+      expect(cancelResponse.status).toBe(200);
+      const body = cancelResponse.body as SafeSaleBody;
+      const payment = body.payments[0] as SafeSalePaymentItem;
+      expect(payment.status).toBe(PaymentStatus.CANCELLED);
+      expect(payment.cancellationSource).toBe(
+        PaymentCancellationSource.SALE_CANCELLATION,
+      );
+
+      const quoteRow = await prisma.quote.findUniqueOrThrow({
+        where: { id: quote.id },
+      });
+      expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.quoteId).toBe(quote.id);
+
+      const secondConversion = await convertQuote(adminCookie, quote.id);
+      expect(secondConversion.status).toBe(409);
+    });
+
+    it('atomicidad completa: en el mismo estado confirmado, Sale CANCELLED + Payment CANCELLED + stock restaurado + reversa + resumen congelado + SALE_CANCELLED + PAYMENT_CANCELLED, todo o nada', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productCancelD.id, quantity: '3.000' }],
+        payment: { method: 'CASH', amount: '100.00' },
+      });
+      const payment = sale.payments[0] as SafeSalePaymentItem;
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Atomicidad completa' });
+      expect(response.status).toBe(200);
+
+      const [saleRow, paymentRow, reversal, saleAudits, paymentAudits] =
+        await Promise.all([
+          prisma.sale.findUniqueOrThrow({ where: { id: sale.id } }),
+          prisma.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+          prisma.inventoryMovement.findFirst({
+            where: {
+              referenceType: 'Sale',
+              referenceId: sale.id,
+              origin: InventoryMovementOrigin.SALE_CANCELLATION,
+            },
+          }),
+          fetchAuditRows(AuditAction.SALE_CANCELLED, 'Sale', sale.id),
+          fetchAuditRows(AuditAction.PAYMENT_CANCELLED, 'Payment', payment.id),
+        ]);
+      expect(saleRow.status).toBe(SaleStatus.CANCELLED);
+      expect(paymentRow.status).toBe(PaymentStatus.CANCELLED);
+      expect(reversal).not.toBeNull();
+      expect(saleRow.paidAmount.toFixed(2)).toBe('100.00');
+      expect(saleAudits).toHaveLength(1);
+      expect(paymentAudits).toHaveLength(1);
+    });
+
+    // NOTA (§54 del kickoff de Bloque D): no existe, dentro de este
+    // repositorio, un mecanismo seguro y ya existente para forzar que la
+    // reversa de inventario falle a mitad de camino sin modificar
+    // producción (agregar un hook solo para la prueba está explícitamente
+    // prohibido). La atomicidad de "Sale CANCELLED + Payment CANCELLED +
+    // reversa" ya queda cubierta estructuralmente: las tres escrituras
+    // ocurren dentro de la MISMA `prisma.$transaction()` de
+    // `SalesService.cancel()` (ver stock-movement.engine.ts +
+    // payment.engine.ts, ambos sin `PrismaService` propio y siempre
+    // recibiendo el mismo `tx`), así que cualquier fallo en cualquiera de
+    // los tres pasos revierte la transacción completa — ya demostrado
+    // indirectamente por la prueba de "atomicidad completa" de arriba, que
+    // confirma el estado post-commit coherente.
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — historial de pagos en el detalle de venta
+  // ==================================================================
+  describe('Fase 7, Bloque D — historial de pagos en el detalle de venta', () => {
+    it('GET /sales/:id incluye payments[] con ACTIVE y CANCELLED, ordenados paidAt ASC, id ASC; el listado (list item) nunca incluye payments', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productA.id, quantity: '1.000' }],
+      });
+      const first = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', adminCookie)
+        .send({ method: 'CASH', amount: '5.00' });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', adminCookie)
+        .send({ method: 'CASH', amount: '5.00' });
+      const firstId = (first.body as { payment: { id: string } }).payment.id;
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments/${firstId}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'x' });
+
+      const detail = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', adminCookie);
+      const payments = (detail.body as SafeSaleBody)
+        .payments as unknown as SafeSalePaymentItem[];
+      expect(payments).toHaveLength(2);
+      const statuses = payments.map((p) => p.status).sort();
+      expect(statuses).toEqual(
+        [PaymentStatus.ACTIVE, PaymentStatus.CANCELLED].sort(),
+      );
+      for (let i = 0; i + 1 < payments.length; i += 1) {
+        expect(payments[i].paidAt <= payments[i + 1].paidAt).toBe(true);
+      }
+
+      const list = await request(app.getHttpServer())
+        .get('/api/v1/sales')
+        .query({ limit: 100 })
+        .set('Cookie', adminCookie);
+      const listItem = (
+        list.body as { data: Record<string, unknown>[] }
+      ).data.find((row) => row.id === sale.id);
+      expect(listItem).toBeDefined();
+      expect(listItem).not.toHaveProperty('payments');
+    });
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — whitelist del pago inicial anidado (DTO)
+  // ==================================================================
+  describe('Fase 7, Bloque D — whitelist del pago inicial anidado', () => {
+    const FORBIDDEN_FIELDS = [
+      'paidAt',
+      'status',
+      'createdByUserId',
+      'cancelledAt',
+      'cancellationReason',
+      'cancellationSource',
+      'saleId',
+      'paidAmount',
+      'balanceDue',
+    ];
+
+    it.each(FORBIDDEN_FIELDS)(
+      'POST /sales rechaza el campo "%s" dentro de payment (400)',
+      async (field) => {
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/sales')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateSaleBody({
+              items: [{ productId: productA.id, quantity: '1.000' }],
+              payment: {
+                method: 'CASH',
+                amount: '1.00',
+                [field]: 'valor-no-permitido',
+              },
+            }),
+          );
+        expect(response.status).toBe(400);
+      },
+    );
+
+    it.each(FORBIDDEN_FIELDS)(
+      'POST /sales/from-quote/:quoteId rechaza el campo "%s" dentro de payment (400)',
+      async (field) => {
+        const quote = await createDirectQuote({
+          customerId: personActive.id,
+          customerType: CustomerType.PERSON,
+          customerName: personActive.name,
+          items: [quoteItemFor(productA, '1.000')],
+        });
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({
+            payment: {
+              method: 'CASH',
+              amount: '1.00',
+              [field]: 'valor-no-permitido',
+            },
+          });
+        expect(response.status).toBe(400);
+        const quoteRow = await prisma.quote.findUniqueOrThrow({
+          where: { id: quote.id },
+        });
+        expect(quoteRow.status).toBe(QuoteStatus.PENDING);
+      },
+    );
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — compatibilidad del cuerpo en conversión de cotización
+  // ==================================================================
+  describe('Fase 7, Bloque D — compatibilidad del cuerpo en conversión de cotización', () => {
+    it('acepta sin cuerpo, {} y {"payment": {...}}; rechaza campos comerciales en el nivel superior', async () => {
+      const quoteNoBody = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productA, '1.000')],
+      });
+      const noBody = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteNoBody.id}`)
+        .set('Cookie', adminCookie)
+        .send();
+      expect(noBody.status).toBe(201);
+      createdSaleIds.push((noBody.body as SafeSaleBody).id);
+
+      const quoteEmpty = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productA, '1.000')],
+      });
+      const empty = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteEmpty.id}`)
+        .set('Cookie', adminCookie)
+        .send({});
+      expect(empty.status).toBe(201);
+      createdSaleIds.push((empty.body as SafeSaleBody).id);
+
+      const quoteWithPayment = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productA, '1.000')],
+      });
+      const withPayment = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteWithPayment.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CASH', amount: '1.00' } });
+      expect(withPayment.status).toBe(201);
+      createdSaleIds.push((withPayment.body as SafeSaleBody).id);
+
+      const quoteBadField = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productA, '1.000')],
+      });
+      const badField = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteBadField.id}`)
+        .set('Cookie', adminCookie)
+        .send({ discountAmount: '999.00' });
+      expect(badField.status).toBe(400);
+    });
+  });
+
+  // ==================================================================
+  // Fase 7, Bloque D — impresión no expone datos de pago
+  // ==================================================================
+  describe('Fase 7, Bloque D — impresión no expone datos de pago', () => {
+    it('venta con pago inicial parcial: el HTML impreso no menciona paymentStatus/paidAmount/balanceDue/referencia de Payment', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productA.id, quantity: '1.000' }],
+        payment: {
+          method: 'BANK_TRANSFER',
+          amount: '5.00',
+          reference: 'OP-PRINT-1',
+        },
+      });
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(200);
+      const html = response.text;
+      expect(html).not.toMatch(/paymentStatus/i);
+      expect(html).not.toMatch(/paidAmount/i);
+      expect(html).not.toMatch(/balanceDue/i);
+      expect(html).not.toMatch(/OP-PRINT-1/);
+      expect(html).not.toMatch(/PARTIALLY_PAID/);
     });
   });
 });

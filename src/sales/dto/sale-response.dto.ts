@@ -8,6 +8,7 @@ import {
   SalePaymentStatus,
   SaleStatus,
 } from '@prisma/client';
+import { PaymentResponseDto } from '../../payments/dto/payment-response.dto';
 
 /** Identidad mínima del vendedor: nunca role/passwordHash/campos de seguridad. */
 export class SaleSellerResponseDto {
@@ -139,7 +140,7 @@ export class SaleListItemResponseDto {
   @ApiProperty({
     enum: SalePaymentStatus,
     description:
-      'Resumen de pago preparado para la Fase 7. En la Fase 6, sin modelo Payment, solo UNPAID o PAID.',
+      'Para una venta ACTIVE, se recalcula desde la suma de sus pagos ACTIVE (módulo Pagos): UNPAID/PARTIALLY_PAID/PAID. Para una venta ANULADA, queda congelado con su valor histórico previo a la anulación.',
   })
   paymentStatus!: SalePaymentStatus;
 
@@ -164,7 +165,7 @@ export class SaleListItemResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en la Fase 6.' })
+  @ApiProperty({ type: String, description: 'Siempre "0.00" en el MVP.' })
   taxAmount!: string;
 
   @ApiProperty({ type: String })
@@ -173,7 +174,7 @@ export class SaleListItemResponseDto {
   @ApiProperty({
     type: String,
     description:
-      'Siempre "0.00" en la Fase 6: sin registros de Payment todavía.',
+      'Para una venta ACTIVE, suma de sus pagos ACTIVE (módulo Pagos). Para una venta ANULADA, congelado con su valor histórico previo a la anulación.',
   })
   paidAmount!: string;
 
@@ -207,7 +208,7 @@ export class SaleResponseDto {
   @ApiProperty({
     enum: SalePaymentStatus,
     description:
-      'Resumen de pago preparado para la Fase 7. En la Fase 6, sin modelo Payment, solo UNPAID o PAID.',
+      'Para una venta ACTIVE, se recalcula desde la suma de sus pagos ACTIVE (módulo Pagos): UNPAID/PARTIALLY_PAID/PAID. Para una venta ANULADA, queda congelado con su valor histórico previo a la anulación.',
   })
   paymentStatus!: SalePaymentStatus;
 
@@ -259,7 +260,7 @@ export class SaleResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en la Fase 6.' })
+  @ApiProperty({ type: String, description: 'Siempre "0.00" en el MVP.' })
   taxAmount!: string;
 
   @ApiProperty({ type: String })
@@ -268,7 +269,7 @@ export class SaleResponseDto {
   @ApiProperty({
     type: String,
     description:
-      'Siempre "0.00" en la Fase 6: sin registros de Payment todavía.',
+      'Para una venta ACTIVE, suma de sus pagos ACTIVE (módulo Pagos). Para una venta ANULADA, congelado con su valor histórico previo a la anulación.',
   })
   paidAmount!: string;
 
@@ -280,6 +281,13 @@ export class SaleResponseDto {
 
   @ApiProperty({ type: [SaleInventoryMovementResponseDto] })
   inventoryMovements!: SaleInventoryMovementResponseDto[];
+
+  @ApiProperty({
+    type: [PaymentResponseDto],
+    description:
+      'Historial completo de pagos de la venta, ACTIVE y CANCELLED, en orden cronológico (paidAt ascendente). Explica el resumen de pago incluso en una venta anulada.',
+  })
+  payments!: PaymentResponseDto[];
 
   @ApiProperty({ type: String, format: 'date-time' })
   confirmedAt!: Date;

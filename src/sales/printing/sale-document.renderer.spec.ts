@@ -61,6 +61,7 @@ function makeSale(overrides: Partial<SafeSale> = {}): SafeSale {
         createdAt: new Date('2026-03-15T00:00:00.000Z'),
       },
     ],
+    payments: [],
     confirmedAt: new Date('2026-03-15T15:30:00.000Z'),
     cancelledAt: null,
     cancellationReason: null,

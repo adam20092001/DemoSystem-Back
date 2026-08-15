@@ -455,6 +455,58 @@ describe('sanitizeAuditMetadata', () => {
     });
   });
 
+  it('PAYMENT_REGISTERED conserva solo saleId/saleNumber/method, sin amount/reference/PII', () => {
+    const metadata = {
+      saleId: 'sale-1',
+      saleNumber: 'NV-000006',
+      method: 'CASH',
+      amount: '40.00',
+      reference: 'OP-000123',
+      customerName: 'Juan Pérez',
+      customerDocumentNumber: '12345678',
+      paidAmount: '40.00',
+      balanceDue: '60.00',
+      total: '100.00',
+      unexpectedField: 'x',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.PAYMENT_REGISTERED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleId: 'sale-1',
+      saleNumber: 'NV-000006',
+      method: 'CASH',
+    });
+  });
+
+  it('PAYMENT_CANCELLED conserva solo saleId/saleNumber/previousStatus/cancellationSource, sin cancellationReason/amount/reference', () => {
+    const metadata = {
+      saleId: 'sale-1',
+      saleNumber: 'NV-000007',
+      previousStatus: 'ACTIVE',
+      cancellationSource: 'MANUAL',
+      cancellationReason: 'Motivo interno confidencial',
+      amount: '40.00',
+      reference: 'OP-000123',
+      customerName: 'Juan Pérez',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.PAYMENT_CANCELLED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      saleId: 'sale-1',
+      saleNumber: 'NV-000007',
+      previousStatus: 'ACTIVE',
+      cancellationSource: 'MANUAL',
+    });
+  });
+
   it('QUOTE_CONVERTED conserva solo quoteNumber/saleNumber', () => {
     const metadata = {
       quoteNumber: 'COT-000005',

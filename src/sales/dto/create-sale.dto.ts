@@ -9,6 +9,7 @@ import {
   Matches,
   ValidateNested,
 } from 'class-validator';
+import { InitialPaymentDto } from '../../payments/dto/initial-payment.dto';
 import { CreateSaleItemDto } from './create-sale-item.dto';
 
 /**
@@ -22,9 +23,12 @@ export const SALE_DISCOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
  * Venta directa: POST /sales ES la confirmación (sin DRAFT). number/status/
  * paymentStatus/deliveryStatus/sellerId/confirmedAt/subtotal/taxAmount/
  * total/paidAmount/balanceDue/snapshots de cliente y producto/unitPrice/
- * notas/datos de pago nunca se aceptan aquí: son valores de sistema
- * calculados por SalesService (Bloque B), nunca controlados por el
- * llamador. sellerId se deriva exclusivamente del actor autenticado.
+ * notas nunca se aceptan aquí: son valores de sistema calculados por
+ * SalesService (Bloque B), nunca controlados por el llamador. sellerId se
+ * deriva exclusivamente del actor autenticado. `payment` (Fase 7, Bloque C)
+ * es el ÚNICO dato de pago aceptado: opcional, mismo contrato exacto que un
+ * pago posterior (InitialPaymentDto == CreatePaymentDto). Sin él, el
+ * comportamiento es idéntico a la Fase 6.
  */
 export class CreateSaleDto {
   @ApiProperty({ format: 'uuid' })
@@ -51,4 +55,14 @@ export class CreateSaleDto {
   @ValidateNested({ each: true })
   @Type(() => CreateSaleItemDto)
   items!: CreateSaleItemDto[];
+
+  @ApiPropertyOptional({
+    type: InitialPaymentDto,
+    description:
+      'Pago inicial opcional registrado en la MISMA transacción que confirma la venta. Ausente: la venta queda UNPAID por el total (o PAID si el total es 0), igual que en la Fase 6. Una venta a Público general o a un cliente bloqueado con total positivo solo se confirma si este pago salda el saldo por completo.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => InitialPaymentDto)
+  payment?: InitialPaymentDto;
 }

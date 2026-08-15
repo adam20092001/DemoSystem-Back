@@ -7,6 +7,7 @@ import {
   SalePaymentStatus,
   SaleStatus,
 } from '@prisma/client';
+import { SafePayment } from '../../payments/types/safe-payment';
 
 /** Identidad mínima segura de un usuario: nunca role/passwordHash/campos de seguridad. */
 export interface SafeSaleSeller {
@@ -106,6 +107,11 @@ export interface SafeSale {
 
   items: SafeSaleItem[];
   inventoryMovements: SafeSaleInventoryMovement[];
+  // Historial de pagos (Fase 7, Bloque B): ACTIVE y CANCELLED, orden
+  // cronológico paidAt ASC/id ASC — explica el resumen de pago aunque la
+  // venta esté anulada (los pagos quedan CANCELLED, pero la historia se
+  // conserva). Nunca aparece en SafeSaleListItem (solo en el detalle).
+  payments: SafePayment[];
 
   confirmedAt: Date;
   cancelledAt: Date | null;

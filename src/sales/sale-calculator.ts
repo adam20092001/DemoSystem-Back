@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { Prisma, SaleDeliveryStatus, SalePaymentStatus } from '@prisma/client';
 
 /**
@@ -35,25 +36,48 @@ export interface SalePaymentSummary {
 }
 
 /**
- * Derivación PURA del resumen de pago (D1/D18/D32 del plan aprobado). Sin
- * modelo Payment en la Fase 6: nunca produce PARTIALLY_PAID de forma
- * operativa — ese valor solo existe en el esquema para que la Fase 7 no
- * requiera migrar el enum ni el CHECK sales_payment_status_consistency.
+ * Derivación PURA del resumen de pago (D1/D18/D32 del plan de la Fase 6;
+ * generalizada en la Fase 7, Bloque B, para reconciliar contra
+ * SUM(Payment ACTIVE)). `paidAmount` por defecto 0.00 preserva EXACTAMENTE
+ * el comportamiento de la Fase 6 cuando se invoca con un solo argumento
+ * (deriveSalePaymentSummary(total)): total=0 -> PAID/0/0; total>0 -> UNPAID/
+ * 0/total. Con paidAmount explícito (Fase 7): paidAmount==total -> PAID
+ * (cubre también total=0/paidAmount=0, evaluado primero); paidAmount==0 y
+ * total>0 -> UNPAID; en cualquier otro caso -> PARTIALLY_PAID. paidAmount
+ * fuera de rango (negativo o mayor que el total) es un invariante interno
+ * roto, nunca un error de payload del cliente: 409, no 400, mismo criterio
+ * que assertMoneyWithinRange más arriba en este archivo.
  */
 export function deriveSalePaymentSummary(
   total: Prisma.Decimal,
+  paidAmount: Prisma.Decimal = new Prisma.Decimal(0),
 ): SalePaymentSummary {
-  if (total.equals(0)) {
+  if (paidAmount.lessThan(0)) {
+    throw new ConflictException('El monto pagado no puede ser negativo');
+  }
+  if (paidAmount.greaterThan(total)) {
+    throw new ConflictException(
+      'El monto pagado no puede superar el total de la venta',
+    );
+  }
+  if (paidAmount.equals(total)) {
     return {
       paymentStatus: SalePaymentStatus.PAID,
-      paidAmount: new Prisma.Decimal(0),
+      paidAmount,
       balanceDue: new Prisma.Decimal(0),
     };
   }
+  if (paidAmount.equals(0)) {
+    return {
+      paymentStatus: SalePaymentStatus.UNPAID,
+      paidAmount,
+      balanceDue: total,
+    };
+  }
   return {
-    paymentStatus: SalePaymentStatus.UNPAID,
-    paidAmount: new Prisma.Decimal(0),
-    balanceDue: total,
+    paymentStatus: SalePaymentStatus.PARTIALLY_PAID,
+    paidAmount,
+    balanceDue: total.minus(paidAmount),
   };
 }
 
