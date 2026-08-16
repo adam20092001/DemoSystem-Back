@@ -17,6 +17,14 @@
 // (paymentStatus/paidAmount/balanceDue, sin modelo Payment todavía),
 // restricciones e índices. Sin servicio, sin controller, sin endpoints
 // todavía; eso llega en los Bloques B-D.
+// Fase 8, Bloque A: precontabilidad básica (Account/AccountingEntry/
+// AccountingEntryLine — Documento Maestro §17: chart_of_accounts,
+// accounting_entries, accounting_entry_lines). Seis cuentas de sistema
+// fijas (Caja, Bancos, Cuentas por cobrar, IGV por pagar, Ventas,
+// Descuentos), sin CRUD ni asientos manuales. Solo modelo + migración +
+// constraints + seed de las seis cuentas; sin AccountingEngine, sin
+// integración con PaymentEngine/SalesService, sin auditoría contable, sin
+// HTTP todavía — eso llega en los Bloques B-D.
 
 generator client {
   provider = "prisma-client-js"
@@ -95,38 +103,43 @@ model Role {
 }
 
 model User {
-  id                  String              @id @default(uuid()) @db.Uuid
-  firstName           String              @map("first_name") @db.VarChar(80)
-  lastName            String              @map("last_name") @db.VarChar(80)
-  username            String              @unique @db.VarChar(50)
-  email               String              @unique @db.VarChar(150)
-  passwordHash        String              @map("password_hash") @db.VarChar(255)
-  roleId              String              @map("role_id") @db.Uuid
-  role                Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  status              UserStatus          @default(ACTIVE)
-  mustChangePassword  Boolean             @default(true) @map("must_change_password")
-  failedLoginAttempts Int                 @default(0) @map("failed_login_attempts")
-  blockedAt           DateTime?           @map("blocked_at")
-  lastLoginAt         DateTime?           @map("last_login_at")
-  createdAt           DateTime            @default(now()) @map("created_at")
-  updatedAt           DateTime            @updatedAt @map("updated_at")
-  auditLogs           AuditLog[]
-  inventoryMovements  InventoryMovement[]
+  id                       String              @id @default(uuid()) @db.Uuid
+  firstName                String              @map("first_name") @db.VarChar(80)
+  lastName                 String              @map("last_name") @db.VarChar(80)
+  username                 String              @unique @db.VarChar(50)
+  email                    String              @unique @db.VarChar(150)
+  passwordHash             String              @map("password_hash") @db.VarChar(255)
+  roleId                   String              @map("role_id") @db.Uuid
+  role                     Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  status                   UserStatus          @default(ACTIVE)
+  mustChangePassword       Boolean             @default(true) @map("must_change_password")
+  failedLoginAttempts      Int                 @default(0) @map("failed_login_attempts")
+  blockedAt                DateTime?           @map("blocked_at")
+  lastLoginAt              DateTime?           @map("last_login_at")
+  createdAt                DateTime            @default(now()) @map("created_at")
+  updatedAt                DateTime            @updatedAt @map("updated_at")
+  auditLogs                AuditLog[]
+  inventoryMovements       InventoryMovement[]
   // Cotizaciones donde este usuario es el emisor comercial (sellerId =
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
-  issuedQuotes        Quote[]
+  issuedQuotes             Quote[]
   // Ventas donde este usuario es el vendedor (D10, Fase 6): directa = actor
   // autenticado; desde cotización = Quote.sellerId (no necesariamente quien
   // ejecuta la conversión). Dos relaciones nombradas porque Sale referencia
   // User dos veces (vendedor y quien anula).
-  soldSales           Sale[]              @relation("SaleSeller")
-  cancelledSales      Sale[]              @relation("SaleCancelledBy")
+  soldSales                Sale[]              @relation("SaleSeller")
+  cancelledSales           Sale[]              @relation("SaleCancelledBy")
   // Pagos (Fase 7, Bloque A): dos relaciones nombradas porque Payment
   // referencia User dos veces (quien registra y quien anula), mismo
   // criterio que soldSales/cancelledSales arriba.
-  createdPayments     Payment[]           @relation("PaymentCreatedBy")
-  cancelledPayments   Payment[]           @relation("PaymentCancelledBy")
+  createdPayments          Payment[]           @relation("PaymentCreatedBy")
+  cancelledPayments        Payment[]           @relation("PaymentCancelledBy")
+  // Asientos contables (Fase 8, Bloque A): un único actor por asiento (quien
+  // ejecutó la operación de negocio que lo generó); a diferencia de
+  // Sale/Payment, un AccountingEntry nunca se "anula" con el mismo actor
+  // relation — su reversión es una fila nueva con su propio createdBy.
+  createdAccountingEntries AccountingEntry[]   @relation("AccountingEntryCreatedBy")
 
   @@index([roleId])
   @@index([status])
@@ -777,4 +790,175 @@ model Payment {
   @@index([status, paidAt])
   @@index([createdByUserId, paidAt])
   @@map("payments")
+}
+
+// Naturaleza contable de una cuenta (Fase 8, plan final aprobado, §7). Solo
+// los cuatro valores realmente usados por las seis cuentas fijas: ninguna
+// de ellas es EQUITY ni EXPENSE, así que esos dos NO se agregan por
+// anticipación (se agregarían de forma aditiva si una fase futura los
+// necesita de verdad).
+enum AccountType {
+  ASSET
+  LIABILITY
+  REVENUE
+  CONTRA_REVENUE
+}
+
+// Clave estable de las seis cuentas de sistema fijas (plan final, §6/§8):
+// única forma en que el dominio (futuro AccountingEngine, Bloque B) ubica
+// una cuenta, nunca por code/name en texto libre. Cerrado en Fase 8: no hay
+// cuentas personalizadas ni mapeo configurable.
+enum AccountingSystemKey {
+  CASH
+  BANK
+  ACCOUNTS_RECEIVABLE
+  VAT_PAYABLE
+  SALES_REVENUE
+  DISCOUNTS
+}
+
+// Qué evento de negocio origina un AccountingEntry. Sin FK real hacia
+// Sale/Payment (ver comentario en AccountingEntry.sourceId): es un
+// polimorfismo deliberado, mismo criterio que AuditLog.entityType/entityId
+// e InventoryMovement.referenceType/referenceId.
+enum AccountingSourceType {
+  SALE
+  PAYMENT
+}
+
+// ORIGINAL: primer asiento de un evento de negocio. REVERSAL: asiento de
+// reversión (Bloque B), vinculado mediante AccountingEntry.reversesEntryId.
+// No existe un tercer valor ni un estado DRAFT: no hay asientos manuales en
+// el MVP (Documento Maestro §17).
+enum AccountingEventType {
+  ORIGINAL
+  REVERSAL
+}
+
+/**
+ * Plan de cuentas básico (Fase 8, Bloque A — Documento Maestro §17:
+ * "chart_of_accounts"). Exactamente seis filas de sistema, sembradas de
+ * forma idempotente en prisma/seed.ts vía systemKey (ver Bloque A, plan
+ * final aprobado §5/§6): sin CRUD, sin activación/desactivación, sin
+ * cuentas personalizadas en este MVP. Por eso el modelo es deliberadamente
+ * mínimo — sin status, sin updatedAt, sin deletedAt, sin description: nada
+ * de eso tiene un caso de uso real mientras la cuenta es inmutable.
+ */
+model Account {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Identificador interno estable, NO un código PCGE (el Documento Maestro
+  // no exige uno): "CASH", "BANK", "AR", "VAT", "SALES", "DISCOUNTS".
+  code String @unique @db.VarChar(20)
+
+  // Nombre en español, terminología exacta del Documento Maestro ("Caja",
+  // "Bancos", "Cuentas por cobrar", "IGV por pagar", "Ventas",
+  // "Descuentos").
+  name String @db.VarChar(60)
+
+  type AccountType
+
+  // Clave estable de mapeo (plan final §6): obligatoria y única — toda
+  // cuenta de la Fase 8 es una de las seis cuentas de sistema fijas, nunca
+  // nullable "por si acaso" una cuenta personalizada futura la necesitara
+  // (esa extensión, si llega, la decide la Fase 10).
+  systemKey AccountingSystemKey @unique @map("system_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  lines AccountingEntryLine[]
+
+  // Los 2 CHECK (code/name no en blanco) se agregan a mano en
+  // migration.sql, mismo criterio que Category/Unit/Product.
+  @@map("chart_of_accounts")
+}
+
+/**
+ * Asiento contable (Fase 8, Bloque A — Documento Maestro §17:
+ * "accounting_entries"). Inmutable desde su creación: una corrección nunca
+ * edita/elimina un asiento, siempre crea uno nuevo de tipo REVERSAL
+ * (reversesEntryId). Sin AccountingEngine todavía (Bloque B): este modelo
+ * es solo la forma de datos y sus restricciones.
+ */
+model AccountingEntry {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Origen polimórfico deliberado (plan final §9/§12): sourceId es un UUID
+  // SIN FK hacia Sale/Payment (mismo criterio que AuditLog.entityId e
+  // InventoryMovement.referenceType/referenceId). Un asiento REVERSAL
+  // conserva el MISMO sourceType/sourceId que su asiento ORIGINAL — el
+  // vínculo entre ambos asientos es exclusivamente reversesEntryId, nunca
+  // el par source.
+  sourceType AccountingSourceType @map("source_type")
+  sourceId   String               @map("source_id") @db.Uuid
+
+  eventType AccountingEventType @map("event_type")
+
+  // NULL en asientos ORIGINAL; obligatorio y único en asientos REVERSAL
+  // (ver CHECK accounting_entries_reversal_consistency y el índice único
+  // implícito de este campo, migration.sql): un asiento ORIGINAL se
+  // reversa como máximo una vez. Self-relation sobre la misma tabla.
+  reversesEntryId String?          @unique @map("reverses_entry_id") @db.Uuid
+  reversesEntry   AccountingEntry? @relation("AccountingEntryReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict)
+  reversedByEntry AccountingEntry? @relation("AccountingEntryReversal")
+
+  // Generado exclusivamente por backend (Bloque B), nunca por el cliente:
+  // "Venta NV-000001", "Cobro de venta NV-000001", "Reversión de ...". Sin
+  // PII (nombre de cliente), sin referencia de Payment, sin motivo de
+  // anulación libre.
+  description String @db.VarChar(200)
+
+  // Instante factual del evento de negocio que origina el asiento (plan
+  // final §22/§23): Sale.confirmedAt para un ORIGINAL de venta,
+  // Payment.paidAt para un ORIGINAL de pago, el instante de anulación para
+  // un REVERSAL. Sin @default: el Bloque B lo fija explícitamente: el
+  // cliente nunca lo controla ni puede retrofecharlo.
+  postedAt DateTime @map("posted_at")
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("AccountingEntryCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  lines AccountingEntryLine[]
+
+  // Los 3 CHECK (description no en blanco, consistencia ORIGINAL/REVERSAL,
+  // no auto-reversión) y el índice único parcial
+  // accounting_entries_one_original_per_source se agregan a mano en
+  // migration.sql: el DSL de Prisma no expresa CHECK ni WHERE de forma
+  // declarativa (mismo criterio que Category/Sale/Payment/
+  // InventoryMovement).
+  @@index([postedAt, id])
+  @@index([sourceType, sourceId])
+  @@index([eventType, postedAt])
+  @@map("accounting_entries")
+}
+
+/**
+ * Línea de un asiento contable (Fase 8, Bloque A — Documento Maestro §17:
+ * "accounting_entry_lines"). Inmutable desde su creación, igual que
+ * SaleItem/QuoteItem: componente de su AccountingEntry, nunca se edita
+ * sola. Exactamente un lado (debit o credit) positivo por fila — CHECK
+ * accounting_entry_lines_debit_credit_exclusive en migration.sql; el
+ * cuadre cruzado SUM(debit)=SUM(credit) de todo el asiento es
+ * responsabilidad del futuro AccountingEngine (Bloque B), no de la base de
+ * datos (ver plan final §16).
+ */
+model AccountingEntryLine {
+  id String @id @default(uuid()) @db.Uuid
+
+  entryId String          @map("entry_id") @db.Uuid
+  entry   AccountingEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  accountId String  @map("account_id") @db.Uuid
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  debitAmount  Decimal @default(0) @map("debit_amount") @db.Decimal(14, 2)
+  creditAmount Decimal @default(0) @map("credit_amount") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([entryId])
+  @@index([accountId, entryId])
+  @@map("accounting_entry_lines")
 }
