@@ -30,7 +30,13 @@
  * ACTIVE de una venta anulada (PaymentEngine.cancelAllActiveForSale). No
  * existe SALE_PAYMENT_STATUS_CHANGED: el cambio de resumen de pago de la
  * venta es derivado de estas dos acciones, auditarlo por separado sería
- * ruido redundante.
+ * ruido redundante. Las de ACCOUNTING_ se agregan en la Fase 8, Bloque B:
+ * AccountingEngine es su ÚNICO emisor (nunca SalesService/PaymentEngine
+ * directamente) — ACCOUNTING_ENTRY_POSTED al crear un asiento ORIGINAL
+ * (reconocimiento de venta o cobro de pago) y ACCOUNTING_ENTRY_REVERSED al
+ * crear su asiento REVERSAL. Semántica distinta de SALE_ / PAYMENT_: esas
+ * describen el evento de negocio; estas describen exclusivamente el
+ * registro contable derivado, sin duplicar información ya auditada.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -80,4 +86,6 @@ export enum AuditAction {
   SALE_DELIVERY_STATUS_CHANGED = 'SALE_DELIVERY_STATUS_CHANGED',
   PAYMENT_REGISTERED = 'PAYMENT_REGISTERED',
   PAYMENT_CANCELLED = 'PAYMENT_CANCELLED',
+  ACCOUNTING_ENTRY_POSTED = 'ACCOUNTING_ENTRY_POSTED',
+  ACCOUNTING_ENTRY_REVERSED = 'ACCOUNTING_ENTRY_REVERSED',
 }

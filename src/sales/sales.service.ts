@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  AccountingSourceType,
   CategoryStatus,
   CustomerDocumentType,
   CustomerStage,
@@ -21,6 +22,8 @@ import {
   SaleStatus,
   UnitStatus,
 } from '@prisma/client';
+import { AccountingEngine } from '../accounting/accounting.engine';
+import { hasSaleEconomicActivity } from '../accounting/accounting-calculator';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService, PrismaExecutionClient } from '../audit/audit.service';
 import {
@@ -150,6 +153,10 @@ interface LockedSaleRow {
   number: string;
   status: SaleStatus;
   deliveryStatus: SaleDeliveryStatus;
+  subtotal: Prisma.Decimal;
+  discountAmount: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
+  total: Prisma.Decimal;
 }
 
 interface QuoteItemRow {
@@ -186,6 +193,7 @@ export class SalesService {
     private readonly documentSequenceService: DocumentSequenceService,
     private readonly stockMovementEngine: StockMovementEngine,
     private readonly paymentEngine: PaymentEngine,
+    private readonly accountingEngine: AccountingEngine,
   ) {}
 
   // ==================================================================
@@ -300,6 +308,24 @@ export class SalesService {
           },
         },
         select: SALE_DETAIL_SELECT,
+      });
+
+      // Reconocimiento contable de la venta (Fase 8, Bloque B), dentro de
+      // la MISMA transacción: no-op documentado si la venta no tiene
+      // actividad económica alguna (los cuatro montos en cero). Un pago
+      // inicial, si existe, postea su propio asiento de cobro por separado
+      // vía PaymentEngine.register más abajo — nunca combinados en un solo
+      // asiento (plan final aprobado, §1/§33).
+      await this.accountingEngine.postSaleRecognition(tx, {
+        saleId: created.id,
+        saleNumber: number,
+        subtotal,
+        discountAmount,
+        taxAmount: SALE_TAX_AMOUNT,
+        total,
+        postedAt: confirmedAt,
+        actorUserId: input.actorUserId,
+        ipAddress: input.ipAddress ?? null,
       });
 
       const payments = await this.registerInitialPayment(
@@ -515,6 +541,23 @@ export class SalesService {
         select: SALE_DETAIL_SELECT,
       });
 
+      // Reconocimiento contable de la venta (Fase 8, Bloque B), con los
+      // montos EXACTOS copiados de la cotización (nunca recalculados) y el
+      // mismo confirmedAt. Mismo criterio que createDirect: no-op si no hay
+      // actividad económica; el pago inicial (si existe) postea su propio
+      // asiento de cobro por separado.
+      await this.accountingEngine.postSaleRecognition(tx, {
+        saleId: created.id,
+        saleNumber: number,
+        subtotal,
+        discountAmount,
+        taxAmount,
+        total,
+        postedAt: confirmedAt,
+        actorUserId: input.actorUserId,
+        ipAddress: input.ipAddress ?? null,
+      });
+
       const payments = await this.registerInitialPayment(
         tx,
         created.id,
@@ -593,6 +636,14 @@ export class SalesService {
         throw new ConflictException('La venta ya está anulada');
       }
 
+      // Instante ÚNICO de la operación de anulación completa (Fase 8,
+      // Bloque B, plan final aprobado §30/§37/§38): se calcula una sola vez
+      // aquí y se reutiliza para Sale.cancelledAt, cada
+      // Payment.cancelledAt cancelado en cascada, el postedAt de cada
+      // reversión contable de pago, y el postedAt de la reversión contable
+      // de venta — nunca instantes independientes para el mismo evento.
+      const cancelledAt = new Date();
+
       // Fuente de verdad de la reversa: los movimientos SALE/EXIT
       // ORIGINALES, nunca el estado vigente de isInventoryTracked (D22/§38
       // del plan aprobado). Ya vienen ordenados por productId ascendente:
@@ -624,17 +675,44 @@ export class SalesService {
       }
 
       // Anula en cascada todos los pagos ACTIVE de la venta (Fase 7, Bloque
-      // B). El resumen de pago de Sale NO se recalcula: queda congelado con
-      // sus valores previos a la anulación (§44/§45 del plan aprobado); por
-      // eso NO se llama a paymentEngine.recalculateSaleSummary() aquí.
+      // B) y revierte el asiento contable de cobro de cada uno (Fase 8,
+      // Bloque B, dentro de PaymentEngine). El resumen de pago de Sale NO
+      // se recalcula: queda congelado con sus valores previos a la
+      // anulación (§44/§45 del plan aprobado); por eso NO se llama a
+      // paymentEngine.recalculateSaleSummary() aquí.
       await this.paymentEngine.cancelAllActiveForSale(tx, {
         saleId: sale.id,
         saleNumber: sale.number,
         actorUserId: input.actorUserId,
         ipAddress: input.ipAddress ?? null,
+        cancelledAt,
       });
 
-      const cancelledAt = new Date();
+      // Reversión del asiento de reconocimiento de venta (Fase 8, Bloque
+      // B), SOLO si la venta tuvo actividad económica al confirmarse — una
+      // venta all-zero (los cuatro montos en cero) nunca tuvo un ORIGINAL
+      // que revertir (plan final aprobado, §12/§24/§35): intentar
+      // revertirla sería un invariante roto, no un no-op silencioso. Una
+      // venta con descuento total (subtotal>0, total=0) SÍ tuvo actividad y
+      // por lo tanto SÍ se revierte (§41).
+      if (
+        hasSaleEconomicActivity(
+          sale.subtotal,
+          sale.discountAmount,
+          sale.taxAmount,
+          sale.total,
+        )
+      ) {
+        await this.accountingEngine.reverseOriginalForSource(tx, {
+          sourceType: AccountingSourceType.SALE,
+          sourceId: sale.id,
+          sourceNumber: sale.number,
+          postedAt: cancelledAt,
+          actorUserId: input.actorUserId,
+          ipAddress: input.ipAddress ?? null,
+        });
+      }
+
       const updated = await tx.sale.update({
         where: { id: sale.id },
         data: {
@@ -1009,7 +1087,11 @@ export class SalesService {
         id,
         number,
         status,
-        delivery_status AS "deliveryStatus"
+        delivery_status AS "deliveryStatus",
+        subtotal,
+        discount_amount AS "discountAmount",
+        tax_amount AS "taxAmount",
+        total
       FROM sales
       WHERE id = ${saleId}::uuid
       FOR UPDATE

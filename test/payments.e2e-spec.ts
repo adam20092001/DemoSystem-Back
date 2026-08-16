@@ -1,5 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import {
+  AccountingEventType,
+  AccountingSourceType,
+  AccountingSystemKey,
   CustomerStage,
   CustomerStatus,
   CustomerType,
@@ -142,6 +145,19 @@ describe('Payments (e2e)', () => {
 
   let personActive: { id: string; name: string };
   let genericCustomerId: string;
+  // Fase 8, Bloque B: SalesService.createDirect ahora postea un asiento de
+  // reconocimiento contable ORIGINAL para toda venta con actividad
+  // económica, dentro de la MISMA transacción. Este spec crea sus ventas
+  // fixture directamente vía Prisma (bypass total de SalesService, por
+  // diseño de la Fase 7 Bloque D: la creación de Sale ya se prueba en
+  // sales.e2e-spec.ts) — así que createFixtureSale() debe replicar ese
+  // mismo asiento a mano, o la anulación real de la venta (que si pasa por
+  // SalesService.cancel -> AccountingEngine.reverseOriginalForSource)
+  // fallaría con un invariante roto: "no existe un ORIGINAL que revertir",
+  // un estado que nunca podría ocurrir en operación real (ver AR_ACCOUNT_ID/
+  // SALES_ACCOUNT_ID más abajo).
+  let arAccountId: string;
+  let salesAccountId: string;
 
   const ownedSaleIds: string[] = [];
   const ownedCustomerIds: string[] = [];
@@ -292,6 +308,15 @@ describe('Payments (e2e)', () => {
       },
     });
     genericCustomerId = generic.id;
+
+    const arAccount = await prisma.account.findUniqueOrThrow({
+      where: { systemKey: AccountingSystemKey.ACCOUNTS_RECEIVABLE },
+    });
+    arAccountId = arAccount.id;
+    const salesAccount = await prisma.account.findUniqueOrThrow({
+      where: { systemKey: AccountingSystemKey.SALES_REVENUE },
+    });
+    salesAccountId = salesAccount.id;
   }, 120000);
 
   afterAll(async () => {
@@ -314,6 +339,35 @@ describe('Payments (e2e)', () => {
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Sale', entityId: { in: ownedSaleIds } },
         });
+
+        // Fase 8, Bloque B: cada Sale/Payment propio puede tener asientos
+        // contables (ORIGINAL de createFixtureSale / PaymentEngine.register,
+        // REVERSAL de una anulación real durante la prueba). Se retiran
+        // ANTES de borrar Sale/Payment (sin FK entre ambos, así que el
+        // orden relativo a esos dos no importa) y ANTES de los actores
+        // efímeros de FK más abajo (accounting_entries.created_by_user_id
+        // es RESTRICT). REVERSAL primero (self-FK reversesEntryId hacia su
+        // ORIGINAL), luego ORIGINAL; las líneas se van solas por CASCADE.
+        const accountingWhere = {
+          OR: [
+            { sourceType: 'SALE' as const, sourceId: { in: ownedSaleIds } },
+            ...(ownedPaymentIds.length > 0
+              ? [
+                  {
+                    sourceType: 'PAYMENT' as const,
+                    sourceId: { in: ownedPaymentIds },
+                  },
+                ]
+              : []),
+          ],
+        };
+        await prisma.accountingEntry.deleteMany({
+          where: { ...accountingWhere, eventType: 'REVERSAL' },
+        });
+        await prisma.accountingEntry.deleteMany({
+          where: { ...accountingWhere, eventType: 'ORIGINAL' },
+        });
+
         await prisma.payment.deleteMany({
           where: { saleId: { in: ownedSaleIds } },
         });
@@ -388,6 +442,45 @@ describe('Payments (e2e)', () => {
       },
     });
     ownedSaleIds.push(row.id);
+
+    // Fase 8, Bloque B: replica a mano el asiento de reconocimiento que
+    // SalesService.createDirect habría posteado en un flujo real (esta
+    // fixture nunca pasa por SalesService — ver comentario en la
+    // declaración de arAccountId/salesAccountId más arriba). Como
+    // discountAmount/taxAmount son siempre 0.00 en este helper, el asiento
+    // siempre es el caso A de buildSaleRecognitionLines: DEBIT AR=total,
+    // CREDIT SALES=total. Solo cuando total>0 (siempre cierto hoy en este
+    // archivo, pero se guarda la condición por fidelidad al invariante
+    // real de AccountingEngine: sin actividad económica, sin ORIGINAL).
+    if (total.greaterThan(0)) {
+      const entry = await prisma.accountingEntry.create({
+        data: {
+          sourceType: AccountingSourceType.SALE,
+          sourceId: row.id,
+          eventType: AccountingEventType.ORIGINAL,
+          description: `Venta ${row.number}`,
+          postedAt: row.confirmedAt,
+          createdByUserId: adminId,
+        },
+      });
+      await prisma.accountingEntryLine.createMany({
+        data: [
+          {
+            entryId: entry.id,
+            accountId: arAccountId,
+            debitAmount: total,
+            creditAmount: new Prisma.Decimal(0),
+          },
+          {
+            entryId: entry.id,
+            accountId: salesAccountId,
+            debitAmount: new Prisma.Decimal(0),
+            creditAmount: total,
+          },
+        ],
+      });
+    }
+
     return {
       id: row.id,
       number: row.number,
