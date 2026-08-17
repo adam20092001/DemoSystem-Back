@@ -91,6 +91,15 @@ export function setupSwagger(app: INestApplication): boolean {
         'deuda más antigua primero. No es un libro contable formal ni sustituye ' +
         'la contabilidad básica de una fase posterior.',
     )
+    .addTag(
+      'Basic Accounting',
+      'Consulta de solo lectura del plan de cuentas básico y de los asientos ' +
+        'contables generados automáticamente al confirmar una venta y al ' +
+        'registrar/anular un pago (partida doble, DEBE = HABER). Es una ' +
+        'pre-contabilidad interna automática pensada como insumo de apoyo; ' +
+        'NO reemplaza un software contable formal, y NO es contabilidad ' +
+        'SUNAT/PLE ni ningún tipo de libro contable fiscal.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
