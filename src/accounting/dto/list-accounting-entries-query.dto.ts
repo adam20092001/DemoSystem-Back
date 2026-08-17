@@ -7,8 +7,8 @@ import { IsDateOnly } from './is-date-only.decorator';
 /**
  * Sin búsqueda de descripción/accountId/rango de monto/orderBy/direction/
  * balance: el plan cerrado no los incluye (§14 del plan aprobado). Orden
- * fijo en el servicio: createdAt asc, id asc (orden cronológico de libro
- * diario).
+ * fijo en el servicio: postedAt desc, id desc como desempate (asientos
+ * contables más recientes primero).
  */
 export class ListAccountingEntriesQueryDto {
   @ApiPropertyOptional({ minimum: 1, default: 1 })

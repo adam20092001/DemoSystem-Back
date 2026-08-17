@@ -172,12 +172,12 @@ describe('AccountingService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('orden createdAt asc, id asc (cronológico de libro diario)', async () => {
+    it('orden postedAt desc, id desc (asientos más recientes primero — decisión cerrada del Bloque C, reconfirmada en el Bloque D)', async () => {
       await service.listEntries({}, RoleName.ADMIN);
       const call = prisma.accountingEntry.findMany.mock.calls[0][0] as {
         orderBy: unknown;
       };
-      expect(call.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
+      expect(call.orderBy).toEqual([{ postedAt: 'desc' }, { id: 'desc' }]);
     });
 
     it('findMany y count usan el mismo where', async () => {

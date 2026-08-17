@@ -100,6 +100,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
   private fromHttpException(exception: HttpException): ResolvedError {
     const statusCode = exception.getStatus();
+
+    // Cualquier HttpException >=500 (p. ej. InternalServerErrorException
+    // con un mensaje descriptivo interno, como el que lanza AccountingEngine
+    // cuando falta una cuenta de sistema) se enmascara exactamente igual que
+    // un error no controlado: nunca se reenvía exception.message ni ninguna
+    // propiedad de exception.getResponse() (que el llamador interno controla
+    // libremente y podría incluir detalles de configuración/invariantes) al
+    // cliente. El detalle completo sigue disponible en el log del servidor
+    // (logger.error en catch(), sin cambios). Los HttpException <500 (400/
+    // 401/403/404/409/...) no se tocan: sus mensajes son intencionalmente
+    // orientados al cliente.
+    if (statusCode >= SERVER_ERROR_THRESHOLD) {
+      return {
+        statusCode,
+        message: 'Error interno del servidor',
+        error: label(statusCode),
+      };
+    }
+
     const payload = exception.getResponse();
 
     if (typeof payload === 'string') {

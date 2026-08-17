@@ -40,7 +40,7 @@ export class AccountingEntriesController {
   @ApiOperation({
     summary: 'Listar asientos contables (paginado, con filtros)',
     description:
-      'Libro diario interno de pre-contabilidad automática, generado por el motor de Ventas/Pagos. No reemplaza un software contable formal ni constituye contabilidad SUNAT/PLE. Fila compacta: sin líneas ni actor (ver el detalle en GET /accounting/entries/:id). Orden fijo cronológico: postedAt/createdAt ascendente (más antiguo primero).',
+      'Libro diario interno de pre-contabilidad automática, generado por el motor de Ventas/Pagos. No reemplaza un software contable formal ni constituye contabilidad SUNAT/PLE. Fila compacta: sin líneas ni actor (ver el detalle en GET /accounting/entries/:id). Orden fijo: postedAt descendente e id descendente como desempate (eventos contables más recientes primero).',
   })
   @ApiOkResponse({ type: PaginatedAccountingEntriesResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })

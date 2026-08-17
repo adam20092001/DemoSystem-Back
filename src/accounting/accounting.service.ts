@@ -124,8 +124,12 @@ export class AccountingService {
       this.prisma.accountingEntry.findMany({
         where,
         select: ACCOUNTING_ENTRY_LIST_SELECT,
-        // Orden cronológico de libro diario: más antiguo primero.
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        // Decisión cerrada del Bloque C (reconfirmada en el Bloque D):
+        // postedAt DESC, id DESC — asientos más recientes primero. postedAt
+        // es el instante contable real del hecho de negocio (confirmación
+        // de venta / cobro de pago); createdAt es solo el instante de
+        // persistencia y puede diferir, así que nunca se ordena por él.
+        orderBy: [{ postedAt: 'desc' }, { id: 'desc' }],
         skip,
         take: limit,
       }),
