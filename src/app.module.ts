@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AccountingModule } from './accounting/accounting.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -35,6 +36,7 @@ import { UsersModule } from './users/users.module';
     QuotesModule,
     SalesModule,
     PaymentsModule,
+    AccountingModule,
     HealthModule,
   ],
 })

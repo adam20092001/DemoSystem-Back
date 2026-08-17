@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { PaymentsModule } from '../payments/payments.module';
@@ -25,9 +26,23 @@ import { SalesService } from './sales.service';
  * todavía no existía): ahora PaymentsModule es el ÚNICO propietario del
  * provider, sin duplicación. PaymentsModule NUNCA importa SalesModule, así
  * que no hay ciclo y no hace falta forwardRef.
+ *
+ * Desde la Fase 8, Bloque B: importa AccountingModule para que SalesService
+ * componga AccountingEngine DIRECTAMENTE dentro de su propia transacción
+ * (reconocimiento de venta al confirmar, reversión al anular) — el pago
+ * inicial sigue posteando su propio asiento de cobro a través de
+ * PaymentEngine, nunca duplicado aquí. AccountingModule es hoja (no importa
+ * SalesModule ni PaymentsModule), así que importarlo desde ambos módulos no
+ * genera ciclo ni requiere forwardRef. AccountingEngine NUNCA se registra
+ * manualmente en `providers`: AccountingModule es su único propietario.
  */
 @Module({
-  imports: [DocumentSequencesModule, InventoryModule, PaymentsModule],
+  imports: [
+    DocumentSequencesModule,
+    InventoryModule,
+    PaymentsModule,
+    AccountingModule,
+  ],
   controllers: [SalesController],
   providers: [SalesService, SaleDocumentRenderer],
   exports: [SalesService],

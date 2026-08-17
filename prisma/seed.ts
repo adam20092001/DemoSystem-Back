@@ -1,4 +1,6 @@
 import {
+  AccountType,
+  AccountingSystemKey,
   CustomerStage,
   CustomerStatus,
   DocumentType,
@@ -48,6 +50,56 @@ const SEED_UNITS: ReadonlyArray<{
   { code: 'PAR', name: 'Par', abbreviation: 'par', allowDecimal: false },
   { code: 'RLL', name: 'Rollo', abbreviation: 'rll', allowDecimal: false },
   { code: 'SER', name: 'Servicio', abbreviation: 'ser', allowDecimal: false },
+];
+
+/**
+ * Plan de cuentas básico (Fase 8, Bloque A — Documento Maestro §17).
+ * Exactamente las seis cuentas de sistema aprobadas: sin PCGE, sin cuentas
+ * personalizadas, sin mapeo configurable. code/name en este arreglo son la
+ * fuente de verdad de los valores canónicos.
+ */
+const SEED_ACCOUNTS: ReadonlyArray<{
+  systemKey: AccountingSystemKey;
+  code: string;
+  name: string;
+  type: AccountType;
+}> = [
+  {
+    systemKey: AccountingSystemKey.CASH,
+    code: 'CASH',
+    name: 'Caja',
+    type: AccountType.ASSET,
+  },
+  {
+    systemKey: AccountingSystemKey.BANK,
+    code: 'BANK',
+    name: 'Bancos',
+    type: AccountType.ASSET,
+  },
+  {
+    systemKey: AccountingSystemKey.ACCOUNTS_RECEIVABLE,
+    code: 'AR',
+    name: 'Cuentas por cobrar',
+    type: AccountType.ASSET,
+  },
+  {
+    systemKey: AccountingSystemKey.VAT_PAYABLE,
+    code: 'VAT',
+    name: 'IGV por pagar',
+    type: AccountType.LIABILITY,
+  },
+  {
+    systemKey: AccountingSystemKey.SALES_REVENUE,
+    code: 'SALES',
+    name: 'Ventas',
+    type: AccountType.REVENUE,
+  },
+  {
+    systemKey: AccountingSystemKey.DISCOUNTS,
+    code: 'DISCOUNTS',
+    name: 'Descuentos',
+    type: AccountType.CONTRA_REVENUE,
+  },
 ];
 
 function normalize(value: string): string {
@@ -241,6 +293,34 @@ async function seedDocumentSequences(): Promise<void> {
   console.log('Secuencia de documento verificada: SALE (NV-)');
 }
 
+/**
+ * Cuentas de sistema del plan de cuentas básico (Fase 8, Bloque A). Mismo
+ * criterio que seedGenericCustomer(): systemKey/code/name/type son
+ * invariantes de dominio, no configuración editable, así que el `update`
+ * restaura los valores canónicos aprobados en cada reejecución (nunca
+ * `update: {}`). Sin AccountingEntry/AccountingEntryLine aquí: este seed
+ * jamás crea historial financiero, solo el plan de cuentas fijo.
+ */
+async function seedAccounts(): Promise<void> {
+  for (const account of SEED_ACCOUNTS) {
+    await prisma.account.upsert({
+      where: { systemKey: account.systemKey },
+      update: {
+        code: account.code,
+        name: account.name,
+        type: account.type,
+      },
+      create: {
+        systemKey: account.systemKey,
+        code: account.code,
+        name: account.name,
+        type: account.type,
+      },
+    });
+  }
+  console.log(`Cuentas contables verificadas: ${SEED_ACCOUNTS.length}`);
+}
+
 async function main(): Promise<void> {
   await seedRoles();
   await seedInitialAdmin();
@@ -248,6 +328,7 @@ async function main(): Promise<void> {
   await seedUnits();
   await seedGenericCustomer();
   await seedDocumentSequences();
+  await seedAccounts();
 }
 
 main()

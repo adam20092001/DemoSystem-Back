@@ -194,6 +194,23 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'previousStatus',
     'cancellationSource',
   ],
+  // Fase 8, Bloque B. AccountingEngine es el único emisor de ambas (nunca
+  // SalesService/PaymentEngine). Nunca amount/debit/credit/lines (el asiento
+  // y sus líneas ya son el registro persistido), nunca saleNumber/PII de
+  // cliente/referencia de Payment/motivo de anulación/totales de Sale: solo
+  // identificadores puros del asiento y de su evento origen.
+  [AuditAction.ACCOUNTING_ENTRY_POSTED]: [
+    'entryId',
+    'sourceType',
+    'sourceId',
+    'eventType',
+  ],
+  [AuditAction.ACCOUNTING_ENTRY_REVERSED]: [
+    'entryId',
+    'sourceType',
+    'sourceId',
+    'eventType',
+  ],
 };
 
 /**

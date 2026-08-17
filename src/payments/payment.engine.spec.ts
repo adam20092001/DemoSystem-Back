@@ -1,10 +1,13 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import {
+  AccountingEventType,
+  AccountingSourceType,
   PaymentCancellationSource,
   PaymentMethod,
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
+import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { PAYMENT_SAFE_SELECT } from './mappers/payment.mapper';
@@ -19,6 +22,7 @@ const SALE_ID = '11111111-1111-4111-8111-111111111111';
 const ACTOR_ID = '22222222-2222-4222-8222-222222222222';
 const PAYMENT_ID = '33333333-3333-4333-8333-333333333333';
 const SALE_NUMBER = 'NV-000001';
+const CANCELLED_AT = new Date('2026-04-01T09:30:00.000Z');
 
 function makePaymentRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -82,6 +86,7 @@ function makeCancelAllCommand(
     saleNumber: SALE_NUMBER,
     actorUserId: ACTOR_ID,
     ipAddress: null,
+    cancelledAt: CANCELLED_AT,
     ...overrides,
   };
 }
@@ -104,16 +109,40 @@ function createAuditServiceMock() {
   return { record: jest.fn<Promise<void>, [Record<string, unknown>]>() };
 }
 
+function createAccountingEngineMock() {
+  return {
+    postPaymentCollection: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    reverseOriginalForSource: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+  };
+}
+
 describe('PaymentEngine', () => {
   let tx: ReturnType<typeof createTxMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
+  let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
   let engine: PaymentEngine;
 
   beforeEach(() => {
     tx = createTxMock();
     auditService = createAuditServiceMock();
     auditService.record.mockResolvedValue(undefined);
-    engine = new PaymentEngine(auditService as unknown as AuditService);
+    accountingEngine = createAccountingEngineMock();
+    accountingEngine.postPaymentCollection.mockResolvedValue({
+      id: 'entry-1',
+      sourceType: AccountingSourceType.PAYMENT,
+      sourceId: PAYMENT_ID,
+      eventType: AccountingEventType.ORIGINAL,
+    });
+    accountingEngine.reverseOriginalForSource.mockResolvedValue({
+      id: 'entry-2',
+      sourceType: AccountingSourceType.PAYMENT,
+      sourceId: PAYMENT_ID,
+      eventType: AccountingEventType.REVERSAL,
+    });
+    engine = new PaymentEngine(
+      auditService as unknown as AuditService,
+      accountingEngine as unknown as AccountingEngine,
+    );
 
     tx.payment.create.mockResolvedValue(makePaymentRow());
     tx.payment.update.mockResolvedValue(
@@ -263,6 +292,95 @@ describe('PaymentEngine', () => {
         makeRegisterCommand(),
       );
       expect(tx.sale.update).not.toHaveBeenCalled();
+    });
+
+    describe('integración contable (Fase 8, Bloque B)', () => {
+      it('crea el Payment ANTES de postear el cobro contable, con el MISMO tx', async () => {
+        await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand(),
+        );
+        expect(tx.payment.create).toHaveBeenCalledTimes(1);
+        expect(accountingEngine.postPaymentCollection).toHaveBeenCalledTimes(1);
+        const createOrder = tx.payment.create.mock.invocationCallOrder[0];
+        const postOrder =
+          accountingEngine.postPaymentCollection.mock.invocationCallOrder[0];
+        expect(createOrder).toBeLessThan(postOrder);
+        expect(accountingEngine.postPaymentCollection.mock.calls[0][0]).toBe(
+          tx,
+        );
+      });
+
+      it('postedAt del asiento de cobro es EXACTAMENTE el paidAt persistido en el Payment (mismo instante, no dos)', async () => {
+        await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand(),
+        );
+        const persistedPaidAt = (
+          tx.payment.create.mock.calls[0][0] as {
+            data: { paidAt: Date };
+          }
+        ).data.paidAt;
+        const postedAt = (
+          accountingEngine.postPaymentCollection.mock.calls[0][1] as {
+            postedAt: Date;
+          }
+        ).postedAt;
+        expect(postedAt).toBe(persistedPaidAt);
+      });
+
+      it('propaga saleNumber/method/amount/actor/ip correctos a postPaymentCollection', async () => {
+        await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand({
+            method: PaymentMethod.CARD,
+            amount: new Prisma.Decimal('77.50'),
+            reference: 'OP-000456',
+            ipAddress: '203.0.113.5',
+          }),
+        );
+        const command = accountingEngine.postPaymentCollection.mock
+          .calls[0][1] as {
+          paymentId: string;
+          saleNumber: string;
+          method: PaymentMethod;
+          amount: Prisma.Decimal;
+          actorUserId: string;
+          ipAddress: string | null;
+        };
+        expect(command.paymentId).toBe(PAYMENT_ID);
+        expect(command.saleNumber).toBe(SALE_NUMBER);
+        expect(command.method).toBe(PaymentMethod.CARD);
+        expect(command.amount.toFixed(2)).toBe('77.50');
+        expect(command.actorUserId).toBe(ACTOR_ID);
+        expect(command.ipAddress).toBe('203.0.113.5');
+      });
+
+      it('PAYMENT_REGISTERED sigue auditándose exactamente una vez; PaymentEngine nunca escribe ACCOUNTING_ENTRY_* él mismo', async () => {
+        await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand(),
+        );
+        expect(auditService.record).toHaveBeenCalledTimes(1);
+        expect(
+          (auditService.record.mock.calls[0][0] as { action: AuditAction })
+            .action,
+        ).toBe(AuditAction.PAYMENT_REGISTERED);
+      });
+
+      it('si AccountingEngine rechaza, register() rechaza y el Payment nunca se retorna', async () => {
+        accountingEngine.postPaymentCollection.mockRejectedValue(
+          new Error('fallo contable interno'),
+        );
+        await expect(
+          engine.register(
+            tx as unknown as Prisma.TransactionClient,
+            makeRegisterCommand(),
+          ),
+        ).rejects.toThrow('fallo contable interno');
+        // La auditoría de negocio nunca se alcanza si la contable falla antes.
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -476,6 +594,81 @@ describe('PaymentEngine', () => {
       );
       expect(tx.sale.update).not.toHaveBeenCalled();
     });
+
+    describe('integración contable (Fase 8, Bloque B)', () => {
+      beforeEach(() => {
+        tx.$queryRaw.mockResolvedValue([
+          { id: PAYMENT_ID, saleId: SALE_ID, status: PaymentStatus.ACTIVE },
+        ]);
+      });
+
+      it('el MISMO cancelledAt se usa para Payment.cancelledAt y para el postedAt de la reversión contable', async () => {
+        await engine.cancel(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelCommand(),
+        );
+        const persistedCancelledAt = (
+          tx.payment.update.mock.calls[0][0] as {
+            data: { cancelledAt: Date };
+          }
+        ).data.cancelledAt;
+        const postedAt = (
+          accountingEngine.reverseOriginalForSource.mock.calls[0][1] as {
+            postedAt: Date;
+          }
+        ).postedAt;
+        expect(postedAt).toBe(persistedCancelledAt);
+      });
+
+      it('reversa exactamente una vez, con sourceType PAYMENT/sourceId/sourceNumber/actor/ip correctos, mismo tx', async () => {
+        await engine.cancel(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelCommand({ ipAddress: '203.0.113.5' }),
+        );
+        expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+          1,
+        );
+        const [calledTx, command] =
+          accountingEngine.reverseOriginalForSource.mock.calls[0];
+        expect(calledTx).toBe(tx);
+        expect(
+          (command as { sourceType: AccountingSourceType }).sourceType,
+        ).toBe(AccountingSourceType.PAYMENT);
+        expect((command as { sourceId: string }).sourceId).toBe(PAYMENT_ID);
+        expect((command as { sourceNumber: string }).sourceNumber).toBe(
+          SALE_NUMBER,
+        );
+        expect((command as { actorUserId: string }).actorUserId).toBe(ACTOR_ID);
+        expect((command as { ipAddress: string | null }).ipAddress).toBe(
+          '203.0.113.5',
+        );
+      });
+
+      it('PAYMENT_CANCELLED se audita exactamente una vez; PaymentEngine nunca escribe ACCOUNTING_ENTRY_* él mismo', async () => {
+        await engine.cancel(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelCommand(),
+        );
+        expect(auditService.record).toHaveBeenCalledTimes(1);
+        expect(
+          (auditService.record.mock.calls[0][0] as { action: AuditAction })
+            .action,
+        ).toBe(AuditAction.PAYMENT_CANCELLED);
+      });
+
+      it('si la reversión contable falla, cancel() rechaza (la anulación del Payment debe revertirse con toda la transacción)', async () => {
+        accountingEngine.reverseOriginalForSource.mockRejectedValue(
+          new Error('fallo contable interno'),
+        );
+        await expect(
+          engine.cancel(
+            tx as unknown as Prisma.TransactionClient,
+            makeCancelCommand(),
+          ),
+        ).rejects.toThrow('fallo contable interno');
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ====================================================================
@@ -577,6 +770,90 @@ describe('PaymentEngine', () => {
         makeCancelAllCommand(),
       );
       expect(tx.sale.update).not.toHaveBeenCalled();
+    });
+
+    describe('integración contable (Fase 8, Bloque B)', () => {
+      it('cero pagos ACTIVE: ninguna reversión contable', async () => {
+        tx.$queryRaw.mockResolvedValue([]);
+        await engine.cancelAllActiveForSale(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelAllCommand(),
+        );
+        expect(
+          accountingEngine.reverseOriginalForSource,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('un pago ACTIVE: exactamente una reversión contable, con el cancelledAt de la OPERACIÓN', async () => {
+        tx.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }]);
+        await engine.cancelAllActiveForSale(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelAllCommand({ cancelledAt: CANCELLED_AT }),
+        );
+        expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+          1,
+        );
+        const command = accountingEngine.reverseOriginalForSource.mock
+          .calls[0][1] as {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          postedAt: Date;
+        };
+        expect(command.sourceType).toBe(AccountingSourceType.PAYMENT);
+        expect(command.sourceId).toBe(PAYMENT_ID);
+        expect(command.postedAt).toBe(CANCELLED_AT);
+      });
+
+      it('múltiples pagos ACTIVE: una reversión contable por pago, TODAS con el MISMO cancelledAt de operación', async () => {
+        tx.$queryRaw.mockResolvedValue([
+          { id: 'payment-a' },
+          { id: 'payment-b' },
+          { id: 'payment-c' },
+        ]);
+        await engine.cancelAllActiveForSale(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelAllCommand({ cancelledAt: CANCELLED_AT }),
+        );
+        expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+          3,
+        );
+        for (const call of accountingEngine.reverseOriginalForSource.mock
+          .calls) {
+          expect((call[1] as { postedAt: Date }).postedAt).toBe(CANCELLED_AT);
+        }
+        const reversedIds =
+          accountingEngine.reverseOriginalForSource.mock.calls.map(
+            (call) => (call[1] as { sourceId: string }).sourceId,
+          );
+        expect(reversedIds).toEqual(['payment-a', 'payment-b', 'payment-c']);
+      });
+
+      it('Payment.cancelledAt persistido coincide con el cancelledAt de la reversión contable, para cada pago', async () => {
+        tx.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }]);
+        await engine.cancelAllActiveForSale(
+          tx as unknown as Prisma.TransactionClient,
+          makeCancelAllCommand({ cancelledAt: CANCELLED_AT }),
+        );
+        const persistedCancelledAt = (
+          tx.payment.update.mock.calls[0][0] as {
+            data: { cancelledAt: Date };
+          }
+        ).data.cancelledAt;
+        expect(persistedCancelledAt).toBe(CANCELLED_AT);
+      });
+
+      it('si una reversión contable falla, cancelAllActiveForSale rechaza (propaga a la transacción de anulación de venta)', async () => {
+        tx.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }]);
+        accountingEngine.reverseOriginalForSource.mockRejectedValue(
+          new Error('fallo contable interno'),
+        );
+        await expect(
+          engine.cancelAllActiveForSale(
+            tx as unknown as Prisma.TransactionClient,
+            makeCancelAllCommand(),
+          ),
+        ).rejects.toThrow('fallo contable interno');
+      });
     });
   });
 });

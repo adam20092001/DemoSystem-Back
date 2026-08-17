@@ -42,11 +42,16 @@ export interface CancelPaymentCommand {
  * de anulación de venta. cancellationSource siempre SALE_CANCELLATION,
  * cancellationReason siempre null (D2 aprobado): nunca se acepta un motivo
  * aquí, para que no exista la posibilidad de duplicar el texto libre de
- * Sale.cancellationReason dentro de un Payment.
+ * Sale.cancellationReason dentro de un Payment. `cancelledAt` es el
+ * instante único de la OPERACIÓN de anulación de venta (Fase 8, Bloque B,
+ * plan final aprobado §30/§37): SalesService lo calcula una sola vez y lo
+ * reutiliza aquí para cada Payment.cancelledAt Y para cada reversión
+ * contable de pago, nunca instantes independientes por pago.
  */
 export interface CancelAllActivePaymentsCommand {
   saleId: string;
   saleNumber: string;
   actorUserId: string;
   ipAddress: string | null;
+  cancelledAt: Date;
 }

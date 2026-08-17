@@ -4,10 +4,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  AccountingSourceType,
   PaymentCancellationSource,
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
+import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -42,17 +44,28 @@ interface LockedPaymentRow {
  * Nunca actualiza Sale.paidAmount/balanceDue/paymentStatus por sí mismo
  * salvo a través del método explícito recalculateSaleSummary(): register()/
  * cancel()/cancelAllActiveForSale() dejan la política de resumen al
- * llamador, que ya sostiene el lock `Sale FOR UPDATE`.
+ * llamador, que ya sostiene el lock `Sale FOR UPDATE`. Desde la Fase 8,
+ * Bloque B, compone AccountingEngine dentro del MISMO tx para el
+ * reconocimiento/reversión contable de cada cobro — AccountingEngine sigue
+ * siendo el único escritor de AccountingEntry/AccountingEntryLine y de su
+ * auditoría ACCOUNTING_ENTRY_*; PaymentEngine nunca las escribe él mismo.
  */
 @Injectable()
 export class PaymentEngine {
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly accountingEngine: AccountingEngine,
+  ) {}
 
   /**
-   * Crea un Payment ACTIVE y audita exactamente una vez. No actualiza el
-   * resumen de la venta: el llamador decide cuándo llamar a
-   * recalculateSaleSummary() (o, en la creación inicial de una venta, ya
-   * calculó el resumen final antes del INSERT de Sale).
+   * Crea un Payment ACTIVE, postea su asiento contable de cobro y audita
+   * exactamente una vez. No actualiza el resumen de la venta: el llamador
+   * decide cuándo llamar a recalculateSaleSummary() (o, en la creación
+   * inicial de una venta, ya calculó el resumen final antes del INSERT de
+   * Sale). Un único instante `paidAt` se genera y se reutiliza tanto para
+   * Payment.paidAt como para AccountingEntry.postedAt del asiento de cobro
+   * (plan final aprobado, §23/§28): nunca dos instantes independientes
+   * para el mismo hecho financiero.
    */
   async register(
     tx: Prisma.TransactionClient,
@@ -61,6 +74,8 @@ export class PaymentEngine {
     assertValidPaymentAmountShape(command.amount);
     assertReferenceRequiredForMethod(command.method, command.reference);
 
+    const paidAt = new Date();
+
     const created = await tx.payment.create({
       data: {
         saleId: command.saleId,
@@ -68,10 +83,20 @@ export class PaymentEngine {
         amount: command.amount,
         reference: command.reference,
         status: PaymentStatus.ACTIVE,
-        paidAt: new Date(),
+        paidAt,
         createdByUserId: command.actorUserId,
       },
       select: PAYMENT_SAFE_SELECT,
+    });
+
+    await this.accountingEngine.postPaymentCollection(tx, {
+      paymentId: created.id,
+      saleNumber: command.saleNumber,
+      method: command.method,
+      amount: command.amount,
+      postedAt: paidAt,
+      actorUserId: command.actorUserId,
+      ipAddress: command.ipAddress,
     });
 
     await this.auditService.record({
@@ -139,7 +164,10 @@ export class PaymentEngine {
    * (SELECT ... FOR UPDATE por id+saleId): garantiza que el pago pertenece
    * a la venta indicada y que queda serializado frente a cualquier otra
    * mutación concurrente sobre el mismo pago. No actualiza el resumen de la
-   * venta: el llamador invoca recalculateSaleSummary() a continuación.
+   * venta: el llamador invoca recalculateSaleSummary() a continuación. Un
+   * único instante `cancelledAt` se genera y se reutiliza tanto para
+   * Payment.cancelledAt como para AccountingEntry.postedAt del asiento de
+   * reversión (plan final aprobado, §22/§29).
    */
   async cancel(
     tx: Prisma.TransactionClient,
@@ -159,16 +187,27 @@ export class PaymentEngine {
       throw new ConflictException('El pago ya está anulado');
     }
 
+    const cancelledAt = new Date();
+
     const updated = await tx.payment.update({
       where: { id: command.paymentId },
       data: {
         status: PaymentStatus.CANCELLED,
-        cancelledAt: new Date(),
+        cancelledAt,
         cancelledByUserId: command.actorUserId,
         cancellationSource: PaymentCancellationSource.MANUAL,
         cancellationReason: command.reason,
       },
       select: PAYMENT_SAFE_SELECT,
+    });
+
+    await this.accountingEngine.reverseOriginalForSource(tx, {
+      sourceType: AccountingSourceType.PAYMENT,
+      sourceId: command.paymentId,
+      sourceNumber: command.saleNumber,
+      postedAt: cancelledAt,
+      actorUserId: command.actorUserId,
+      ipAddress: command.ipAddress,
     });
 
     await this.auditService.record({
@@ -194,12 +233,16 @@ export class PaymentEngine {
   /**
    * Usado EXCLUSIVAMENTE por SalesService.cancel() dentro de su propia
    * transacción de anulación de venta. Anula todos los Payment ACTIVE de la
-   * venta (los ya CANCELLED se ignoran, sin auditoría duplicada), en orden
-   * determinista paidAt ASC, id ASC. Nunca actualiza el resumen de la venta
-   * (Sale.paidAmount/balanceDue/paymentStatus quedan congelados —
-   * responsabilidad exclusiva de SalesService, que NO llama a
-   * recalculateSaleSummary() en este flujo). Cero pagos ACTIVE es un no-op
-   * válido que retorna un arreglo vacío.
+   * venta (los ya CANCELLED se ignoran, sin auditoría ni reversión contable
+   * duplicada), en orden determinista paidAt ASC, id ASC. Nunca actualiza
+   * el resumen de la venta (Sale.paidAmount/balanceDue/paymentStatus
+   * quedan congelados — responsabilidad exclusiva de SalesService, que NO
+   * llama a recalculateSaleSummary() en este flujo). Cero pagos ACTIVE es
+   * un no-op válido que retorna un arreglo vacío. `command.cancelledAt` es
+   * el instante ÚNICO de la operación de anulación de venta completa (plan
+   * final aprobado, §30/§37): se reutiliza para Payment.cancelledAt Y para
+   * el postedAt de cada reversión contable de pago — nunca un instante
+   * independiente por pago.
    */
   async cancelAllActiveForSale(
     tx: Prisma.TransactionClient,
@@ -219,12 +262,21 @@ export class PaymentEngine {
         where: { id: row.id },
         data: {
           status: PaymentStatus.CANCELLED,
-          cancelledAt: new Date(),
+          cancelledAt: command.cancelledAt,
           cancelledByUserId: command.actorUserId,
           cancellationSource: PaymentCancellationSource.SALE_CANCELLATION,
           cancellationReason: null,
         },
         select: PAYMENT_SAFE_SELECT,
+      });
+
+      await this.accountingEngine.reverseOriginalForSource(tx, {
+        sourceType: AccountingSourceType.PAYMENT,
+        sourceId: row.id,
+        sourceNumber: command.saleNumber,
+        postedAt: command.cancelledAt,
+        actorUserId: command.actorUserId,
+        ipAddress: command.ipAddress,
       });
 
       await this.auditService.record({

@@ -854,6 +854,36 @@ describe('Sales (e2e)', () => {
         await prisma.inventoryMovement.deleteMany({
           where: { referenceType: 'Sale', referenceId: { in: allSaleIds } },
         });
+
+        // Fase 8, Bloque B: cada Sale/Payment propio puede tener asientos
+        // contables ORIGINAL (SalesService.postSaleRecognition/
+        // PaymentEngine.postPaymentCollection) y REVERSAL (anulación real
+        // durante la prueba). Sin FK de accounting_entries hacia sales/
+        // payments (source polimórfico deliberado), así que borrar Sale/
+        // Payment nunca falla ni arrastra estas filas: hay que retirarlas a
+        // mano ANTES para no dejar historial contable huérfano. REVERSAL
+        // primero (self-FK reversesEntryId hacia su ORIGINAL), luego
+        // ORIGINAL; las líneas se van solas por CASCADE.
+        const accountingWhere = {
+          OR: [
+            { sourceType: 'SALE' as const, sourceId: { in: allSaleIds } },
+            ...(ownedPaymentIds.length > 0
+              ? [
+                  {
+                    sourceType: 'PAYMENT' as const,
+                    sourceId: { in: ownedPaymentIds },
+                  },
+                ]
+              : []),
+          ],
+        };
+        await prisma.accountingEntry.deleteMany({
+          where: { ...accountingWhere, eventType: 'REVERSAL' },
+        });
+        await prisma.accountingEntry.deleteMany({
+          where: { ...accountingWhere, eventType: 'ORIGINAL' },
+        });
+
         await prisma.payment.deleteMany({
           where: { saleId: { in: allSaleIds } },
         });
@@ -4125,6 +4155,15 @@ describe('Sales (e2e)', () => {
       });
       expect(itemsBefore).toBeGreaterThan(0);
 
+      // Fase 8, Bloque B: esta Sale (creada vía el endpoint real) tiene un
+      // AccountingEntry ORIGINAL propio, sin FK hacia sales (source
+      // polimórfico): borrar la Sale aquí NUNCA fallaría por eso, pero sí
+      // dejaría el asiento huérfano al retirar el id de createdSaleIds antes
+      // de afterAll. Se limpia a mano, mismo criterio que el resto de las
+      // eliminaciones directas de este describe.
+      await prisma.accountingEntry.deleteMany({
+        where: { sourceType: 'SALE', sourceId: sale.id },
+      });
       await prisma.sale.delete({ where: { id: sale.id } });
       createdSaleIds.splice(createdSaleIds.indexOf(sale.id), 1);
 

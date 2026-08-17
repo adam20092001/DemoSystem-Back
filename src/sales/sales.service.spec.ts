@@ -18,6 +18,7 @@ import {
   SaleStatus,
   UnitStatus,
 } from '@prisma/client';
+import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
@@ -131,6 +132,10 @@ function makeSaleLockRow(overrides: Partial<Record<string, unknown>> = {}) {
     number: 'NV-000001',
     status: SaleStatus.ACTIVE,
     deliveryStatus: SaleDeliveryStatus.PENDING,
+    subtotal: new Prisma.Decimal('10.00'),
+    discountAmount: new Prisma.Decimal('0.00'),
+    taxAmount: new Prisma.Decimal('0.00'),
+    total: new Prisma.Decimal('10.00'),
     ...overrides,
   };
 }
@@ -336,12 +341,21 @@ function createPaymentEngineMock() {
   };
 }
 
+function createAccountingEngineMock() {
+  return {
+    postSaleRecognition: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    postPaymentCollection: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    reverseOriginalForSource: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+  };
+}
+
 describe('SalesService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let sequenceService: ReturnType<typeof createSequenceServiceMock>;
   let engine: ReturnType<typeof createEngineMock>;
   let paymentEngine: ReturnType<typeof createPaymentEngineMock>;
+  let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
   let service: SalesService;
 
   beforeEach(() => {
@@ -368,6 +382,25 @@ describe('SalesService', () => {
       makePaymentRow({ status: 'CANCELLED' }),
     );
     paymentEngine.cancelAllActiveForSale.mockResolvedValue([]);
+    accountingEngine = createAccountingEngineMock();
+    accountingEngine.postSaleRecognition.mockResolvedValue({
+      id: 'accounting-entry-1',
+      sourceType: 'SALE',
+      sourceId: SALE_ID,
+      eventType: 'ORIGINAL',
+    });
+    accountingEngine.postPaymentCollection.mockResolvedValue({
+      id: 'accounting-entry-2',
+      sourceType: 'PAYMENT',
+      sourceId: 'payment-1',
+      eventType: 'ORIGINAL',
+    });
+    accountingEngine.reverseOriginalForSource.mockResolvedValue({
+      id: 'accounting-entry-3',
+      sourceType: 'SALE',
+      sourceId: SALE_ID,
+      eventType: 'REVERSAL',
+    });
 
     service = new SalesService(
       prisma as unknown as PrismaService,
@@ -375,6 +408,7 @@ describe('SalesService', () => {
       sequenceService,
       engine as unknown as StockMovementEngine,
       paymentEngine as unknown as PaymentEngine,
+      accountingEngine as unknown as AccountingEngine,
     );
 
     prisma.tx.$queryRaw.mockImplementation(
@@ -2564,6 +2598,247 @@ describe('SalesService', () => {
       await service.findOne(SALE_ID, RoleName.ADMIN);
       const adminArgs = prisma.sale.findUnique.mock.calls[0][0];
       expect(sellerArgs).toEqual(adminArgs);
+    });
+  });
+
+  // ======================================================================
+  // Fase 8, Bloque B — integración contable
+  // ======================================================================
+  describe('Fase 8, Bloque B — integración contable en createDirect', () => {
+    it('venta económicamente activa: postSaleRecognition se llama exactamente una vez, mismo tx, con subtotal/discount/tax/total/actor/ip correctos', async () => {
+      await service.createDirect(validDirectInput);
+      expect(accountingEngine.postSaleRecognition).toHaveBeenCalledTimes(1);
+      const [calledTx, command] =
+        accountingEngine.postSaleRecognition.mock.calls[0];
+      expect(calledTx).toBe(prisma.tx);
+      const typedCommand = command as {
+        subtotal: Prisma.Decimal;
+        discountAmount: Prisma.Decimal;
+        taxAmount: Prisma.Decimal;
+        total: Prisma.Decimal;
+        actorUserId: string;
+        ipAddress: string | null;
+        postedAt: Date;
+      };
+      expect(typedCommand.subtotal.toFixed(2)).toBe('10.00');
+      expect(typedCommand.discountAmount.toFixed(2)).toBe('0.00');
+      expect(typedCommand.taxAmount.toFixed(2)).toBe('0.00');
+      expect(typedCommand.total.toFixed(2)).toBe('10.00');
+      expect(typedCommand.actorUserId).toBe(ACTOR_ID);
+      expect(typedCommand.ipAddress).toBe('10.0.0.1');
+      expect(typedCommand.postedAt).toBeInstanceOf(Date);
+    });
+
+    it('postSaleRecognition usa EXACTAMENTE el mismo confirmedAt que el persistido en Sale', async () => {
+      await service.createDirect(validDirectInput);
+      const persistedConfirmedAt = (
+        prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { confirmedAt: Date };
+        }
+      ).data.confirmedAt;
+      const postedAt = (
+        accountingEngine.postSaleRecognition.mock.calls[0][1] as {
+          postedAt: Date;
+        }
+      ).postedAt;
+      expect(postedAt).toBe(persistedConfirmedAt);
+    });
+
+    it('pago inicial: postSaleRecognition Y PaymentEngine.register se llaman ambos por separado, nunca combinados en un solo asiento', async () => {
+      paymentEngine.sumActiveForSale.mockResolvedValue(
+        new Prisma.Decimal('10.00'),
+      );
+      await service.createDirect({
+        ...validDirectInput,
+        payment: { method: 'CASH', amount: '10.00' },
+      });
+      expect(accountingEngine.postSaleRecognition).toHaveBeenCalledTimes(1);
+      expect(paymentEngine.register).toHaveBeenCalledTimes(1);
+    });
+
+    it('venta sin actividad económica (producto de precio 0): SalesService igual delega en AccountingEngine, sin duplicar la lógica de no-op', async () => {
+      prisma.tx.$queryRaw.mockImplementation(
+        createQueryRawRouter({
+          customer: makeCustomerRow(),
+          products: new Map([
+            [
+              PRODUCT_ID,
+              makeProductRow({ salePrice: new Prisma.Decimal('0.00') }),
+            ],
+          ]),
+        }),
+      );
+      await service.createDirect(validDirectInput);
+      expect(accountingEngine.postSaleRecognition).toHaveBeenCalledTimes(1);
+      const command = accountingEngine.postSaleRecognition.mock.calls[0][1] as {
+        subtotal: Prisma.Decimal;
+        total: Prisma.Decimal;
+      };
+      expect(command.subtotal.toFixed(2)).toBe('0.00');
+      expect(command.total.toFixed(2)).toBe('0.00');
+    });
+
+    it('si AccountingEngine.postSaleRecognition rechaza, createDirect rechaza por completo', async () => {
+      accountingEngine.postSaleRecognition.mockRejectedValue(
+        new Error('fallo contable interno'),
+      );
+      await expect(service.createDirect(validDirectInput)).rejects.toThrow(
+        'fallo contable interno',
+      );
+    });
+  });
+
+  describe('Fase 8, Bloque B — integración contable en createFromQuote', () => {
+    const validConvertInput = {
+      quoteId: QUOTE_ID,
+      actorUserId: ACTOR_ID,
+      ipAddress: '10.0.0.1',
+    };
+
+    it('venta económicamente activa: postSaleRecognition con subtotal/discount/tax/total EXACTOS de la cotización (nunca recalculados)', async () => {
+      await service.createFromQuote(validConvertInput);
+      expect(accountingEngine.postSaleRecognition).toHaveBeenCalledTimes(1);
+      const command = accountingEngine.postSaleRecognition.mock.calls[0][1] as {
+        subtotal: Prisma.Decimal;
+        discountAmount: Prisma.Decimal;
+        taxAmount: Prisma.Decimal;
+        total: Prisma.Decimal;
+      };
+      expect(command.subtotal.toFixed(2)).toBe('10.00');
+      expect(command.discountAmount.toFixed(2)).toBe('0.00');
+      expect(command.taxAmount.toFixed(2)).toBe('0.00');
+      expect(command.total.toFixed(2)).toBe('10.00');
+    });
+
+    it('postSaleRecognition usa el mismo confirmedAt persistido en la Sale convertida', async () => {
+      await service.createFromQuote(validConvertInput);
+      const persistedConfirmedAt = (
+        prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { confirmedAt: Date };
+        }
+      ).data.confirmedAt;
+      const postedAt = (
+        accountingEngine.postSaleRecognition.mock.calls[0][1] as {
+          postedAt: Date;
+        }
+      ).postedAt;
+      expect(postedAt).toBe(persistedConfirmedAt);
+    });
+
+    it('pago inicial en conversión: ambos asientos (venta y cobro) se postean por separado', async () => {
+      paymentEngine.sumActiveForSale.mockResolvedValue(
+        new Prisma.Decimal('10.00'),
+      );
+      await service.createFromQuote({
+        ...validConvertInput,
+        payment: { method: 'CASH', amount: '10.00' },
+      });
+      expect(accountingEngine.postSaleRecognition).toHaveBeenCalledTimes(1);
+      expect(paymentEngine.register).toHaveBeenCalledTimes(1);
+    });
+
+    it('si AccountingEngine.postSaleRecognition rechaza, createFromQuote rechaza por completo (la cotización no queda CONVERTED)', async () => {
+      accountingEngine.postSaleRecognition.mockRejectedValue(
+        new Error('fallo contable interno'),
+      );
+      await expect(service.createFromQuote(validConvertInput)).rejects.toThrow(
+        'fallo contable interno',
+      );
+      expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Fase 8, Bloque B — integración contable en cancel', () => {
+    const validCancelInput = {
+      saleId: SALE_ID,
+      reason: 'Motivo de anulación de prueba contable',
+      actorUserId: ACTOR_ID,
+      ipAddress: '10.0.0.1',
+    };
+
+    it('venta económicamente activa (por defecto): reverseOriginalForSource se llama exactamente una vez, sourceType SALE/sourceId correctos', async () => {
+      await service.cancel(validCancelInput);
+      expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+        1,
+      );
+      const command = accountingEngine.reverseOriginalForSource.mock
+        .calls[0][1] as { sourceType: string; sourceId: string };
+      expect(command.sourceType).toBe('SALE');
+      expect(command.sourceId).toBe(SALE_ID);
+    });
+
+    it('el postedAt de la reversión de venta es EXACTAMENTE el mismo cancelledAt persistido en Sale.cancelledAt', async () => {
+      await service.cancel(validCancelInput);
+      const persistedCancelledAt = (
+        prisma.tx.sale.update.mock.calls[0][0] as {
+          data: { cancelledAt: Date };
+        }
+      ).data.cancelledAt;
+      const postedAt = (
+        accountingEngine.reverseOriginalForSource.mock.calls[0][1] as {
+          postedAt: Date;
+        }
+      ).postedAt;
+      expect(postedAt).toBe(persistedCancelledAt);
+    });
+
+    it('el MISMO cancelledAt de operación se pasa a PaymentEngine.cancelAllActiveForSale y a la reversión contable de venta', async () => {
+      await service.cancel(validCancelInput);
+      const cancelAllCommand = paymentEngine.cancelAllActiveForSale.mock
+        .calls[0][1] as { cancelledAt: Date };
+      const saleReversalPostedAt = (
+        accountingEngine.reverseOriginalForSource.mock.calls[0][1] as {
+          postedAt: Date;
+        }
+      ).postedAt;
+      expect(cancelAllCommand.cancelledAt).toBe(saleReversalPostedAt);
+    });
+
+    it('venta SIN actividad económica (0/0/0/0): NO se revierte ningún asiento de venta (nunca existió un ORIGINAL que revertir)', async () => {
+      prisma.tx.$queryRaw.mockImplementation(
+        createQueryRawRouter({
+          sale: makeSaleLockRow({
+            subtotal: new Prisma.Decimal('0'),
+            discountAmount: new Prisma.Decimal('0'),
+            taxAmount: new Prisma.Decimal('0'),
+            total: new Prisma.Decimal('0'),
+          }),
+        }),
+      );
+      await service.cancel(validCancelInput);
+      expect(accountingEngine.reverseOriginalForSource).not.toHaveBeenCalled();
+    });
+
+    it('venta con DESCUENTO TOTAL (subtotal>0, discount=subtotal, total=0): SÍ se revierte el asiento de venta', async () => {
+      prisma.tx.$queryRaw.mockImplementation(
+        createQueryRawRouter({
+          sale: makeSaleLockRow({
+            subtotal: new Prisma.Decimal('100.00'),
+            discountAmount: new Prisma.Decimal('100.00'),
+            taxAmount: new Prisma.Decimal('0.00'),
+            total: new Prisma.Decimal('0.00'),
+          }),
+        }),
+      );
+      await service.cancel(validCancelInput);
+      expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('si AccountingEngine.reverseOriginalForSource rechaza, cancel rechaza por completo (nada se confirma)', async () => {
+      accountingEngine.reverseOriginalForSource.mockRejectedValue(
+        new Error('fallo contable interno'),
+      );
+      await expect(service.cancel(validCancelInput)).rejects.toThrow(
+        'fallo contable interno',
+      );
+      expect(prisma.tx.sale.update).not.toHaveBeenCalled();
+    });
+
+    it('nunca recalcula paidAmount/balanceDue/paymentStatus (el resumen congelado sigue siendo responsabilidad exclusiva de la Fase 7)', async () => {
+      await service.cancel(validCancelInput);
+      expect(paymentEngine.recalculateSaleSummary).not.toHaveBeenCalled();
     });
   });
 });

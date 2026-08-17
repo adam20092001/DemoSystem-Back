@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { AccountsReceivableController } from './accounts-receivable.controller';
 import { AccountsReceivableService } from './accounts-receivable.service';
 import { PaymentEngine } from './payment.engine';
@@ -17,8 +18,16 @@ import { PaymentsService } from './payments.service';
  * que SalesService usa para Quote, D17 de la Fase 6) — ninguna dependencia
  * en sentido inverso, sin forwardRef, sin ciclo. PaymentsService no se
  * exporta: ningún otro módulo la necesita todavía.
+ *
+ * Desde la Fase 8, Bloque B: importa AccountingModule para que PaymentEngine
+ * pueda componer AccountingEngine dentro de su propia transacción (asiento
+ * de cobro / reversión de pago). AccountingModule es hoja (no importa
+ * PaymentsModule ni SalesModule), así que no hay ciclo. AccountingEngine
+ * NUNCA se registra manualmente aquí en `providers`: AccountingModule es su
+ * único propietario.
  */
 @Module({
+  imports: [AccountingModule],
   controllers: [PaymentsController, AccountsReceivableController],
   providers: [PaymentEngine, PaymentsService, AccountsReceivableService],
   exports: [PaymentEngine],

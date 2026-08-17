@@ -507,6 +507,72 @@ describe('sanitizeAuditMetadata', () => {
     });
   });
 
+  it('ACCOUNTING_ENTRY_POSTED conserva solo entryId/sourceType/sourceId/eventType, sin amount/debit/credit/lines/saleNumber/PII', () => {
+    const metadata = {
+      entryId: 'entry-1',
+      sourceType: 'SALE',
+      sourceId: 'sale-1',
+      eventType: 'ORIGINAL',
+      amount: '100.00',
+      debit: '100.00',
+      credit: '100.00',
+      lines: ['AR', 'SALES'],
+      saleNumber: 'NV-000001',
+      customerName: 'Juan Pérez',
+      customerDocumentNumber: '12345678',
+      paymentReference: 'OP-000123',
+      cancellationReason: 'Motivo interno',
+      subtotal: '100.00',
+      discountAmount: '0.00',
+      taxAmount: '0.00',
+      total: '100.00',
+      unexpectedField: 'x',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.ACCOUNTING_ENTRY_POSTED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      entryId: 'entry-1',
+      sourceType: 'SALE',
+      sourceId: 'sale-1',
+      eventType: 'ORIGINAL',
+    });
+  });
+
+  it('ACCOUNTING_ENTRY_REVERSED conserva solo entryId/sourceType/sourceId/eventType, sin amount/debit/credit/lines/saleNumber/PII', () => {
+    const metadata = {
+      entryId: 'entry-2',
+      sourceType: 'PAYMENT',
+      sourceId: 'payment-1',
+      eventType: 'REVERSAL',
+      amount: '40.00',
+      debit: '40.00',
+      credit: '40.00',
+      lines: ['CASH', 'AR'],
+      saleNumber: 'NV-000001',
+      customerName: 'Juan Pérez',
+      paymentReference: 'OP-000123',
+      cancellationReason: 'Motivo interno',
+      total: '100.00',
+      unexpectedField: 'x',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.ACCOUNTING_ENTRY_REVERSED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({
+      entryId: 'entry-2',
+      sourceType: 'PAYMENT',
+      sourceId: 'payment-1',
+      eventType: 'REVERSAL',
+    });
+  });
+
   it('QUOTE_CONVERTED conserva solo quoteNumber/saleNumber', () => {
     const metadata = {
       quoteNumber: 'COT-000005',
