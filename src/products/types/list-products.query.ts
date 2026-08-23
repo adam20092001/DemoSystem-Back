@@ -9,4 +9,6 @@ export interface ListProductsQuery {
   productType?: ProductType;
   status?: ProductStatus;
   isInventoryTracked?: boolean;
+  brand?: string;
+  lowStockOnly?: boolean;
 }

@@ -40,6 +40,14 @@ export class LowStockItemResponseDto {
   })
   stockMinimum!: string;
 
+  @ApiProperty({
+    type: String,
+    description:
+      'Fase 9 (R5): stockMinimum - stockCurrent (nunca al revés). Siempre >= 0 porque este endpoint solo devuelve filas de stock bajo. Decimal con 3 decimales fijos, como string.',
+    example: '2.500',
+  })
+  difference!: string;
+
   @ApiProperty({ type: LowStockCategorySummaryResponseDto })
   category!: LowStockCategorySummaryResponseDto;
 

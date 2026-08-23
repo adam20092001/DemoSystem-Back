@@ -159,6 +159,13 @@ export class SaleListItemResponseDto {
   @ApiProperty({ format: 'uuid' })
   sellerId!: string;
 
+  @ApiProperty({
+    type: SaleSellerResponseDto,
+    description:
+      'Identidad segura mínima del vendedor (Fase 9, Bloque A). Nunca email/rol/campos de seguridad.',
+  })
+  seller!: SaleSellerResponseDto;
+
   @ApiProperty({ type: String })
   subtotal!: string;
 

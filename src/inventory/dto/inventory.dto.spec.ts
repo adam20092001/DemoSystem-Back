@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
+import { ProductStatus } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { createValidationPipe } from '../../common/pipes/validation.pipe';
@@ -335,5 +336,33 @@ describe('ListLowStockQueryDto', () => {
     const errors = await validate(instance);
 
     expect(errors).toHaveLength(0);
+  });
+
+  it('Fase 9 (R5): brand como string es válido a nivel de DTO (el trim/blanco se valida en el servicio)', async () => {
+    const instance = plainToInstance(ListLowStockQueryDto, { brand: 'Bosch' });
+
+    const errors = await validate(instance);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('Fase 9 (R5): status con enum real es válido', async () => {
+    const instance = plainToInstance(ListLowStockQueryDto, {
+      status: ProductStatus.INACTIVE,
+    });
+
+    const errors = await validate(instance);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('Fase 9 (R5): status inválido → error', async () => {
+    const instance = plainToInstance(ListLowStockQueryDto, {
+      status: 'NOT_A_STATUS',
+    });
+
+    const errors = await validate(instance);
+
+    expect(errors.some((error) => error.property === 'status')).toBe(true);
   });
 });

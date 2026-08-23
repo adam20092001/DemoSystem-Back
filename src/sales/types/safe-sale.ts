@@ -67,6 +67,10 @@ export interface SafeSaleListItem {
   customerName: string;
   customerDocumentNumber: string | null;
   sellerId: string;
+  // Fase 9, Bloque A (R1): identidad segura mínima del vendedor, agregada
+  // como proyección adicional retrocompatible. `sellerId` se conserva sin
+  // cambios; nunca se expone el User crudo.
+  seller: SafeSaleSeller;
   subtotal: string;
   discountAmount: string;
   taxAmount: string;

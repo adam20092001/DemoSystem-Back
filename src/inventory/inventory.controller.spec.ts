@@ -3,6 +3,7 @@ import { METHOD_METADATA } from '@nestjs/common/constants';
 import {
   InventoryMovementOrigin,
   InventoryMovementType,
+  ProductStatus,
   RoleName,
 } from '@prisma/client';
 import type { Request } from 'express';
@@ -307,6 +308,29 @@ describe('InventoryController', () => {
         search: 'taladro',
       });
       expect(result).toBe(expected);
+    });
+
+    it('Fase 9, Bloque A (R5): listLowStock() delega brand/status', async () => {
+      const expected = {
+        data: [],
+        page: 1,
+        limit: 20,
+        total: 0,
+        totalPages: 0,
+      };
+      inventoryService.listLowStock.mockResolvedValue(expected);
+
+      await controller.listLowStock({
+        brand: 'Bosch',
+        status: ProductStatus.INACTIVE,
+      });
+
+      expect(inventoryService.listLowStock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brand: 'Bosch',
+          status: ProductStatus.INACTIVE,
+        }),
+      );
     });
   });
 

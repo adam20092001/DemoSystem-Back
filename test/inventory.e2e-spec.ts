@@ -1862,6 +1862,95 @@ describe('Inventory (e2e)', () => {
         .set('Cookie', sellerCookie);
       expect(seller.status).toBe(403);
     });
+
+    // ================================================================
+    // Fase 9, Bloque A (R5) — brand / status / difference
+    // ================================================================
+    it('difference = stockMinimum - stockCurrent, fixed 3 decimales, fraccionario y cero', async () => {
+      const fractional = await createLowStockCandidate('10.000', '7.500');
+      const zero = await createLowStockCandidate('10.000', '10.000');
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      const body = response.body as PaginatedBody<{
+        id: string;
+        difference: string;
+      }>;
+      const fractionalRow = body.data.find((r) => r.id === fractional.id);
+      const zeroRow = body.data.find((r) => r.id === zero.id);
+      expect(fractionalRow?.difference).toBe('2.500');
+      expect(zeroRow?.difference).toBe('0.000');
+    });
+
+    it('brand: omitido no filtra; con valor filtra insensible a mayúsculas; en blanco -> 400', async () => {
+      const suffix = Date.now();
+      const branded = await createLowStockCandidate('10.000', '1.000', {
+        sku: `${SKU_PREFIX}LOW-BRAND-${suffix}`,
+        name: `Producto marca low-stock ${suffix}`,
+        brand: `MarcaLowStock${suffix}`,
+      });
+
+      const byBrand = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ brand: `marcalowstock${suffix}`.toUpperCase() })
+        .set('Cookie', adminCookie);
+      expect(byBrand.status).toBe(200);
+      expect(
+        (byBrand.body as PaginatedBody<{ id: string }>).data.some(
+          (row) => row.id === branded.id,
+        ),
+      ).toBe(true);
+
+      const trimmed = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ brand: `  MarcaLowStock${suffix}  ` })
+        .set('Cookie', adminCookie);
+      expect(
+        (trimmed.body as PaginatedBody<{ id: string }>).data.some(
+          (row) => row.id === branded.id,
+        ),
+      ).toBe(true);
+
+      const blank = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ brand: '   ' })
+        .set('Cookie', adminCookie);
+      expect(blank.status).toBe(400);
+    });
+
+    it('status: omitido preserva ACTIVE-only exacto; INACTIVE explícito incluye productos inactivos elegibles', async () => {
+      const inactiveEligible = await createLowStockCandidate('10.000', '1.000');
+      await request(app.getHttpServer())
+        .post(`/api/v1/products/${inactiveEligible.id}/deactivate`)
+        .set('Cookie', adminCookie);
+
+      const defaultResponse = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      expect(
+        (defaultResponse.body as PaginatedBody<{ id: string }>).data.some(
+          (row) => row.id === inactiveEligible.id,
+        ),
+      ).toBe(false);
+
+      const inactiveResponse = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({
+          categoryId: lowStockCategoryId,
+          status: ProductStatus.INACTIVE,
+          limit: 100,
+        })
+        .set('Cookie', adminCookie);
+      expect(inactiveResponse.status).toBe(200);
+      expect(
+        (inactiveResponse.body as PaginatedBody<{ id: string }>).data.some(
+          (row) => row.id === inactiveEligible.id,
+        ),
+      ).toBe(true);
+    });
   });
 
   // ============================================================

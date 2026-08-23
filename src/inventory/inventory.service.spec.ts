@@ -691,5 +691,152 @@ describe('InventoryService', () => {
       expect(result.data[0].stockMinimum).toBe('0.000');
       expect(typeof result.total).toBe('number');
     });
+
+    // ================================================================
+    // Fase 9, Bloque A (R5) — status/brand/difference
+    // ================================================================
+    describe('status (Fase 9, R5)', () => {
+      it('omitido: preserva EXACTAMENTE el comportamiento histórico (solo ACTIVE hardcodeado)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({});
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.text).toContain("p.status = 'ACTIVE'");
+        expect(rowsSql.values).not.toContain(ProductStatus.INACTIVE);
+      });
+
+      it('ACTIVE explícito: mismo resultado que omitido', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({ status: ProductStatus.ACTIVE });
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.text).toContain('p.status =');
+        expect(rowsSql.values).toContain(ProductStatus.ACTIVE);
+      });
+
+      it('INACTIVE explícito: reemplaza el condicional de estado, resto de reglas sin cambios', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({ status: ProductStatus.INACTIVE });
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.values).toContain(ProductStatus.INACTIVE);
+        expect(rowsSql.text).toContain('p.is_inventory_tracked = true');
+        expect(rowsSql.text).toContain("c.status = 'ACTIVE'");
+        expect(rowsSql.text).toContain("u.status = 'ACTIVE'");
+        expect(rowsSql.text).toContain('p.stock_current <= p.stock_minimum');
+      });
+    });
+
+    describe('brand (Fase 9, R5)', () => {
+      it('omitido: sin condición de marca', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({});
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.text).not.toContain('p.brand');
+      });
+
+      it('con valor: agrega ILIKE parametrizado, insensible a mayúsculas', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({ brand: 'Bosch' });
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.text).toContain('p.brand ILIKE');
+        expect(rowsSql.values).toContain('%Bosch%');
+      });
+
+      it('recorta espacios', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({ brand: '  Bosch  ' });
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.values).toContain('%Bosch%');
+      });
+
+      it('en blanco (solo espacios) -> 400, sin ejecutar la consulta', async () => {
+        await expect(
+          service.listLowStock({ brand: '   ' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('combinado con status y categoryId: todas las condiciones coexisten', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listLowStock({
+          brand: 'Bosch',
+          status: ProductStatus.INACTIVE,
+          categoryId: 'cat-1',
+        });
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(rowsSql.values).toEqual(
+          expect.arrayContaining([ProductStatus.INACTIVE, 'cat-1', '%Bosch%']),
+        );
+      });
+    });
+
+    describe('difference (Fase 9, R5)', () => {
+      it('stockMinimum - stockCurrent, fixed 3 decimales, fraccionario', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              stockCurrent: new Prisma.Decimal('7.5'),
+              stockMinimum: new Prisma.Decimal('10'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].difference).toBe('2.500');
+      });
+
+      it('stockCurrent == stockMinimum -> "0.000", nunca negativo', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              stockCurrent: new Prisma.Decimal('10'),
+              stockMinimum: new Prisma.Decimal('10'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].difference).toBe('0.000');
+      });
+
+      it('usa Prisma.Decimal (resta exacta), nunca resulta en NaN', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([makeLowStockRow()])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].difference).toBe('4.000');
+        expect(result.data[0].difference).not.toContain('NaN');
+      });
+    });
   });
 });

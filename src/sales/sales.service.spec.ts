@@ -2336,6 +2336,12 @@ describe('SalesService', () => {
           customerName: 'Cliente Uno',
           customerDocumentNumber: null,
           sellerId: ACTOR_ID,
+          seller: {
+            id: ACTOR_ID,
+            username: 'admin',
+            firstName: 'Ana',
+            lastName: 'Admin',
+          },
           subtotal: new Prisma.Decimal('10.00'),
           discountAmount: new Prisma.Decimal('0.00'),
           taxAmount: new Prisma.Decimal('0.00'),
@@ -2349,6 +2355,25 @@ describe('SalesService', () => {
         },
       ]);
       prisma.sale.count.mockResolvedValue(1);
+    });
+
+    it('Fase 9, Bloque A (R1): incluye seller con identidad segura mínima exacta, sellerId se conserva', async () => {
+      const result = await service.list({}, RoleName.ADMIN);
+      const row = result.data[0];
+      expect(row.sellerId).toBe(ACTOR_ID);
+      expect(row.seller).toEqual({
+        id: ACTOR_ID,
+        username: 'admin',
+        firstName: 'Ana',
+        lastName: 'Admin',
+      });
+      expect(Object.keys(row.seller).sort()).toEqual(
+        ['id', 'username', 'firstName', 'lastName'].sort(),
+      );
+      const serialized = JSON.stringify(row.seller);
+      expect(serialized).not.toMatch(
+        /email|role|status|passwordHash|mustChangePassword|failedLoginAttempts|blockedAt|lastLoginAt/i,
+      );
     });
 
     it('ADMIN: consulta y devuelve resultados paginados', async () => {

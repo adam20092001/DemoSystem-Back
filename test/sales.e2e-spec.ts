@@ -100,6 +100,7 @@ const SAFE_SALE_LIST_ITEM_KEYS = [
   'customerName',
   'customerDocumentNumber',
   'sellerId',
+  'seller',
   'subtotal',
   'discountAmount',
   'taxAmount',
@@ -219,6 +220,8 @@ interface SafeSaleListItemBody {
   customerName: string;
   customerDocumentNumber: string | null;
   sellerId: string;
+  // Fase 9, Bloque A (R1): proyección segura adicional retrocompatible.
+  seller: SafeSaleSellerBody;
   subtotal: string;
   discountAmount: string;
   taxAmount: string;
@@ -3568,6 +3571,58 @@ describe('Sales (e2e)', () => {
       expect(Object.keys(body.data[0]).sort()).toEqual(
         SAFE_SALE_LIST_ITEM_KEYS,
       );
+    });
+
+    // ================================================================
+    // Fase 9, Bloque A (R1) — proyección segura de vendedor en el listado.
+    // ================================================================
+    it('listado: incluye seller con identidad segura mínima exacta; sellerId se conserva; sin fuga de campos de seguridad', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        customerId: personActive.id,
+        items: [{ productId: productA.id, quantity: '1.000' }],
+      });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales')
+        .query({ customerId: personActive.id, sellerId: adminId })
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(200);
+      const body = response.body as PaginatedBody<SafeSaleListItemBody>;
+      const row = body.data.find((r) => r.id === sale.id);
+      expect(row).toBeDefined();
+      expect(row?.sellerId).toBe(adminId);
+      expect(Object.keys(row!.seller).sort()).toEqual(SAFE_SALE_SELLER_KEYS);
+      expect(row?.seller.id).toBe(adminId);
+      expect(row?.seller).toEqual({
+        id: adminId,
+        username: E2E_ADMIN_USERNAME,
+        firstName: expect.any(String) as string,
+        lastName: expect.any(String) as string,
+      });
+      const serialized = JSON.stringify(row?.seller).toLowerCase();
+      expect(serialized).not.toMatch(
+        /email|role|status|passwordhash|mustchangepassword|failedloginattempts|blockedat|lastloginat/,
+      );
+    });
+
+    it('listado: una venta CANCELLED permanece visible por defecto (sin filtro implícito de status)', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productA.id, quantity: '1.000' }],
+      });
+      const cancelResponse = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación fixture R1' });
+      expect(cancelResponse.status).toBe(200);
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales')
+        .query({ customerId: sale.customerId })
+        .set('Cookie', adminCookie);
+      const body = response.body as PaginatedBody<SafeSaleListItemBody>;
+      const row = body.data.find((r) => r.id === sale.id);
+      expect(row).toBeDefined();
+      expect(row?.status).toBe(SaleStatus.CANCELLED);
+      expect(row?.seller).toBeDefined();
     });
 
     it('el detalle incluye el resumen de movimientos de inventario (segunda consulta, sin FK)', async () => {

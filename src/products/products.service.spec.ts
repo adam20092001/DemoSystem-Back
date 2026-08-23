@@ -98,6 +98,10 @@ function createPrismaMock() {
       findMany: jest.fn<Promise<unknown[]>, [ProductFindManyArgs]>(),
       count: jest.fn<Promise<number>, [ProductCountArgs?]>(),
     },
+    // Fase 9, Bloque A (R6): lowStockOnly=true resuelve la comparación
+    // stockCurrent <= stockMinimum (dos columnas de la misma fila) vía
+    // $queryRaw, igual que InventoryService.listLowStock.
+    $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
@@ -810,6 +814,180 @@ describe('ProductsService', () => {
       expect(result.data[0].salePrice).toBe('19.90');
       expect(result.data[0].stockCurrent).toBe('0.000');
       expect(result.data[0].stockMinimum).toBe('12.500');
+    });
+
+    // ================================================================
+    // Fase 9, Bloque A (R6) — brand / lowStockOnly
+    // ================================================================
+    describe('brand (Fase 9, R6)', () => {
+      it('omitido: sin condición de marca, sin tocar el filtro search existente', async () => {
+        prisma.product.findMany.mockResolvedValue([]);
+        prisma.product.count.mockResolvedValue(0);
+
+        await service.listProducts({}, RoleName.ADMIN);
+
+        const args = prisma.product.findMany.mock.calls[0][0];
+        expect(args.where).not.toHaveProperty('brand');
+      });
+
+      it('con valor: agrega condición DB-side insensible a mayúsculas, coexiste con search', async () => {
+        prisma.product.findMany.mockResolvedValue([]);
+        prisma.product.count.mockResolvedValue(0);
+
+        await service.listProducts(
+          { brand: 'Bosch', search: 'taladro' },
+          RoleName.ADMIN,
+        );
+
+        const args = prisma.product.findMany.mock.calls[0][0];
+        expect(args.where?.brand).toEqual({
+          contains: 'Bosch',
+          mode: 'insensitive',
+        });
+        expect(args.where?.OR).toBeDefined();
+      });
+
+      it('recorta espacios', async () => {
+        prisma.product.findMany.mockResolvedValue([]);
+        prisma.product.count.mockResolvedValue(0);
+
+        await service.listProducts({ brand: '  Bosch  ' }, RoleName.ADMIN);
+
+        const args = prisma.product.findMany.mock.calls[0][0];
+        expect(args.where?.brand).toEqual({
+          contains: 'Bosch',
+          mode: 'insensitive',
+        });
+      });
+
+      it('en blanco (solo espacios) -> 400, sin consultar Prisma', async () => {
+        await expect(
+          service.listProducts({ brand: '   ' }, RoleName.ADMIN),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(prisma.product.findMany).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('lowStockOnly (Fase 9, R6)', () => {
+      it('omitido: comportamiento existente inalterado (Prisma findMany normal, sin $queryRaw)', async () => {
+        prisma.product.findMany.mockResolvedValue([makeProductRow()]);
+        prisma.product.count.mockResolvedValue(1);
+
+        await service.listProducts({}, RoleName.ADMIN);
+
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('false: comportamiento existente inalterado', async () => {
+        prisma.product.findMany.mockResolvedValue([]);
+        prisma.product.count.mockResolvedValue(0);
+
+        await service.listProducts({ lowStockOnly: false }, RoleName.ADMIN);
+
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+        expect(prisma.product.findMany).toHaveBeenCalled();
+      });
+
+      it('true: resuelve vía consulta raw parametrizada, filtra tracked+stockCurrent<=stockMinimum, pagina en SQL', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([{ id: 'product-1' }])
+          .mockResolvedValueOnce([{ total: 1 }]);
+        prisma.product.findMany.mockResolvedValue([makeProductRow()]);
+
+        const result = await service.listProducts(
+          { lowStockOnly: true },
+          RoleName.ADMIN,
+        );
+
+        expect(result.data).toHaveLength(1);
+        expect(result.total).toBe(1);
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0] as {
+          text: string;
+        };
+        expect(rowsSql.text).toContain('p.is_inventory_tracked = true');
+        expect(rowsSql.text).toContain('p.stock_current <= p.stock_minimum');
+        expect(rowsSql.text).toContain('LIMIT');
+        expect(rowsSql.text).toContain('OFFSET');
+        // Recupera la fila completa vía Prisma por id, nunca pagina/filtra
+        // en memoria sobre el catálogo completo.
+        expect(prisma.product.findMany).toHaveBeenCalledWith({
+          where: { id: { in: ['product-1'] } },
+          select: expect.anything() as unknown,
+        });
+      });
+
+      it('true + isInventoryTracked=true: filtro normal de stock bajo (combinación válida)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listProducts(
+          { lowStockOnly: true, isInventoryTracked: true },
+          RoleName.ADMIN,
+        );
+
+        expect(prisma.$queryRaw).toHaveBeenCalled();
+      });
+
+      it('true + isInventoryTracked=false -> 400, combinación contradictoria, sin consultar Prisma', async () => {
+        await expect(
+          service.listProducts(
+            { lowStockOnly: true, isInventoryTracked: false },
+            RoleName.ADMIN,
+          ),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+        expect(prisma.product.findMany).not.toHaveBeenCalled();
+      });
+
+      it('SELLER: fuerza status=ACTIVE también en la rama raw', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listProducts({ lowStockOnly: true }, RoleName.SELLER);
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0] as { text: string };
+        expect(rowsSql.text).toContain('p.status = ');
+      });
+
+      it('combinado con categoryId/unitId/productType/brand: todas las condiciones coexisten en SQL', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.listProducts(
+          {
+            lowStockOnly: true,
+            categoryId: 'cat-1',
+            unitId: 'unit-1',
+            productType: ProductType.PRODUCT,
+            brand: 'Bosch',
+          },
+          RoleName.ADMIN,
+        );
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0] as {
+          values: unknown[];
+        };
+        expect(rowsSql.values).toEqual(
+          expect.arrayContaining(['cat-1', 'unit-1', '%Bosch%']),
+        );
+      });
+
+      it('sin filas coincidentes: no llama a product.findMany, retorna página vacía', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        const result = await service.listProducts(
+          { lowStockOnly: true },
+          RoleName.ADMIN,
+        );
+
+        expect(result.data).toEqual([]);
+        expect(prisma.product.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 
