@@ -4349,9 +4349,13 @@ describe('Sales (e2e)', () => {
       // PaymentsController, un controller distinto) — de lo contrario el
       // simple filtro por substring "sales" las contaría también, aunque
       // SalesController en sí sigue exponiendo exactamente 7 paths/8
-      // operaciones, sin cambios.
+      // operaciones, sin cambios. Fase 9, Bloque B: filtra por prefijo real
+      // del recurso (no por substring "sales") porque los nuevos reportes
+      // GET /reports/sales-by-product|customer|seller también contienen
+      // "sales" en el path y no deben contarse aquí.
       const salePaths = Object.keys(doc.paths).filter(
-        (path) => path.includes('sales') && !path.includes('payments'),
+        (path) =>
+          path.startsWith('/api/v1/sales') && !path.includes('payments'),
       );
       expect(new Set(salePaths).size).toBe(7);
       let totalOps = 0;

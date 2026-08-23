@@ -100,6 +100,15 @@ export function setupSwagger(app: INestApplication): boolean {
         'NO reemplaza un software contable formal, y NO es contabilidad ' +
         'SUNAT/PLE ni ningún tipo de libro contable fiscal.',
     )
+    .addTag(
+      'Reports',
+      'Reportes operativos de solo lectura sobre ventas, cobranza y ' +
+        'cotizaciones (ventas por producto/cliente/vendedor, cotizaciones ' +
+        'por estado, pagos por método). Son vistas agregadas/tabulares ' +
+        'calculadas al momento de la solicitud sobre datos ya existentes; ' +
+        'NO son contabilidad formal, NO son reportes fiscales SUNAT/PLE, y ' +
+        'NO constituyen una plataforma de Business Intelligence.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
