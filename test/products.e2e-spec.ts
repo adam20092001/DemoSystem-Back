@@ -59,6 +59,16 @@ describe('Products & Specifications (e2e)', () => {
   let unitId: string;
   let inactiveCategoryId: string;
   let inactiveUnitId: string;
+  // Fase 9, Bloque D — remediación de aislamiento: este archivo, por
+  // convención ya establecida (ver comentario más abajo en el propio
+  // describe de R6), NUNCA limpia los Product que crea — se acumulan entre
+  // ejecuciones a propósito. Pero el único InventoryMovement real que este
+  // archivo llega a crear (alta de saldo del caso "no stock bajo" de R6)
+  // SÍ debe limpiarse por ID exacto propio: a diferencia de un Product sin
+  // historial, un InventoryMovement nuevo en cada ejecución (mismo Date.now()
+  // como sufijo) crecía sin límite en pos_db_test. No se toca el Product
+  // dueño: eliminar el movimiento no lo requiere.
+  let ownedInventoryMovementId: string | null = null;
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
@@ -147,6 +157,20 @@ describe('Products & Specifications (e2e)', () => {
   });
 
   afterAll(async () => {
+    // Limpieza estrecha por ID exacto propio (Fase 9, Bloque D §5): jamás
+    // deleteMany({}) ni por prefijo amplio. No afecta a los demás Product
+    // de este archivo, que siguen acumulándose por la convención vigente.
+    if (ownedInventoryMovementId !== null) {
+      await prisma.auditLog.deleteMany({
+        where: {
+          entityType: 'InventoryMovement',
+          entityId: ownedInventoryMovementId,
+        },
+      });
+      await prisma.inventoryMovement.deleteMany({
+        where: { id: ownedInventoryMovementId },
+      });
+    }
     await app.close();
     await prisma.$disconnect();
   });
@@ -678,6 +702,10 @@ describe('Products & Specifications (e2e)', () => {
           reason: 'Saldo Fase 9 R6 (no stock bajo)',
         });
       expect(initialBalance.status).toBe(201);
+      // Fase 9, Bloque D §5: el único InventoryMovement real que crea este
+      // archivo — se limpia por ID exacto en afterAll (ver arriba), sin
+      // tocar el Product dueño ni el resto del catálogo acumulado.
+      ownedInventoryMovementId = (initialBalance.body as { id: string }).id;
 
       const notTracked = await request(app.getHttpServer())
         .post('/api/v1/products')
