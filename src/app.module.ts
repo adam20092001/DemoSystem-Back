@@ -5,6 +5,7 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CategoriesModule } from './categories/categories.module';
 import { validateEnv } from './config/env.validation';
+import { ConfigurationModule } from './configuration/configuration.module';
 import { CustomersModule } from './customers/customers.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
@@ -39,6 +40,7 @@ import { UsersModule } from './users/users.module';
     PaymentsModule,
     AccountingModule,
     ReportsModule,
+    ConfigurationModule,
     HealthModule,
   ],
 })

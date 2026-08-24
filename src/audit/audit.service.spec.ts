@@ -573,6 +573,127 @@ describe('sanitizeAuditMetadata', () => {
     });
   });
 
+  describe('CONFIGURATION_UPDATED (Fase 10, Bloque A: changedFields + oldValues/newValues)', () => {
+    it('conserva changedFields/oldValues/newValues de un solo campo', () => {
+      const metadata: AuditMetadata = {
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Nombre Anterior' },
+        newValues: { businessName: 'Nombre Nuevo' },
+      };
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Nombre Anterior' },
+        newValues: { businessName: 'Nombre Nuevo' },
+      });
+    });
+
+    it('conserva únicamente los campos realmente cambiados en un cambio múltiple', () => {
+      const metadata: AuditMetadata = {
+        changedFields: ['businessName', 'currencyCode'],
+        oldValues: { businessName: 'Antes', currencyCode: 'PEN' },
+        newValues: { businessName: 'Después', currencyCode: 'USD' },
+      };
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual(metadata);
+    });
+
+    it('preserva null como valor nuevo legítimo (limpiar un campo opcional)', () => {
+      const metadata: AuditMetadata = {
+        changedFields: ['tradeName'],
+        oldValues: { tradeName: 'Comercial Demo' },
+        newValues: { tradeName: null },
+      };
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        changedFields: ['tradeName'],
+        oldValues: { tradeName: 'Comercial Demo' },
+        newValues: { tradeName: null },
+      });
+    });
+
+    it('descarta dentro de oldValues/newValues cualquier clave ausente de changedFields (defensa de última línea)', () => {
+      const metadata = {
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Antes', taxRate: '10.00' },
+        newValues: { businessName: 'Después', taxRate: '18.00' },
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Antes' },
+        newValues: { businessName: 'Después' },
+      });
+    });
+
+    it('descarta una clave sensible aunque figure en changedFields (defensa de última línea)', () => {
+      const metadata = {
+        changedFields: ['businessName', 'password'],
+        oldValues: { businessName: 'Antes', password: 'secreta-antes' },
+        newValues: { businessName: 'Después', password: 'secreta-despues' },
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        changedFields: ['businessName', 'password'],
+        oldValues: { businessName: 'Antes' },
+        newValues: { businessName: 'Después' },
+      });
+      expect(JSON.stringify(sanitized)).not.toContain('secreta');
+    });
+
+    it('no admite ningún otro campo fuera de changedFields/oldValues/newValues (singleton/id/createdAt/updatedAt/campos aún bloqueados)', () => {
+      const metadata = {
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Antes' },
+        newValues: { businessName: 'Después' },
+        singleton: true,
+        id: 'settings-1',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        taxEnabled: true,
+        taxRate: '18.00',
+        quoteValidityDays: 15,
+        maxDiscountPercent: '100.00',
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.CONFIGURATION_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        changedFields: ['businessName'],
+        oldValues: { businessName: 'Antes' },
+        newValues: { businessName: 'Después' },
+      });
+    });
+  });
+
   it('QUOTE_CONVERTED conserva solo quoteNumber/saleNumber', () => {
     const metadata = {
       quoteNumber: 'COT-000005',

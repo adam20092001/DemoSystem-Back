@@ -121,6 +121,13 @@ export function setupSwagger(app: INestApplication): boolean {
         'reemplaza los reportes de la etiqueta Reports, y NO constituye una ' +
         'plataforma de Business Intelligence.',
     )
+    .addTag(
+      'Configuration',
+      'Configuración global de la empresa: fila singleton única (identidad, ' +
+        'moneda; IGV y parámetros de cotización/descuento se exponen en ' +
+        'modo lectura desde este bloque y se habilitan por PATCH en fases ' +
+        'posteriores). GET para ADMIN y MANAGEMENT; PATCH solo para ADMIN.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);

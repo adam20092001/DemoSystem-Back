@@ -37,6 +37,14 @@
  * crear su asiento REVERSAL. Semántica distinta de SALE_ / PAYMENT_: esas
  * describen el evento de negocio; estas describen exclusivamente el
  * registro contable derivado, sin duplicar información ya auditada.
+ * CONFIGURATION_UPDATED se agrega en la Fase 10, Bloque A: ConfigurationService
+ * es su único emisor, dentro de la misma transacción que el PATCH de
+ * CompanySettings. Solo se registra cuando al menos un campo cambió
+ * realmente (un PATCH que no modifica ningún valor no genera auditoría); la
+ * metadata nunca incluye valores anteriores/nuevos de identidad de empresa
+ * (nombre, dirección, teléfono, correo) — mismo criterio de evitar texto
+ * libre potencialmente sensible que CUSTOMER_/QUOTE_/SALE_, solo la lista
+ * de campos modificados.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -88,4 +96,5 @@ export enum AuditAction {
   PAYMENT_CANCELLED = 'PAYMENT_CANCELLED',
   ACCOUNTING_ENTRY_POSTED = 'ACCOUNTING_ENTRY_POSTED',
   ACCOUNTING_ENTRY_REVERSED = 'ACCOUNTING_ENTRY_REVERSED',
+  CONFIGURATION_UPDATED = 'CONFIGURATION_UPDATED',
 }

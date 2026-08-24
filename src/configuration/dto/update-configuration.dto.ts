@@ -1,0 +1,116 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+import {
+  IsEmail,
+  IsOptional,
+  IsString,
+  Length,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
+
+/**
+ * Recorta espacios perimetrales antes de que @IsEmail() evalúe el valor
+ * crudo: sin esto, un email válido con espacios ("  x@x.com  ") sería
+ * rechazado aquí. Mismo criterio exacto que UpdateCustomerDto.trimEmail. No
+ * toca null: @IsOptional() sigue tratándolo como "limpiar email".
+ */
+function trimEmail({ value }: { value: unknown }): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+/**
+ * Bloque A: solo campos de identidad y moneda. taxEnabled/taxRate/
+ * quoteValidityDays/maxDiscountPercent NO se declaran aquí a propósito —
+ * con forbidNonWhitelisted:true (ValidationPipe global), enviarlos en el
+ * body produce 400 automáticamente, sin necesidad de una validación manual
+ * adicional en el controller/servicio. Se habilitan en el Bloque B
+ * (quoteValidityDays/maxDiscountPercent) y en el Bloque C (taxEnabled/
+ * taxRate).
+ *
+ * Los campos `| null` aceptan null explícito (limpiar el valor existente)
+ * además de undefined (no tocar): @IsOptional() de class-validator omite el
+ * resto de validadores cuando el valor es null, mismo criterio que
+ * UpdateCategoryDto.
+ */
+export class UpdateConfigurationDto {
+  @ApiPropertyOptional({ maxLength: 150 })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(150)
+  businessName?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 150,
+    nullable: true,
+    description: 'null limpia el nombre comercial existente.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  tradeName?: string | null;
+
+  @ApiPropertyOptional({
+    maxLength: 20,
+    nullable: true,
+    description: 'null limpia el identificador tributario existente.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  taxId?: string | null;
+
+  @ApiPropertyOptional({
+    maxLength: 300,
+    nullable: true,
+    description: 'null limpia la dirección existente.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  address?: string | null;
+
+  @ApiPropertyOptional({
+    maxLength: 30,
+    nullable: true,
+    description: 'null limpia el teléfono existente.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phone?: string | null;
+
+  @ApiPropertyOptional({
+    maxLength: 150,
+    nullable: true,
+    description: 'null limpia el correo existente.',
+  })
+  @IsOptional()
+  @Transform(trimEmail)
+  @IsEmail()
+  @MaxLength(150)
+  email?: string | null;
+
+  @ApiPropertyOptional({
+    minLength: 3,
+    maxLength: 3,
+    example: 'PEN',
+    description: 'Código ISO 4217 de 3 letras. Se normaliza a mayúsculas.',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(3, 3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional({
+    minLength: 1,
+    maxLength: 5,
+    example: 'S/',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(5)
+  currencySymbol?: string;
+}
