@@ -255,6 +255,8 @@ export class InventoryController {
       categoryId: query.categoryId,
       unitId: query.unitId,
       search: query.search,
+      brand: query.brand,
+      status: query.status,
     });
   }
 

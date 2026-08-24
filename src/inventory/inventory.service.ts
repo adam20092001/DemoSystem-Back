@@ -213,8 +213,15 @@ export class InventoryService {
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
+    // Fase 9, Bloque A (R5): `status` es opt-in. Omitido -> se preserva
+    // EXACTAMENTE el comportamiento histórico (solo ACTIVE, hardcodeado).
+    // Informado -> reemplaza ese único condicional por el estado pedido;
+    // el resto de las reglas de stock bajo (tracking, tipo PRODUCT,
+    // categoría/unidad ACTIVE, comparación de stock) no cambian.
     const conditions: Prisma.Sql[] = [
-      Prisma.sql`p.status = 'ACTIVE'::"ProductStatus"`,
+      query.status !== undefined
+        ? Prisma.sql`p.status = ${query.status}::"ProductStatus"`
+        : Prisma.sql`p.status = 'ACTIVE'::"ProductStatus"`,
       Prisma.sql`p.product_type = 'PRODUCT'::"ProductType"`,
       Prisma.sql`p.is_inventory_tracked = true`,
       Prisma.sql`c.status = 'ACTIVE'::"CategoryStatus"`,
@@ -232,6 +239,13 @@ export class InventoryService {
       conditions.push(
         Prisma.sql`(p.sku ILIKE ${'%' + term + '%'} OR p.name ILIKE ${'%' + term + '%'})`,
       );
+    }
+    if (query.brand !== undefined) {
+      const brandTerm = query.brand.trim();
+      if (brandTerm.length === 0) {
+        throw new BadRequestException('brand no puede estar en blanco');
+      }
+      conditions.push(Prisma.sql`p.brand ILIKE ${'%' + brandTerm + '%'}`);
     }
     const whereClause = Prisma.join(conditions, ' AND ');
 
@@ -272,6 +286,10 @@ export class InventoryService {
         name: row.name,
         stockCurrent: row.stockCurrent.toFixed(3),
         stockMinimum: row.stockMinimum.toFixed(3),
+        // Fase 9, Bloque A (R5): stockMinimum - stockCurrent (nunca al
+        // revés). Prisma.Decimal exclusivamente; el WHERE ya garantiza
+        // stockCurrent <= stockMinimum, así que el resultado es siempre >= 0.
+        difference: row.stockMinimum.minus(row.stockCurrent).toFixed(3),
         category: { id: row.categoryId, name: row.categoryName },
         unit: { id: row.unitId, abbreviation: row.unitAbbreviation },
       })),

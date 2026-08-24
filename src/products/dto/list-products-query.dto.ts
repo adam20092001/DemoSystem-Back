@@ -68,4 +68,22 @@ export class ListProductsQueryDto {
   @Transform(toStrictBoolean)
   @IsBoolean()
   isInventoryTracked?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Filtro explícito por marca (insensible a mayúsculas, coincidencia parcial, igual criterio que "search"). Distinto del parámetro "search" general: puede combinarse con él.',
+  })
+  @IsOptional()
+  @IsString()
+  brand?: string;
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'Fase 9 (R6): cuando es true, filtra en base de datos a productos inventariables con stockCurrent <= stockMinimum. Acepta true/false (boolean o string); cualquier otro valor falla la validación. Incompatible con isInventoryTracked=false.',
+  })
+  @IsOptional()
+  @Transform(toStrictBoolean)
+  @IsBoolean()
+  lowStockOnly?: boolean;
 }

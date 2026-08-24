@@ -7,6 +7,7 @@ import {
   assertEditable,
   assertQuantityAllowedForUnit,
   assertRejectable,
+  buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
   calculateTotal,
@@ -283,6 +284,107 @@ describe('effectiveStatus', () => {
     expect(
       effectiveStatus(QuoteStatus.EXPIRED, '2099-01-01', '2026-03-15'),
     ).toBe(QuoteStatus.EXPIRED);
+  });
+});
+
+describe('buildEffectiveQuoteStatusCondition', () => {
+  const BUSINESS_DATE_AS_DATE = new Date('2026-03-15T00:00:00.000Z');
+
+  it('EXPIRED: OR entre status=EXPIRED (nunca persistido hoy, pero se mantiene correcto) y PENDING/ACCEPTED vencidas', () => {
+    expect(
+      buildEffectiveQuoteStatusCondition(
+        QuoteStatus.EXPIRED,
+        BUSINESS_DATE_AS_DATE,
+      ),
+    ).toEqual({
+      OR: [
+        { status: QuoteStatus.EXPIRED },
+        {
+          status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
+          expirationDate: { lt: BUSINESS_DATE_AS_DATE },
+        },
+      ],
+    });
+  });
+
+  it('PENDING: excluye las vencidas (expirationDate >= fecha de negocio)', () => {
+    expect(
+      buildEffectiveQuoteStatusCondition(
+        QuoteStatus.PENDING,
+        BUSINESS_DATE_AS_DATE,
+      ),
+    ).toEqual({
+      status: QuoteStatus.PENDING,
+      expirationDate: { gte: BUSINESS_DATE_AS_DATE },
+    });
+  });
+
+  it('ACCEPTED: excluye las vencidas (expirationDate >= fecha de negocio)', () => {
+    expect(
+      buildEffectiveQuoteStatusCondition(
+        QuoteStatus.ACCEPTED,
+        BUSINESS_DATE_AS_DATE,
+      ),
+    ).toEqual({
+      status: QuoteStatus.ACCEPTED,
+      expirationDate: { gte: BUSINESS_DATE_AS_DATE },
+    });
+  });
+
+  it('REJECTED: igualdad directa, sin importar la fecha de negocio', () => {
+    expect(
+      buildEffectiveQuoteStatusCondition(
+        QuoteStatus.REJECTED,
+        BUSINESS_DATE_AS_DATE,
+      ),
+    ).toEqual({ status: QuoteStatus.REJECTED });
+  });
+
+  it('CONVERTED: igualdad directa, sin importar la fecha de negocio', () => {
+    expect(
+      buildEffectiveQuoteStatusCondition(
+        QuoteStatus.CONVERTED,
+        BUSINESS_DATE_AS_DATE,
+      ),
+    ).toEqual({ status: QuoteStatus.CONVERTED });
+  });
+
+  it('coherencia con effectiveStatus(): una PENDING vencida cae en la condición EXPIRED y no en la condición PENDING', () => {
+    const expirationDate = new Date('2026-03-14T00:00:00.000Z'); // antes de BUSINESS_DATE_AS_DATE
+    // effectiveStatus() ya clasifica esta combinación como EXPIRED (ver
+    // describe('effectiveStatus') más arriba); esta prueba verifica que la
+    // condición de filtro concuerda con esa misma clasificación:
+    expect(
+      effectiveStatus(QuoteStatus.PENDING, '2026-03-14', '2026-03-15'),
+    ).toBe(QuoteStatus.EXPIRED);
+    const expiredCondition = buildEffectiveQuoteStatusCondition(
+      QuoteStatus.EXPIRED,
+      BUSINESS_DATE_AS_DATE,
+    );
+    const pendingCondition = buildEffectiveQuoteStatusCondition(
+      QuoteStatus.PENDING,
+      BUSINESS_DATE_AS_DATE,
+    );
+    // La rama PENDING/ACCEPTED vencida de la condición EXPIRED cubre
+    // exactamente expirationDate < fecha de negocio.
+    expect(expiredCondition).toMatchObject({
+      OR: [
+        {},
+        {
+          status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
+          expirationDate: { lt: BUSINESS_DATE_AS_DATE },
+        },
+      ],
+    });
+    expect(expirationDate.getTime()).toBeLessThan(
+      BUSINESS_DATE_AS_DATE.getTime(),
+    );
+    // La condición PENDING exige expirationDate >= fecha de negocio: la
+    // misma cotización vencida queda excluida de ese filtro.
+    expect(pendingCondition).toEqual({
+      status: QuoteStatus.PENDING,
+      expirationDate: { gte: BUSINESS_DATE_AS_DATE },
+    });
   });
 });
 

@@ -40,6 +40,7 @@ import {
   assertEditable,
   assertQuantityAllowedForUnit,
   assertRejectable,
+  buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
   calculateTotal,
@@ -441,7 +442,7 @@ export class QuotesService {
     }
     if (query.status !== undefined) {
       conditions.push(
-        this.buildStatusCondition(query.status, businessDateAsDate),
+        buildEffectiveQuoteStatusCondition(query.status, businessDateAsDate),
       );
     }
     const term = query.search?.trim();
@@ -611,44 +612,6 @@ export class QuotesService {
       throw new BadRequestException(
         'expirationDateFrom no puede ser posterior a expirationDateTo',
       );
-    }
-  }
-
-  /**
-   * Traduce el filtro de estado EFECTIVO solicitado al predicado real sobre
-   * las columnas almacenadas (status/expiration_date), usando la fecha de
-   * negocio ya calculada — nunca CURRENT_DATE de PostgreSQL. Sigue siendo
-   * correcto si una fase futura llegara a persistir EXPIRED físicamente.
-   */
-  private buildStatusCondition(
-    status: QuoteStatus,
-    businessDateAsDate: Date,
-  ): Prisma.QuoteWhereInput {
-    switch (status) {
-      case QuoteStatus.EXPIRED:
-        return {
-          OR: [
-            { status: QuoteStatus.EXPIRED },
-            {
-              status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
-              expirationDate: { lt: businessDateAsDate },
-            },
-          ],
-        };
-      case QuoteStatus.PENDING:
-        return {
-          status: QuoteStatus.PENDING,
-          expirationDate: { gte: businessDateAsDate },
-        };
-      case QuoteStatus.ACCEPTED:
-        return {
-          status: QuoteStatus.ACCEPTED,
-          expirationDate: { gte: businessDateAsDate },
-        };
-      case QuoteStatus.REJECTED:
-        return { status: QuoteStatus.REJECTED };
-      case QuoteStatus.CONVERTED:
-        return { status: QuoteStatus.CONVERTED };
     }
   }
 

@@ -154,6 +154,59 @@ export function effectiveStatus(
   return storedStatus;
 }
 
+/**
+ * Traduce un filtro de estado EFECTIVO solicitado (incluido EXPIRED, que
+ * nunca se persiste) al predicado real sobre las columnas almacenadas
+ * (status/expirationDate), usando la fecha de negocio America/Lima ya
+ * calculada por el llamador — nunca CURRENT_DATE de PostgreSQL ni la fecha
+ * local del servidor. Pura: sin PrismaService, sin inyección de
+ * dependencias, sin acceso a base de datos — solo construye el fragmento
+ * `Prisma.QuoteWhereInput` que el llamador combina en su propio `where`.
+ *
+ * Única fuente de verdad de esta traducción (Fase 9, remediación EXPIRED):
+ * QuotesService, ReportsService y DashboardService la reutilizan sin
+ * duplicarla — ninguno de los dos últimos importa QuotesModule ni inyecta
+ * QuotesService; solo importan esta función pura del dominio Quote.
+ *
+ * REJECTED/CONVERTED son terminales: el filtro es una igualdad directa
+ * sobre la columna, sin importar la fecha (igual que effectiveStatus()).
+ * PENDING/ACCEPTED excluyen las cotizaciones vencidas (expirationDate <
+ * fecha de negocio): esas ya pertenecen efectivamente a EXPIRED. El filtro
+ * EXPIRED es un OR: nunca hay filas físicamente EXPIRED hoy, pero la
+ * condición se mantiene correcta si una fase futura llegara a persistirlo.
+ */
+export function buildEffectiveQuoteStatusCondition(
+  status: QuoteStatus,
+  businessDateAsDate: Date,
+): Prisma.QuoteWhereInput {
+  switch (status) {
+    case QuoteStatus.EXPIRED:
+      return {
+        OR: [
+          { status: QuoteStatus.EXPIRED },
+          {
+            status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
+            expirationDate: { lt: businessDateAsDate },
+          },
+        ],
+      };
+    case QuoteStatus.PENDING:
+      return {
+        status: QuoteStatus.PENDING,
+        expirationDate: { gte: businessDateAsDate },
+      };
+    case QuoteStatus.ACCEPTED:
+      return {
+        status: QuoteStatus.ACCEPTED,
+        expirationDate: { gte: businessDateAsDate },
+      };
+    case QuoteStatus.REJECTED:
+      return { status: QuoteStatus.REJECTED };
+    case QuoteStatus.CONVERTED:
+      return { status: QuoteStatus.CONVERTED };
+  }
+}
+
 function assertEffectivePending(
   effective: QuoteStatus,
   conflictMessage: string,

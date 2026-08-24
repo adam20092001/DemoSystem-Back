@@ -27,6 +27,10 @@ export interface SafeLowStockItem {
   name: string;
   stockCurrent: string;
   stockMinimum: string;
+  // Fase 9, Bloque A (R5): stockMinimum - stockCurrent, nunca al revés.
+  // Como el endpoint solo devuelve filas de stock bajo, siempre es >= 0.
+  // Fixed 3 decimales, misma precisión que stockCurrent/stockMinimum.
+  difference: string;
   category: LowStockCategorySummary;
   unit: LowStockUnitSummary;
 }

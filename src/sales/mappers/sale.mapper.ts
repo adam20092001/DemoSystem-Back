@@ -36,7 +36,12 @@ const SALE_ITEM_SELECT = {
   lineTotal: true,
 } satisfies Prisma.SaleItemSelect;
 
-/** Forma de listado: sin ítems, con conteo (itemCount) vía _count. */
+/**
+ * Forma de listado: sin ítems, con conteo (itemCount) vía _count.
+ * Fase 9, Bloque A (R1): agrega `seller` (identidad segura mínima, misma
+ * select ya usada en el detalle) en la MISMA consulta — un solo `findMany`,
+ * sin segunda consulta por venta. `sellerId` se conserva sin cambios.
+ */
 export const SALE_LIST_SELECT = {
   id: true,
   number: true,
@@ -47,6 +52,7 @@ export const SALE_LIST_SELECT = {
   customerName: true,
   customerDocumentNumber: true,
   sellerId: true,
+  seller: { select: SALE_SELLER_SUMMARY_SELECT },
   subtotal: true,
   discountAmount: true,
   taxAmount: true,
@@ -140,6 +146,7 @@ export function toSafeSaleListItem(row: SaleListRow): SafeSaleListItem {
     customerName: row.customerName,
     customerDocumentNumber: row.customerDocumentNumber,
     sellerId: row.sellerId,
+    seller: row.seller,
     subtotal: row.subtotal.toFixed(2),
     discountAmount: row.discountAmount.toFixed(2),
     taxAmount: row.taxAmount.toFixed(2),

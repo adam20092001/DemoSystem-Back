@@ -124,6 +124,37 @@ export class ProductsService {
     );
     const skip = (page - 1) * limit;
 
+    // Fase 9, Bloque A (R6): combinación contradictoria explícita — nunca
+    // se resuelve en silencio con una página vacía.
+    if (query.lowStockOnly === true && query.isInventoryTracked === false) {
+      throw new BadRequestException(
+        'lowStockOnly=true requiere productos inventariables; no puede combinarse con isInventoryTracked=false',
+      );
+    }
+    const brandTerm = this.assertValidOptionalFilterTerm(query.brand, 'brand');
+
+    const showNotes = canSeeInternalNotes(requesterRole);
+
+    // Fase 9, Bloque A (R6): stockCurrent <= stockMinimum es una
+    // comparación entre dos columnas de la misma fila, que Prisma no puede
+    // expresar en su `where` tipado. Cuando lowStockOnly=true, se resuelve
+    // con una consulta raw parametrizada (mismo criterio ya usado por
+    // InventoryService.listLowStock), preservando en SQL exactamente los
+    // mismos filtros/orden/paginación que la rama normal, y luego se
+    // recupera la fila completa vía Prisma por id — nunca se pagina ni se
+    // filtra en memoria.
+    if (query.lowStockOnly === true) {
+      return this.listProductsLowStockOnly(
+        query,
+        requesterRole,
+        brandTerm,
+        page,
+        limit,
+        skip,
+        showNotes,
+      );
+    }
+
     const where: Prisma.ProductWhereInput = {};
     if (requesterRole === RoleName.SELLER) {
       where.status = ProductStatus.ACTIVE;
@@ -142,6 +173,9 @@ export class ProductsService {
     if (query.isInventoryTracked !== undefined) {
       where.isInventoryTracked = query.isInventoryTracked;
     }
+    if (brandTerm !== undefined) {
+      where.brand = { contains: brandTerm, mode: 'insensitive' };
+    }
     const term = query.search?.trim();
     if (term !== undefined && term.length > 0) {
       where.OR = [
@@ -150,8 +184,6 @@ export class ProductsService {
         { brand: { contains: term, mode: 'insensitive' } },
       ];
     }
-
-    const showNotes = canSeeInternalNotes(requesterRole);
 
     const [rows, total] = await Promise.all([
       this.prisma.product.findMany({
@@ -166,6 +198,117 @@ export class ProductsService {
 
     return {
       data: rows.map((row) => toSafeProductListItem(row, showNotes)),
+      page,
+      limit,
+      total,
+      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * Trim + rechazo de blanco cuando el filtro SÍ se envía (patrón ya usado
+   * por `search` en este mismo servicio, aplicado explícitamente aquí
+   * porque un valor en blanco después de trim debe fallar con 400, nunca
+   * ignorarse en silencio como filtro ausente).
+   */
+  private assertValidOptionalFilterTerm(
+    value: string | undefined,
+    fieldName: string,
+  ): string | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new BadRequestException(`${fieldName} no puede estar en blanco`);
+    }
+    return trimmed;
+  }
+
+  /**
+   * Rama exclusiva de lowStockOnly=true (Fase 9, Bloque A, R6). Refleja
+   * exactamente los mismos filtros que la rama normal (rol SELLER forzado
+   * a ACTIVE, categoryId, unitId, productType, brand, search) más
+   * isInventoryTracked=true forzado y la comparación de columnas que
+   * Prisma no puede expresar. Orden idéntico a la rama normal: name ASC,
+   * sku ASC. LIMIT/OFFSET ya aplicados en SQL: nunca se pagina en memoria.
+   */
+  private async listProductsLowStockOnly(
+    query: ListProductsQuery,
+    requesterRole: RoleName,
+    brandTerm: string | undefined,
+    page: number,
+    limit: number,
+    skip: number,
+    showNotes: boolean,
+  ): Promise<PaginatedResult<SafeProductListItem>> {
+    const conditions: Prisma.Sql[] = [
+      Prisma.sql`p.is_inventory_tracked = true`,
+      Prisma.sql`p.stock_current <= p.stock_minimum`,
+    ];
+    if (requesterRole === RoleName.SELLER) {
+      conditions.push(Prisma.sql`p.status = 'ACTIVE'::"ProductStatus"`);
+    } else if (query.status !== undefined) {
+      conditions.push(Prisma.sql`p.status = ${query.status}::"ProductStatus"`);
+    }
+    if (query.categoryId !== undefined) {
+      conditions.push(Prisma.sql`p.category_id = ${query.categoryId}::uuid`);
+    }
+    if (query.unitId !== undefined) {
+      conditions.push(Prisma.sql`p.unit_id = ${query.unitId}::uuid`);
+    }
+    if (query.productType !== undefined) {
+      conditions.push(
+        Prisma.sql`p.product_type = ${query.productType}::"ProductType"`,
+      );
+    }
+    if (brandTerm !== undefined) {
+      conditions.push(Prisma.sql`p.brand ILIKE ${'%' + brandTerm + '%'}`);
+    }
+    const searchTerm = query.search?.trim();
+    if (searchTerm !== undefined && searchTerm.length > 0) {
+      const pattern = '%' + searchTerm + '%';
+      conditions.push(
+        Prisma.sql`(p.sku ILIKE ${pattern} OR p.name ILIKE ${pattern} OR p.brand ILIKE ${pattern})`,
+      );
+    }
+    const whereClause = Prisma.join(conditions, ' AND ');
+
+    const idRows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT p.id AS "id"
+      FROM products p
+      WHERE ${whereClause}
+      ORDER BY p.name ASC, p.sku ASC
+      LIMIT ${limit} OFFSET ${skip}
+    `);
+    const totalRows = await this.prisma.$queryRaw<{ total: number }[]>(
+      Prisma.sql`
+        SELECT COUNT(*)::int AS "total"
+        FROM products p
+        WHERE ${whereClause}
+      `,
+    );
+    const total = totalRows[0]?.total ?? 0;
+
+    const orderedIds = idRows.map((row) => row.id);
+    const rows =
+      orderedIds.length > 0
+        ? await this.prisma.product.findMany({
+            where: { id: { in: orderedIds } },
+            select: PRODUCT_LIST_SELECT,
+          })
+        : [];
+    // Prisma `where: { id: { in: [...] } }` no garantiza preservar el orden
+    // de la lista: se reordena en memoria según `orderedIds` (ya acotado a
+    // como máximo `limit` filas por la consulta raw paginada — nunca es un
+    // reordenamiento sobre el conjunto completo sin paginar).
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    const orderedRows = orderedIds
+      .map((id) => rowsById.get(id))
+      .filter((row): row is NonNullable<typeof row> => row !== undefined);
+
+    return {
+      data: orderedRows.map((row) => toSafeProductListItem(row, showNotes)),
       page,
       limit,
       total,

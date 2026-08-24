@@ -59,6 +59,16 @@ describe('Products & Specifications (e2e)', () => {
   let unitId: string;
   let inactiveCategoryId: string;
   let inactiveUnitId: string;
+  // Fase 9, Bloque D — remediación de aislamiento: este archivo, por
+  // convención ya establecida (ver comentario más abajo en el propio
+  // describe de R6), NUNCA limpia los Product que crea — se acumulan entre
+  // ejecuciones a propósito. Pero el único InventoryMovement real que este
+  // archivo llega a crear (alta de saldo del caso "no stock bajo" de R6)
+  // SÍ debe limpiarse por ID exacto propio: a diferencia de un Product sin
+  // historial, un InventoryMovement nuevo en cada ejecución (mismo Date.now()
+  // como sufijo) crecía sin límite en pos_db_test. No se toca el Product
+  // dueño: eliminar el movimiento no lo requiere.
+  let ownedInventoryMovementId: string | null = null;
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
@@ -147,6 +157,20 @@ describe('Products & Specifications (e2e)', () => {
   });
 
   afterAll(async () => {
+    // Limpieza estrecha por ID exacto propio (Fase 9, Bloque D §5): jamás
+    // deleteMany({}) ni por prefijo amplio. No afecta a los demás Product
+    // de este archivo, que siguen acumulándose por la convención vigente.
+    if (ownedInventoryMovementId !== null) {
+      await prisma.auditLog.deleteMany({
+        where: {
+          entityType: 'InventoryMovement',
+          entityId: ownedInventoryMovementId,
+        },
+      });
+      await prisma.inventoryMovement.deleteMany({
+        where: { id: ownedInventoryMovementId },
+      });
+    }
     await app.close();
     await prisma.$disconnect();
   });
@@ -592,6 +616,287 @@ describe('Products & Specifications (e2e)', () => {
           'Valor secreto de especificación',
         );
       }
+    });
+  });
+
+  // ==================================================================
+  // Fase 9, Bloque A (R6) — GET /products: brand / lowStockOnly
+  // ==================================================================
+  describe('GET /products — brand / lowStockOnly (Fase 9, R6)', () => {
+    it('brand: omitido no filtra; con valor filtra insensible a mayúsculas; recorta espacios; en blanco -> 400', async () => {
+      const suffix = Date.now();
+      const created = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          brand: `MarcaR6-${suffix}`,
+        });
+      expect(created.status).toBe(201);
+      const id = (created.body as SafeProductBody).id;
+
+      const byBrand = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ brand: `marcar6-${suffix}`.toUpperCase() })
+        .set('Cookie', adminCookie);
+      expect(byBrand.status).toBe(200);
+      expect(
+        (byBrand.body as { data: SafeProductBody[] }).data.some(
+          (p) => p.id === id,
+        ),
+      ).toBe(true);
+
+      const trimmed = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ brand: `  MarcaR6-${suffix}  ` })
+        .set('Cookie', adminCookie);
+      expect(
+        (trimmed.body as { data: SafeProductBody[] }).data.some(
+          (p) => p.id === id,
+        ),
+      ).toBe(true);
+
+      const blank = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ brand: '   ' })
+        .set('Cookie', adminCookie);
+      expect(blank.status).toBe(400);
+    });
+
+    it('lowStockOnly: omitido/false preservan el comportamiento existente; true filtra tracked+stockCurrent<=stockMinimum en BD', async () => {
+      const suffix = Date.now();
+      // stockCurrent nace en 0.000 (Fase 2/3): con stockMinimum=5, ya es
+      // elegible como stock bajo sin necesitar un movimiento de inventario.
+      const belowMinimum = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-below-${suffix}`,
+          stockMinimum: '5',
+        });
+      expect(belowMinimum.status).toBe(201);
+      const belowId = (belowMinimum.body as SafeProductBody).id;
+
+      // stockCurrent nace en 0.000, así que incluso con stockMinimum='0'
+      // seguiría calificando como stock bajo (0 <= 0, misma regla exacta
+      // de GET /inventory/low-stock). Para un caso genuino "NO stock
+      // bajo" hace falta stockCurrent > stockMinimum vía un movimiento
+      // real de inventario.
+      const aboveMinimum = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-above-${suffix}`,
+          stockMinimum: '0',
+        });
+      expect(aboveMinimum.status).toBe(201);
+      const aboveId = (aboveMinimum.body as SafeProductBody).id;
+      const initialBalance = await request(app.getHttpServer())
+        .post('/api/v1/inventory/initial-balances')
+        .set('Cookie', adminCookie)
+        .send({
+          productId: aboveId,
+          quantity: '5.000',
+          reason: 'Saldo Fase 9 R6 (no stock bajo)',
+        });
+      expect(initialBalance.status).toBe(201);
+      // Fase 9, Bloque D §5: el único InventoryMovement real que crea este
+      // archivo — se limpia por ID exacto en afterAll (ver arriba), sin
+      // tocar el Product dueño ni el resto del catálogo acumulado.
+      ownedInventoryMovementId = (initialBalance.body as { id: string }).id;
+
+      const notTracked = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-nottracked-${suffix}`,
+          isInventoryTracked: false,
+          stockMinimum: '0',
+        });
+      expect(notTracked.status).toBe(201);
+      const notTrackedId = (notTracked.body as SafeProductBody).id;
+
+      // El catálogo de este archivo E2E se acumula entre ejecuciones (sin
+      // limpieza, misma convención ya establecida aquí): se filtra con
+      // `search` por el sufijo único de esta prueba para no depender de
+      // que las 3 filas propias entren en un `limit` fijo del catálogo
+      // completo.
+      const omitted = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ categoryId, unitId, search: String(suffix) })
+        .set('Cookie', adminCookie);
+      expect(omitted.status).toBe(200);
+      const omittedIds = (omitted.body as { data: SafeProductBody[] }).data.map(
+        (p) => p.id,
+      );
+      expect(omittedIds).toContain(belowId);
+      expect(omittedIds).toContain(aboveId);
+      expect(omittedIds).toContain(notTrackedId);
+
+      const explicitFalse = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({
+          categoryId,
+          unitId,
+          search: String(suffix),
+          lowStockOnly: 'false',
+        })
+        .set('Cookie', adminCookie);
+      const falseIds = (
+        explicitFalse.body as { data: SafeProductBody[] }
+      ).data.map((p) => p.id);
+      expect(falseIds.sort()).toEqual(omittedIds.sort());
+
+      const lowStockOnly = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({
+          categoryId,
+          unitId,
+          search: String(suffix),
+          lowStockOnly: 'true',
+        })
+        .set('Cookie', adminCookie);
+      expect(lowStockOnly.status).toBe(200);
+      const lowStockIds = (
+        lowStockOnly.body as { data: SafeProductBody[] }
+      ).data.map((p) => p.id);
+      expect(lowStockIds).toContain(belowId);
+      expect(lowStockIds).not.toContain(aboveId);
+      expect(lowStockIds).not.toContain(notTrackedId);
+    });
+
+    it('lowStockOnly=true + isInventoryTracked=false -> 400 (combinación contradictoria)', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ lowStockOnly: 'true', isInventoryTracked: 'false' })
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(400);
+    });
+
+    it('lowStockOnly=true + isInventoryTracked=true: combinación válida, mismo resultado que solo lowStockOnly=true', async () => {
+      const suffix = Date.now();
+      const created = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-combo-${suffix}`,
+          stockMinimum: '5',
+        });
+      const id = (created.body as SafeProductBody).id;
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({
+          categoryId,
+          unitId,
+          search: String(suffix),
+          lowStockOnly: 'true',
+          isInventoryTracked: 'true',
+        })
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(200);
+      expect(
+        (response.body as { data: SafeProductBody[] }).data.some(
+          (p) => p.id === id,
+        ),
+      ).toBe(true);
+    });
+
+    it('lowStockOnly=true respeta paginación/orden existentes (name ASC, sku ASC) sin filtrar en memoria', async () => {
+      const suffix = Date.now();
+      const first = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-order-a-${suffix}`,
+          name: `Aardvark R6 ${suffix}`,
+          stockMinimum: '5',
+        });
+      const second = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          sku: `sku-e2e-r6-order-b-${suffix}`,
+          name: `Bardvark R6 ${suffix}`,
+          stockMinimum: '5',
+        });
+      const firstId = (first.body as SafeProductBody).id;
+      const secondId = (second.body as SafeProductBody).id;
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({
+          categoryId,
+          unitId,
+          lowStockOnly: 'true',
+          search: `r6 ${suffix}`,
+          page: 1,
+          limit: 1,
+        })
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(200);
+      const body = response.body as {
+        data: SafeProductBody[];
+        page: number;
+        limit: number;
+        total: number;
+        totalPages: number;
+      };
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0].id).toBe(firstId);
+      expect(body.total).toBe(2);
+      expect(body.totalPages).toBe(2);
+
+      const secondPage = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({
+          categoryId,
+          unitId,
+          lowStockOnly: 'true',
+          search: `r6 ${suffix}`,
+          page: 2,
+          limit: 1,
+        })
+        .set('Cookie', adminCookie);
+      expect((secondPage.body as { data: SafeProductBody[] }).data[0].id).toBe(
+        secondId,
+      );
+    });
+
+    it('no crea AuditLog ni muta Product (lectura pura)', async () => {
+      const suffix = Date.now();
+      const created = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({ ...baseProductPayload(suffix), stockMinimum: '5' });
+      const id = (created.body as SafeProductBody).id;
+      const before = await prisma.product.findUniqueOrThrow({
+        where: { id },
+      });
+      const auditBefore = await prisma.auditLog.count();
+
+      await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ brand: 'x', lowStockOnly: 'true' })
+        .set('Cookie', adminCookie);
+      await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .query({ lowStockOnly: 'false' })
+        .set('Cookie', adminCookie);
+
+      const after = await prisma.product.findUniqueOrThrow({ where: { id } });
+      const auditAfter = await prisma.auditLog.count();
+      expect(after.updatedAt).toEqual(before.updatedAt);
+      expect(after.stockCurrent.toString()).toBe(
+        before.stockCurrent.toString(),
+      );
+      expect(auditAfter).toBe(auditBefore);
     });
   });
 });

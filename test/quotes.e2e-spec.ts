@@ -3328,8 +3328,11 @@ describe('Quotes (e2e)', () => {
       };
       expect(doc.tags.some((tag) => tag.name === 'Quotes')).toBe(true);
 
+      // Fase 9, Bloque B: filtra por prefijo real del recurso (no por
+      // substring "quotes") porque el nuevo reporte GET /reports/quotes-by-status
+      // también contiene "quotes" en el path y no debe contarse aquí.
       const quotePaths = Object.keys(doc.paths).filter((path) =>
-        path.includes('quotes'),
+        path.startsWith('/api/v1/quotes'),
       );
       expect(new Set(quotePaths).size).toBe(5);
       let totalOps = 0;

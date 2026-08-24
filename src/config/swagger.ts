@@ -100,6 +100,27 @@ export function setupSwagger(app: INestApplication): boolean {
         'NO reemplaza un software contable formal, y NO es contabilidad ' +
         'SUNAT/PLE ni ningún tipo de libro contable fiscal.',
     )
+    .addTag(
+      'Reports',
+      'Reportes operativos de solo lectura sobre ventas, cobranza y ' +
+        'cotizaciones (ventas por producto/cliente/vendedor, cotizaciones ' +
+        'por estado, pagos por método). Son vistas agregadas/tabulares ' +
+        'calculadas al momento de la solicitud sobre datos ya existentes; ' +
+        'NO son contabilidad formal, NO son reportes fiscales SUNAT/PLE, y ' +
+        'NO constituyen una plataforma de Business Intelligence.',
+    )
+    .addTag(
+      'Dashboard',
+      'Panel compuesto de solo lectura (una única respuesta con hasta 5 ' +
+        'secciones: sales, collections, lowStock, quotes, receivables). ' +
+        'Visibilidad por rol: ADMIN/MANAGEMENT ven las 5 secciones; SELLER ' +
+        've todo salvo lowStock; WAREHOUSE ve únicamente lowStock. Sin ' +
+        'período, sales/collections usan el mes calendario actual ' +
+        'America/Lima por defecto; lowStock y receivables son de estado ' +
+        'ACTUAL y no se filtran por período. NO es contabilidad formal, NO ' +
+        'reemplaza los reportes de la etiqueta Reports, y NO constituye una ' +
+        'plataforma de Business Intelligence.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);
