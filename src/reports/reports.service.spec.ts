@@ -491,6 +491,7 @@ describe('ReportsService', () => {
           customerName: 'Cliente Uno',
           total: new Prisma.Decimal('350'),
           status: 'PENDING',
+          expirationDate: new Date('2099-01-01T00:00:00.000Z'),
           sale: null,
         },
         {
@@ -499,6 +500,7 @@ describe('ReportsService', () => {
           customerName: 'Cliente Dos',
           total: new Prisma.Decimal('500'),
           status: 'CONVERTED',
+          expirationDate: new Date('2020-01-01T00:00:00.000Z'),
           sale: { id: 'sale-1', number: 'NV-000001' },
         },
       ]);
@@ -549,6 +551,205 @@ describe('ReportsService', () => {
           { customerId: 'cust-1' },
         ]),
       );
+    });
+
+    // ========================================================================
+    // Fase 9, remediación EXPIRED (§15): estado EFECTIVO idéntico a
+    // GET /quotes, evaluado contra la fecha de negocio America/Lima ACTUAL.
+    // ========================================================================
+    describe('estado EFECTIVO (EXPIRED derivado, §15)', () => {
+      it('A. PENDING vencida (expirationDate < hoy Lima) se muestra como EXPIRED', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([
+            {
+              id: 'quote-1',
+              number: 'COT-000001',
+              customerName: 'Cliente Uno',
+              total: new Prisma.Decimal('350'),
+              status: 'PENDING',
+              expirationDate: new Date('2026-08-01T00:00:00.000Z'),
+              sale: null,
+            },
+          ]);
+          prisma.quote.count.mockResolvedValue(1);
+
+          const result = await service.quotesByStatus({}, RoleName.ADMIN);
+
+          expect(result.data[0].status).toBe('EXPIRED');
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('B. ?status=EXPIRED se traduce a la condición OR (status crudo EXPIRED ∪ PENDING/ACCEPTED vencidas)', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([]);
+          prisma.quote.count.mockResolvedValue(0);
+
+          await service.quotesByStatus({ status: 'EXPIRED' }, RoleName.ADMIN);
+
+          const args = prisma.quote.findMany.mock.calls[0][0] as {
+            where: { AND: Array<Record<string, unknown>> };
+          };
+          expect(args.where.AND).toEqual(
+            expect.arrayContaining([
+              {
+                OR: [
+                  { status: 'EXPIRED' },
+                  {
+                    status: { in: ['PENDING', 'ACCEPTED'] },
+                    expirationDate: {
+                      lt: new Date('2026-08-23T00:00:00.000Z'),
+                    },
+                  },
+                ],
+              },
+            ]),
+          );
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('C. ?status=PENDING excluye las vencidas (expirationDate >= hoy Lima): ya pertenecen a EXPIRED', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([]);
+          prisma.quote.count.mockResolvedValue(0);
+
+          await service.quotesByStatus({ status: 'PENDING' }, RoleName.ADMIN);
+
+          const args = prisma.quote.findMany.mock.calls[0][0] as {
+            where: { AND: Array<Record<string, unknown>> };
+          };
+          expect(args.where.AND).toEqual(
+            expect.arrayContaining([
+              {
+                status: 'PENDING',
+                expirationDate: { gte: new Date('2026-08-23T00:00:00.000Z') },
+              },
+            ]),
+          );
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('D. PENDING con vigencia futura permanece PENDING (no reinterpretada)', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([
+            {
+              id: 'quote-1',
+              number: 'COT-000001',
+              customerName: 'Cliente Uno',
+              total: new Prisma.Decimal('350'),
+              status: 'PENDING',
+              expirationDate: new Date('2099-01-01T00:00:00.000Z'),
+              sale: null,
+            },
+          ]);
+          prisma.quote.count.mockResolvedValue(1);
+
+          const result = await service.quotesByStatus({}, RoleName.ADMIN);
+
+          expect(result.data[0].status).toBe('PENDING');
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('E. REJECTED/CONVERTED se muestran tal cual, sin importar expirationDate', async () => {
+        prisma.quote.findMany.mockResolvedValue([
+          {
+            id: 'quote-1',
+            number: 'COT-000001',
+            customerName: 'Cliente Uno',
+            total: new Prisma.Decimal('100'),
+            status: 'REJECTED',
+            expirationDate: new Date('2020-01-01T00:00:00.000Z'),
+            sale: null,
+          },
+          {
+            id: 'quote-2',
+            number: 'COT-000002',
+            customerName: 'Cliente Dos',
+            total: new Prisma.Decimal('200'),
+            status: 'CONVERTED',
+            expirationDate: new Date('2020-01-01T00:00:00.000Z'),
+            sale: { id: 'sale-1', number: 'NV-000001' },
+          },
+        ]);
+        prisma.quote.count.mockResolvedValue(2);
+
+        const result = await service.quotesByStatus({}, RoleName.ADMIN);
+
+        expect(result.data[0].status).toBe('REJECTED');
+        expect(result.data[1].status).toBe('CONVERTED');
+      });
+
+      it('F. count() recibe la MISMA condición WHERE que findMany (paginación consistente con el filtro efectivo)', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([]);
+          prisma.quote.count.mockResolvedValue(0);
+
+          await service.quotesByStatus({ status: 'EXPIRED' }, RoleName.ADMIN);
+
+          const findManyArgs = prisma.quote.findMany.mock.calls[0][0] as {
+            where: unknown;
+          };
+          const countArgs = prisma.quote.count.mock.calls[0][0] as {
+            where: unknown;
+          };
+          expect(countArgs.where).toEqual(findManyArgs.where);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('G. la fecha de negocio ACTUAL determina la vigencia, nunca from/to del reporte', async () => {
+        jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
+        try {
+          prisma.quote.findMany.mockResolvedValue([]);
+          prisma.quote.count.mockResolvedValue(0);
+
+          // from/to muy en el pasado: si la vigencia se evaluara contra
+          // `to` en vez de "hoy", la condición usaría 2020-01-31.
+          await service.quotesByStatus(
+            {
+              from: '2020-01-01',
+              to: '2020-01-31',
+              status: 'EXPIRED',
+            },
+            RoleName.ADMIN,
+          );
+
+          const args = prisma.quote.findMany.mock.calls[0][0] as {
+            where: { AND: Array<Record<string, unknown>> };
+          };
+          expect(args.where.AND).toEqual(
+            expect.arrayContaining([
+              {
+                OR: [
+                  { status: 'EXPIRED' },
+                  {
+                    status: { in: ['PENDING', 'ACCEPTED'] },
+                    // Fecha de HOY (2026-08-23), no la de `to` (2020-01-31).
+                    expirationDate: {
+                      lt: new Date('2026-08-23T00:00:00.000Z'),
+                    },
+                  },
+                ],
+              },
+            ]),
+          );
+        } finally {
+          jest.useRealTimers();
+        }
+      });
     });
   });
 

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma, RoleName } from '@prisma/client';
 import {
+  businessToday,
   endOfBusinessDayExclusiveUtc,
   isValidDateOnly,
   startOfBusinessDayUtc,
@@ -8,6 +9,10 @@ import {
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
+import {
+  buildEffectiveQuoteStatusCondition,
+  effectiveStatus,
+} from '../quotes/quote-calculator';
 import { PaymentsByMethodQueryDto } from './dto/payments-by-method-query.dto';
 import { QuotesByStatusQueryDto } from './dto/quotes-by-status-query.dto';
 import { SalesByCustomerQueryDto } from './dto/sales-by-customer-query.dto';
@@ -476,6 +481,14 @@ export class ReportsService {
     }
     this.assertValidDateRangeQuery(query.from, query.to);
 
+    // Fase 9, remediación EXPIRED: el estado EFECTIVO (idéntico al de
+    // GET /quotes) se evalúa contra la fecha de negocio America/Lima ACTUAL
+    // — nunca contra `from`/`to` del reporte, que solo seleccionan QUÉ
+    // cotizaciones entran por issueDate. Ambos conceptos son
+    // deliberadamente independientes (ver quotesByStatus/getQuotesSection).
+    const businessDate = businessToday();
+    const businessDateAsDate = toPrismaDate(businessDate);
+
     const conditions: Prisma.QuoteWhereInput[] = [];
     if (query.from !== undefined) {
       conditions.push({ issueDate: { gte: toPrismaDate(query.from) } });
@@ -484,7 +497,11 @@ export class ReportsService {
       conditions.push({ issueDate: { lte: toPrismaDate(query.to) } });
     }
     if (query.status !== undefined) {
-      conditions.push({ status: query.status });
+      // Misma condición pura que QuotesService.findAll(): EXPIRED nunca se
+      // persiste, así que el filtro se traduce a status/expirationDate.
+      conditions.push(
+        buildEffectiveQuoteStatusCondition(query.status, businessDateAsDate),
+      );
     }
     if (query.sellerId !== undefined) {
       conditions.push({ sellerId: query.sellerId });
@@ -504,12 +521,15 @@ export class ReportsService {
           customerName: true,
           total: true,
           status: true,
+          expirationDate: true,
           sale: { select: { id: true, number: true } },
         },
         orderBy: [{ issueDate: 'desc' }, { id: 'desc' }],
         skip,
         take: limit,
       }),
+      // Misma condición WHERE que findMany: count y data quedan
+      // consistentes entre sí para status=EXPIRED (o cualquier otro).
       this.prisma.quote.count({ where }),
     ]);
 
@@ -519,7 +539,10 @@ export class ReportsService {
         quoteNumber: row.number,
         customerName: row.customerName,
         total: row.total.toFixed(2),
-        status: row.status,
+        // Estado EFECTIVO (idéntico a GET /quotes), nunca el crudo
+        // almacenado: una cotización PENDING/ACCEPTED vencida se muestra
+        // como EXPIRED aquí también.
+        status: effectiveStatus(row.status, row.expirationDate, businessDate),
         resultingSale:
           row.sale !== null
             ? { saleId: row.sale.id, saleNumber: row.sale.number }
