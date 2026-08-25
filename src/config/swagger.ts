@@ -132,7 +132,17 @@ export function setupSwagger(app: INestApplication): boolean {
         'NO es SUNAT, NO es PLE. Cambiar quoteValidityDays/' +
         'maxDiscountPercent/taxEnabled/taxRate nunca modifica cotizaciones ' +
         'o ventas ya existentes: solo aplica a operaciones comerciales ' +
-        'nuevas o efectivamente modificadas desde ese momento.',
+        'nuevas o efectivamente modificadas desde ese momento. Incluye ' +
+        'además la administración de secuencias de documentos ' +
+        '(/configuration/sequences: prefix/padding/currentNumber de QUOTE y ' +
+        'SALE). GET para ADMIN y MANAGEMENT; PATCH solo para ADMIN. El ' +
+        'frontend NUNCA genera ni previsualiza números de documento — no ' +
+        'existe ningún endpoint de "próximo número": la única generación es ' +
+        'interna, dentro de la transacción de cada cotización/venta. Un ' +
+        'cambio de configuración de secuencia afecta solo a los documentos ' +
+        'generados desde ese momento; los números ya emitidos son ' +
+        'históricos y nunca se modifican. currentNumber puede mantenerse ' +
+        'igual o avanzar; nunca puede disminuir respecto del valor actual.',
     )
     .build();
 

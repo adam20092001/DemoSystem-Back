@@ -247,6 +247,18 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'oldValues',
     'newValues',
   ],
+  // Fase 10, Bloque D. Mismo contrato que CONFIGURATION_UPDATED
+  // (changedFields + oldValues/newValues acotados a los campos realmente
+  // cambiados), más `documentType` como campo plano — permite identificar
+  // QUOTE/SALE sin depender de entityId. Los únicos campos editables son
+  // prefix/padding/currentNumber; nunca se audita id/updatedAt ni el valor
+  // "próximo" que emitiría next().
+  [AuditAction.SEQUENCE_UPDATED]: [
+    'documentType',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
 };
 
 function isPlainObject(

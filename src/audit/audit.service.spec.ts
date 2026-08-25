@@ -694,6 +694,90 @@ describe('sanitizeAuditMetadata', () => {
     });
   });
 
+  describe('SEQUENCE_UPDATED (Fase 10, Bloque D: documentType + changedFields + oldValues/newValues)', () => {
+    it('conserva documentType + changedFields/oldValues/newValues de un solo campo', () => {
+      const metadata: AuditMetadata = {
+        documentType: 'QUOTE',
+        changedFields: ['prefix'],
+        oldValues: { prefix: 'COT-' },
+        newValues: { prefix: 'Q-' },
+      };
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.SEQUENCE_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        documentType: 'QUOTE',
+        changedFields: ['prefix'],
+        oldValues: { prefix: 'COT-' },
+        newValues: { prefix: 'Q-' },
+      });
+    });
+
+    it('conserva un cambio combinado de prefix/padding/currentNumber', () => {
+      const metadata: AuditMetadata = {
+        documentType: 'SALE',
+        changedFields: ['prefix', 'padding', 'currentNumber'],
+        oldValues: { prefix: 'NV-', padding: 6, currentNumber: 100 },
+        newValues: { prefix: 'V-', padding: 8, currentNumber: 500 },
+      };
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.SEQUENCE_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual(metadata);
+    });
+
+    it('descarta dentro de oldValues/newValues cualquier clave ausente de changedFields (defensa de última línea)', () => {
+      const metadata = {
+        documentType: 'QUOTE',
+        changedFields: ['prefix'],
+        oldValues: { prefix: 'COT-', currentNumber: 100 },
+        newValues: { prefix: 'Q-', currentNumber: 500 },
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.SEQUENCE_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        documentType: 'QUOTE',
+        changedFields: ['prefix'],
+        oldValues: { prefix: 'COT-' },
+        newValues: { prefix: 'Q-' },
+      });
+    });
+
+    it('no admite ningún otro campo fuera de documentType/changedFields/oldValues/newValues (id/updatedAt/valor próximo)', () => {
+      const metadata = {
+        documentType: 'QUOTE',
+        changedFields: ['currentNumber'],
+        oldValues: { currentNumber: 100 },
+        newValues: { currentNumber: 500 },
+        id: 'sequence-1',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        nextPreview: 'COT-000501',
+      } as unknown as AuditMetadata;
+
+      const sanitized = sanitizeAuditMetadata(
+        AuditAction.SEQUENCE_UPDATED,
+        metadata,
+      );
+
+      expect(sanitized).toEqual({
+        documentType: 'QUOTE',
+        changedFields: ['currentNumber'],
+        oldValues: { currentNumber: 100 },
+        newValues: { currentNumber: 500 },
+      });
+    });
+  });
+
   it('QUOTE_CONVERTED conserva solo quoteNumber/saleNumber', () => {
     const metadata = {
       quoteNumber: 'COT-000005',

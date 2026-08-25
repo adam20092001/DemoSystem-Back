@@ -44,7 +44,15 @@
  * metadata nunca incluye valores anteriores/nuevos de identidad de empresa
  * (nombre, dirección, teléfono, correo) — mismo criterio de evitar texto
  * libre potencialmente sensible que CUSTOMER_/QUOTE_/SALE_, solo la lista
- * de campos modificados.
+ * de campos modificados. SEQUENCE_UPDATED se agrega en la Fase 10, Bloque D:
+ * SequenceAdminService es su único emisor, dentro de la misma transacción que
+ * el PATCH de un DocumentSequence (prefix/padding/currentNumber). Mismo
+ * criterio que CONFIGURATION_UPDATED (changedFields + oldValues/newValues,
+ * solo campos realmente cambiados, sin auditoría si el PATCH es un no-op),
+ * más `documentType` como campo plano adicional para identificar QUOTE/SALE
+ * sin depender de entityId. DocumentSequenceService.next() (generación
+ * automática de correlativos) nunca audita: esta acción solo la emite la
+ * administración manual expuesta en el Bloque D.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -97,4 +105,5 @@ export enum AuditAction {
   ACCOUNTING_ENTRY_POSTED = 'ACCOUNTING_ENTRY_POSTED',
   ACCOUNTING_ENTRY_REVERSED = 'ACCOUNTING_ENTRY_REVERSED',
   CONFIGURATION_UPDATED = 'CONFIGURATION_UPDATED',
+  SEQUENCE_UPDATED = 'SEQUENCE_UPDATED',
 }
