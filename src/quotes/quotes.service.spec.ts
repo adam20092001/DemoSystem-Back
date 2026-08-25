@@ -119,6 +119,7 @@ function makeLockedQuoteRow(overrides: Partial<Record<string, unknown>> = {}) {
     expirationDate: new Date('2026-03-20T00:00:00.000Z'),
     subtotal: new Prisma.Decimal('10.00'),
     discountAmount: new Prisma.Decimal('0'),
+    taxAmount: new Prisma.Decimal('0'),
     ...overrides,
   };
 }
@@ -610,6 +611,130 @@ describe('QuotesService', () => {
       });
     });
 
+    describe('Bloque 10, C — IGV en la creación de la cotización', () => {
+      it('taxEnabled=false -> taxAmount 0.00', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled: false }),
+        );
+        await service.create(validCreateInput);
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { taxAmount: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        expect(createArgs.data.taxAmount.toFixed(2)).toBe('0.00');
+        expect(createArgs.data.total.toFixed(2)).toBe('10.00');
+      });
+
+      it('taxEnabled=true, 18% normal, sin descuento', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.create(validCreateInput);
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            subtotal: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            total: Prisma.Decimal;
+          };
+        };
+        // subtotal = 10.00 (1 x 10.00), taxableBase = 10.00, tax = 1.80.
+        expect(createArgs.data.subtotal.toFixed(2)).toBe('10.00');
+        expect(createArgs.data.taxAmount.toFixed(2)).toBe('1.80');
+        expect(createArgs.data.total.toFixed(2)).toBe('11.80');
+      });
+
+      it('el descuento reduce la base imponible ANTES del impuesto', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.create({
+          ...validCreateInput,
+          discountAmount: '2.00',
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            discountAmount: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            total: Prisma.Decimal;
+          };
+        };
+        // taxableBase = 10.00 - 2.00 = 8.00; tax = 8.00*18/100 = 1.44.
+        expect(createArgs.data.discountAmount.toFixed(2)).toBe('2.00');
+        expect(createArgs.data.taxAmount.toFixed(2)).toBe('1.44');
+        expect(createArgs.data.total.toFixed(2)).toBe('9.44');
+      });
+
+      it('descuento total -> taxableBase 0 -> taxAmount 0.00, sin anomalía', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+            maxDiscountPercent: new Prisma.Decimal('100.00'),
+          }),
+        );
+        await service.create({
+          ...validCreateInput,
+          discountAmount: '10.00',
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { taxAmount: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        expect(createArgs.data.taxAmount.toFixed(2)).toBe('0.00');
+        expect(createArgs.data.total.toFixed(2)).toBe('0.00');
+      });
+
+      it('SettingsReader.getCurrent(tx) se llama exactamente una vez (mismo snapshot para vigencia, descuento e impuesto)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled: true }),
+        );
+        await service.create(validCreateInput);
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+      });
+
+      it('el descuento máximo configurado se sigue aplicando con IGV activo', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({ ...validCreateInput, discountAmount: '1.01' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('la vigencia por defecto sigue aplicándose con IGV activo (expirationDate omitido)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled: true, quoteValidityDays: 15 }),
+        );
+        await service.create(validCreateInputWithoutExpiration);
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { expirationDate: Date };
+        };
+        expect(createArgs.data.expirationDate.toISOString()).toBe(
+          '2026-03-30T00:00:00.000Z',
+        );
+      });
+
+      it('expirationDate explícito sigue funcionando con IGV activo', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled: true }),
+        );
+        await expect(
+          service.create({
+            ...validCreateInput,
+            expirationDate: '2026-12-25',
+          }),
+        ).resolves.toBeDefined();
+      });
+    });
+
     it('llama a DocumentSequenceService.next() después de validar cliente/producto', async () => {
       await service.create(validCreateInput);
       expect(sequenceService.next).toHaveBeenCalledTimes(1);
@@ -915,7 +1040,7 @@ describe('QuotesService', () => {
       expect(call.client).toBe(prisma.tx);
     });
 
-    it('updatedFields contiene solo nombres de campo', async () => {
+    it('updatedFields contiene solo nombres de campo (incluye taxAmount cuando el cambio es comercial)', async () => {
       await service.update({
         ...baseUpdateInput,
         notes: 'x',
@@ -924,8 +1049,10 @@ describe('QuotesService', () => {
       const call = auditService.record.mock.calls[0][0] as {
         metadata: { updatedFields: string[] };
       };
+      // discountAmount difiere del existente (0) -> cambio comercial ->
+      // taxAmount se recalcula y se agrega a updatedFields (Fase 10, Bloque C).
       expect(call.metadata.updatedFields.sort()).toEqual(
-        ['discountAmount', 'notes'].sort(),
+        ['discountAmount', 'notes', 'taxAmount'].sort(),
       );
     });
 
@@ -938,6 +1065,9 @@ describe('QuotesService', () => {
         metadata: { updatedFields: string[] };
       };
       expect(call.metadata.updatedFields).toContain('items');
+      // Reemplazar items es un cambio comercial (Fase 10, Bloque C): el
+      // impuesto se recalcula y también se refleja en updatedFields.
+      expect(call.metadata.updatedFields).toContain('taxAmount');
       expect(call.metadata.updatedFields).not.toContain('subtotal');
       expect(call.metadata.updatedFields).not.toContain('total');
     });
@@ -1063,6 +1193,162 @@ describe('QuotesService', () => {
           items: [{ productId: PRODUCT_ID, quantity: '1' }],
         });
         expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('Bloque 10, C — IGV en la actualización de la cotización', () => {
+      it('actualización NO comercial: cero SettingsReader, taxAmount histórico preservado exacto', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('1.80') }),
+        ]);
+        await service.update({ ...baseUpdateInput, notes: 'Solo una nota' });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { taxAmount?: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        // taxAmount no se toca en absoluto (ni siquiera se envía al UPDATE).
+        expect(updateArgs.data.taxAmount).toBeUndefined();
+        // total = subtotal(10.00) - discount(0) + taxAmount histórico(1.80).
+        expect(updateArgs.data.total.toFixed(2)).toBe('11.80');
+      });
+
+      it('transición tax deshabilitado -> habilitado: edición no comercial preserva el 0.00 histórico', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('0.00') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.update({ ...baseUpdateInput, notes: 'x' });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { total: Prisma.Decimal };
+        };
+        expect(updateArgs.data.total.toFixed(2)).toBe('10.00');
+      });
+
+      it('cambio comercial (discountAmount): recalcula taxAmount con la configuración VIGENTE (una sola lectura)', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('1.80') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.update({ ...baseUpdateInput, discountAmount: '2.00' });
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { taxAmount: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        // taxableBase = 10.00 - 2.00 = 8.00; tax = 1.44.
+        expect(updateArgs.data.taxAmount.toFixed(2)).toBe('1.44');
+        expect(updateArgs.data.total.toFixed(2)).toBe('9.44');
+      });
+
+      it('transición 18% -> 10% vigente: edición no comercial preserva el monto histórico al 18%', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('1.80') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await service.update({ ...baseUpdateInput, notes: 'x' });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { total: Prisma.Decimal };
+        };
+        // Preserva EXACTO el histórico (1.80 al 18%), nunca recalcula al 10%.
+        expect(updateArgs.data.total.toFixed(2)).toBe('11.80');
+      });
+
+      it('transición 18% -> 10% vigente: edición comercial SÍ recalcula al 10% actual', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('1.80') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await service.update({ ...baseUpdateInput, discountAmount: '1.00' });
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { taxAmount: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        // taxableBase = 10.00 - 1.00 = 9.00; tax al 10% = 0.90.
+        expect(updateArgs.data.taxAmount.toFixed(2)).toBe('0.90');
+        expect(updateArgs.data.total.toFixed(2)).toBe('9.90');
+      });
+
+      it('reemplazo de items (cambio comercial): recalcula taxAmount con la configuración vigente', async () => {
+        prisma.tx.product.findUnique.mockResolvedValue(
+          makeProductRow({ salePrice: new Prisma.Decimal('20.00') }),
+        );
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.update({
+          ...baseUpdateInput,
+          items: [{ productId: PRODUCT_ID, quantity: '2' }],
+        });
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: {
+            subtotal: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            total: Prisma.Decimal;
+          };
+        };
+        // subtotal = 2 x 20.00 = 40.00; tax al 18% = 7.20.
+        expect(updateArgs.data.subtotal.toFixed(2)).toBe('40.00');
+        expect(updateArgs.data.taxAmount.toFixed(2)).toBe('7.20');
+        expect(updateArgs.data.total.toFixed(2)).toBe('47.20');
+      });
+
+      it('descuento total en un cambio comercial: taxAmount recalculado a 0.00, sin anomalía', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+            maxDiscountPercent: new Prisma.Decimal('100.00'),
+          }),
+        );
+        await service.update({ ...baseUpdateInput, discountAmount: '10.00' });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { taxAmount: Prisma.Decimal; total: Prisma.Decimal };
+        };
+        expect(updateArgs.data.taxAmount.toFixed(2)).toBe('0.00');
+        expect(updateArgs.data.total.toFixed(2)).toBe('0.00');
+      });
+
+      it('no hay mutación retroactiva: una edición no comercial nunca escribe taxAmount aunque taxEnabled/taxRate hayan cambiado', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ taxAmount: new Prisma.Decimal('1.80') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled: false }),
+        );
+        await service.update({
+          ...baseUpdateInput,
+          expirationDate: '2026-05-01',
+        });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { taxAmount?: Prisma.Decimal };
+        };
+        expect(updateArgs.data.taxAmount).toBeUndefined();
       });
     });
   });

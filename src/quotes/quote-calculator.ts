@@ -18,9 +18,6 @@ const MAX_MONEY = new Prisma.Decimal('999999999999.99');
 const QUANTITY_PATTERN = /^\d{1,11}(\.\d{1,3})?$/;
 const DISCOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
 
-/** IGV siempre 0.00 en la Fase 5 (D5): configuración de impuestos llega en la Fase 10. */
-export const QUOTE_TAX_AMOUNT: Prisma.Decimal = new Prisma.Decimal(0);
-
 /**
  * Parsea y valida la cantidad de un ítem. Nunca confía en que el llamador
  * (DTO HTTP o input interno) ya la validó. Nunca usa Number()/parseFloat():
@@ -157,6 +154,50 @@ export function calculateTotal(
   const total = subtotal.minus(discountAmount).plus(taxAmount);
   assertMoneyWithinRange(total, 'total');
   return total;
+}
+
+/**
+ * Base imponible del IGV (Fase 10, Bloque C): taxableBase = subtotal -
+ * discountAmount. Nunca negativa en la práctica: assertDiscountWithinSubtotal
+ * ya garantiza discountAmount <= subtotal antes de que cualquier llamador
+ * invoque esto. Extraída como función propia (en vez de inline en cada
+ * llamador) porque tres sitios distintos la necesitan (creación de Quote,
+ * actualización comercial de Quote, creación directa de Sale) y debe ser
+ * exactamente la misma fórmula en los tres.
+ */
+export function calculateTaxableBase(
+  subtotal: Prisma.Decimal,
+  discountAmount: Prisma.Decimal,
+): Prisma.Decimal {
+  return subtotal.minus(discountAmount);
+}
+
+/**
+ * IGV a nivel de DOCUMENTO (Fase 10, Bloque C — Product.salePrice/
+ * lineTotal/subtotal siguen siendo SIEMPRE antes de impuesto; esta función
+ * nunca se invoca por ítem). taxEnabled=false -> 0.00 sin importar taxRate
+ * (nunca se lee ni se usa). taxEnabled=true -> ROUND(taxableBase * taxRate
+ * / 100, 2), redondeo ÚNICO HALF_UP (mismo criterio que calculateLineTotal:
+ * coincide con ROUND() de PostgreSQL, nunca el redondeo de punto flotante
+ * de JS). Pura: solo Prisma.Decimal, sin PrismaService/SettingsReader/
+ * inyección de Nest — única fuente de verdad reutilizada por Quotes y Sales
+ * (sale-calculator.ts la reexporta, mismo criterio que
+ * assertDiscountWithinConfiguredLimit).
+ */
+export function calculateTaxAmount(
+  taxableBase: Prisma.Decimal,
+  taxEnabled: boolean,
+  taxRate: Prisma.Decimal,
+): Prisma.Decimal {
+  if (!taxEnabled) {
+    return new Prisma.Decimal(0);
+  }
+  const taxAmount = taxableBase
+    .mul(taxRate)
+    .dividedBy(100)
+    .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  assertMoneyWithinRange(taxAmount, 'impuesto');
+  return taxAmount;
 }
 
 /**

@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma, QuoteStatus } from '@prisma/client';
 import {
-  QUOTE_TAX_AMOUNT,
   assertAcceptable,
   assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
@@ -11,6 +10,8 @@ import {
   buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
+  calculateTaxableBase,
+  calculateTaxAmount,
   calculateTotal,
   effectiveStatus,
   parseDiscountAmount,
@@ -294,11 +295,13 @@ describe('assertDiscountWithinConfiguredLimit (Fase 10, Bloque B)', () => {
 });
 
 describe('calculateTotal', () => {
-  it('subtotal - descuento + impuesto (impuesto siempre 0)', () => {
+  const ZERO_TAX = new Prisma.Decimal(0);
+
+  it('subtotal - descuento + impuesto (impuesto 0, IGV deshabilitado)', () => {
     const result = calculateTotal(
       new Prisma.Decimal('100.00'),
       new Prisma.Decimal('10.00'),
-      QUOTE_TAX_AMOUNT,
+      ZERO_TAX,
     );
     expect(result.toFixed(2)).toBe('90.00');
   });
@@ -307,7 +310,7 @@ describe('calculateTotal', () => {
     const result = calculateTotal(
       new Prisma.Decimal('50.00'),
       new Prisma.Decimal('0'),
-      QUOTE_TAX_AMOUNT,
+      ZERO_TAX,
     );
     expect(result.toFixed(2)).toBe('50.00');
   });
@@ -316,13 +319,146 @@ describe('calculateTotal', () => {
     const result = calculateTotal(
       new Prisma.Decimal('75.00'),
       new Prisma.Decimal('75.00'),
-      QUOTE_TAX_AMOUNT,
+      ZERO_TAX,
     );
     expect(result.toFixed(2)).toBe('0.00');
   });
 
-  it('QUOTE_TAX_AMOUNT siempre es 0.00', () => {
-    expect(QUOTE_TAX_AMOUNT.toFixed(2)).toBe('0.00');
+  it('con impuesto no-cero (Fase 10, Bloque C): subtotal - descuento + impuesto', () => {
+    const result = calculateTotal(
+      new Prisma.Decimal('100.00'),
+      new Prisma.Decimal('10.00'),
+      new Prisma.Decimal('16.20'),
+    );
+    expect(result.toFixed(2)).toBe('106.20');
+  });
+
+  it('invariante total + descuento = subtotal + impuesto', () => {
+    const subtotal = new Prisma.Decimal('100.00');
+    const discountAmount = new Prisma.Decimal('10.00');
+    const taxAmount = new Prisma.Decimal('16.20');
+    const total = calculateTotal(subtotal, discountAmount, taxAmount);
+    expect(total.plus(discountAmount).toFixed(2)).toBe(
+      subtotal.plus(taxAmount).toFixed(2),
+    );
+  });
+});
+
+describe('calculateTaxableBase (Fase 10, Bloque C)', () => {
+  it('subtotal - discountAmount', () => {
+    const result = calculateTaxableBase(
+      new Prisma.Decimal('100.00'),
+      new Prisma.Decimal('10.00'),
+    );
+    expect(result.toFixed(2)).toBe('90.00');
+  });
+
+  it('sin descuento: taxableBase = subtotal', () => {
+    const result = calculateTaxableBase(
+      new Prisma.Decimal('50.00'),
+      new Prisma.Decimal('0'),
+    );
+    expect(result.toFixed(2)).toBe('50.00');
+  });
+
+  it('descuento total: taxableBase = 0.00', () => {
+    const result = calculateTaxableBase(
+      new Prisma.Decimal('100.00'),
+      new Prisma.Decimal('100.00'),
+    );
+    expect(result.toFixed(2)).toBe('0.00');
+  });
+});
+
+describe('calculateTaxAmount (Fase 10, Bloque C)', () => {
+  it('taxEnabled=false -> 0.00 sin importar taxRate (18)', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('100.00'),
+      false,
+      new Prisma.Decimal('18.00'),
+    );
+    expect(result.toFixed(2)).toBe('0.00');
+  });
+
+  it('taxEnabled=false -> 0.00 con taxRate=0', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('100.00'),
+      false,
+      new Prisma.Decimal('0.00'),
+    );
+    expect(result.toFixed(2)).toBe('0.00');
+  });
+
+  it('taxEnabled=false -> 0.00 con taxRate=99.99', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('100.00'),
+      false,
+      new Prisma.Decimal('99.99'),
+    );
+    expect(result.toFixed(2)).toBe('0.00');
+  });
+
+  it('taxEnabled=true, 18% normal', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('100.00'),
+      true,
+      new Prisma.Decimal('18.00'),
+    );
+    expect(result.toFixed(2)).toBe('18.00');
+  });
+
+  it('taxEnabled=true, taxableBase=0 (descuento total) -> 0.00, sin anomalía', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('0.00'),
+      true,
+      new Prisma.Decimal('18.00'),
+    );
+    expect(result.toFixed(2)).toBe('0.00');
+  });
+
+  it('taxEnabled=true, taxRate=100.00', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('50.00'),
+      true,
+      new Prisma.Decimal('100.00'),
+    );
+    expect(result.toFixed(2)).toBe('50.00');
+  });
+
+  it('redondeo: caso claramente por debajo de la mitad (3.333 -> 3.33)', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('10.00'),
+      true,
+      new Prisma.Decimal('33.33'),
+    );
+    expect(result.toFixed(2)).toBe('3.33');
+  });
+
+  it("redondeo: caso EXACTAMENTE en la mitad (2.005 -> 2.01, HALF_UP nunca banker's rounding)", () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('50.00'),
+      true,
+      new Prisma.Decimal('4.01'),
+    );
+    expect(result.toFixed(2)).toBe('2.01');
+  });
+
+  it('redondeo: caso claramente por encima de la mitad, con acarreo (5.9994 -> 6.00)', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('33.33'),
+      true,
+      new Prisma.Decimal('18.00'),
+    );
+    expect(result.toFixed(2)).toBe('6.00');
+  });
+
+  it('nunca usa Number()/parseFloat(): resultado sigue siendo instancia de Prisma.Decimal', () => {
+    const result = calculateTaxAmount(
+      new Prisma.Decimal('100.00'),
+      true,
+      new Prisma.Decimal('18.00'),
+    );
+    expect(result).toBeInstanceOf(Prisma.Decimal);
   });
 });
 

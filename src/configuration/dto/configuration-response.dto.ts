@@ -30,14 +30,14 @@ export class ConfigurationResponseDto {
 
   @ApiProperty({
     description:
-      'Bloque C: expuesto en modo lectura con su valor semilla; aún no editable por PATCH en el Bloque A.',
+      'Activa/desactiva el cálculo de IGV a nivel de documento para cotizaciones y ventas DIRECTAS nuevas o comercialmente modificadas. Editable por PATCH desde el Bloque C. IGV interno del sistema, no facturación electrónica/SUNAT/PLE.',
   })
   taxEnabled!: boolean;
 
   @ApiProperty({
     example: '18.00',
     description:
-      'Bloque C: expuesto en modo lectura con su valor semilla; aún no editable por PATCH en el Bloque A.',
+      'Tasa de IGV aplicada cuando taxEnabled es true. Editable por PATCH desde el Bloque C; el par resultante debe cumplir taxEnabled=false o taxRate > 0. Cambiarla nunca recalcula cotizaciones/ventas ya existentes.',
   })
   taxRate!: string;
 

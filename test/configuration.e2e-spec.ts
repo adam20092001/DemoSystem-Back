@@ -333,23 +333,13 @@ describe('Configuration (e2e)', () => {
       expect(response.status).toBe(400);
     });
 
-    // quoteValidityDays/maxDiscountPercent se desbloquearon en el Bloque B
-    // (Fase 10): su cobertura de "editable ahora, tax sigue bloqueado" vive
-    // en test/configuration-commercial.e2e-spec.ts. Aquí solo permanecen
-    // taxEnabled/taxRate, que siguen bloqueados hasta el Bloque C.
-    it.each([
-      ['taxEnabled', true],
-      ['taxRate', '10.00'],
-    ])(
-      '%s en el body -> 400 (aún no editable hasta el Bloque C)',
-      async (field, value) => {
-        const response = await request(app.getHttpServer())
-          .patch('/api/v1/configuration')
-          .set('Cookie', adminCookie)
-          .send({ [field]: value });
-        expect(response.status).toBe(400);
-      },
-    );
+    // quoteValidityDays/maxDiscountPercent se desbloquearon en el Bloque B;
+    // taxEnabled/taxRate se desbloquearon en el Bloque C (Fase 10): con
+    // esto los 10 campos de CompanySettings quedan editables y no queda
+    // ningún campo "aún bloqueado" que probar en esta suite de fundamento.
+    // La cobertura positiva de descuento/vigencia vive en
+    // test/configuration-commercial.e2e-spec.ts; la de IGV vive en
+    // test/configuration-tax.e2e-spec.ts.
   });
 
   describe('PATCH /configuration — actualización real', () => {

@@ -18,8 +18,12 @@ import { UpdateConfigurationInput } from './types/update-configuration.input';
 /** ISO 4217: exactamente 3 letras mayúsculas. */
 const CURRENCY_CODE_PATTERN = /^[A-Z]{3}$/;
 
-/** Decimal(5,2) no negativo, hasta 3 dígitos enteros (cubre "100.00"), máximo 2 decimales. */
-const MAX_DISCOUNT_PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
+/**
+ * Decimal(5,2) no negativo, hasta 3 dígitos enteros (cubre "100.00"),
+ * máximo 2 decimales. Compartido por maxDiscountPercent (Bloque B) y
+ * taxRate (Bloque C): mismo shape de columna, nunca un segundo formato.
+ */
+const PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
 
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
@@ -78,10 +82,9 @@ export class ConfigurationService {
 
   /**
    * Bloque A: campos de identidad y moneda. Bloque B (Fase 10): se agregan
-   * quoteValidityDays/maxDiscountPercent. taxEnabled/taxRate nunca llegan
-   * aquí — el DTO del controller no los declara y el ValidationPipe global
-   * (forbidNonWhitelisted) ya rechazó la petición con 400 antes de este
-   * punto si el cliente los envió.
+   * quoteValidityDays/maxDiscountPercent. Bloque C: se agregan taxEnabled/
+   * taxRate — con esto los 10 campos editables aprobados quedan activos,
+   * ninguno permanece bloqueado.
    *
    * Lee, compara y (si corresponde) actualiza + audita dentro de la misma
    * transacción: un fallo de auditoría revierte la actualización. Un PATCH
@@ -91,14 +94,21 @@ export class ConfigurationService {
    *
    * changedFields/oldValues/newValues se construyen aquí mismo, campo por
    * campo, siempre a partir de la whitelist cerrada de los 10 campos
-   * editables (8 del Bloque A + 2 del Bloque B) — nunca del body crudo de
-   * la petición. El saneador de auditoría (sanitizeAuditMetadata) impone
-   * además, como defensa independiente, que ninguna clave sobreviva dentro
-   * de oldValues/newValues si no figura en changedFields. Cambiar estos
-   * valores nunca modifica cotizaciones/ventas ya existentes (sin backfill,
-   * sin recálculo al leer, sin actualización programada): solo afecta
-   * operaciones comerciales nuevas o efectivamente modificadas a partir de
-   * este momento (ver QuotesService/SalesService).
+   * editables (8 del Bloque A + 2 del Bloque B + 2 del Bloque C) — nunca
+   * del body crudo de la petición. El saneador de auditoría
+   * (sanitizeAuditMetadata) impone además, como defensa independiente, que
+   * ninguna clave sobreviva dentro de oldValues/newValues si no figura en
+   * changedFields. Cambiar estos valores nunca modifica cotizaciones/ventas
+   * ya existentes (sin backfill, sin recálculo al leer, sin actualización
+   * programada): solo afecta operaciones comerciales nuevas o
+   * efectivamente modificadas a partir de este momento (ver
+   * QuotesService/SalesService).
+   *
+   * Invariante cruzada IGV (§8 del plan aprobado): el estado RESULTANTE
+   * debe cumplir taxEnabled=false, o taxRate > 0 — evaluada sobre el par
+   * final (existente + lo enviado), nunca solo sobre los campos presentes
+   * en el body. Se valida ANTES de escribir nada; si falla, no hay UPDATE
+   * ni auditoría.
    */
   async updateConfiguration(
     input: UpdateConfigurationInput,
@@ -115,10 +125,12 @@ export class ConfigurationService {
       input.currencyCode !== undefined ||
       input.currencySymbol !== undefined ||
       input.quoteValidityDays !== undefined ||
-      input.maxDiscountPercent !== undefined;
+      input.maxDiscountPercent !== undefined ||
+      input.taxEnabled !== undefined ||
+      input.taxRate !== undefined;
     if (!hasAnyField) {
       throw new BadRequestException(
-        'Debe proveerse al menos un campo para actualizar: businessName, tradeName, taxId, address, phone, email, currencyCode, currencySymbol, quoteValidityDays o maxDiscountPercent',
+        'Debe proveerse al menos un campo para actualizar: businessName, tradeName, taxId, address, phone, email, currencyCode, currencySymbol, quoteValidityDays, maxDiscountPercent, taxEnabled o taxRate',
       );
     }
 
@@ -252,7 +264,7 @@ export class ConfigurationService {
       }
 
       if (input.maxDiscountPercent !== undefined) {
-        if (!MAX_DISCOUNT_PERCENT_PATTERN.test(input.maxDiscountPercent)) {
+        if (!PERCENT_PATTERN.test(input.maxDiscountPercent)) {
           throw new BadRequestException(
             'maxDiscountPercent debe ser un decimal no negativo, como texto, con máximo 2 decimales',
           );
@@ -276,6 +288,55 @@ export class ConfigurationService {
             maxDiscountPercent.toFixed(2),
           );
         }
+      }
+
+      // resultingTaxEnabled/resultingTaxRate: arrancan en el valor YA
+      // persistido y se actualizan solo si el campo correspondiente viene
+      // en el body — así la invariante cruzada de abajo siempre evalúa el
+      // par FINAL resultante, nunca solo los campos presentes en el PATCH.
+      let resultingTaxEnabled = existing.taxEnabled;
+      let resultingTaxRate = existing.taxRate;
+
+      if (input.taxEnabled !== undefined) {
+        resultingTaxEnabled = input.taxEnabled;
+        if (input.taxEnabled !== existing.taxEnabled) {
+          data.taxEnabled = input.taxEnabled;
+          markChanged('taxEnabled', existing.taxEnabled, input.taxEnabled);
+        }
+      }
+
+      if (input.taxRate !== undefined) {
+        if (!PERCENT_PATTERN.test(input.taxRate)) {
+          throw new BadRequestException(
+            'taxRate debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+          );
+        }
+        const taxRate = new Prisma.Decimal(input.taxRate);
+        if (taxRate.lessThan(0) || taxRate.greaterThan(100)) {
+          throw new BadRequestException(
+            'taxRate debe estar entre 0.00 y 100.00',
+          );
+        }
+        resultingTaxRate = taxRate;
+        if (!taxRate.equals(existing.taxRate)) {
+          data.taxRate = taxRate;
+          // Auditoría siempre como string de 2 decimales fijos (mismo
+          // criterio que maxDiscountPercent), nunca el Decimal crudo.
+          markChanged(
+            'taxRate',
+            existing.taxRate.toFixed(2),
+            taxRate.toFixed(2),
+          );
+        }
+      }
+
+      // Invariante cruzada IGV (§8 del plan aprobado): taxEnabled=true
+      // exige taxRate > 0 en el estado RESULTANTE. Se valida antes de
+      // escribir nada; un rechazo aquí no genera UPDATE ni auditoría.
+      if (resultingTaxEnabled && resultingTaxRate.lessThanOrEqualTo(0)) {
+        throw new BadRequestException(
+          'taxRate debe ser mayor que 0 cuando taxEnabled es true',
+        );
       }
 
       if (changedFields.length === 0) {

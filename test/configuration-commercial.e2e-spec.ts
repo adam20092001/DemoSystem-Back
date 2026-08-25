@@ -275,15 +275,6 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
         });
       }
 
-      const finalConfigurationAuditCount = await prisma.auditLog.count({
-        where: { action: AuditAction.CONFIGURATION_UPDATED },
-      });
-      if (finalConfigurationAuditCount !== configurationAuditBaselineCount) {
-        throw new Error(
-          `Residuo de auditoría CONFIGURATION_UPDATED no controlado: esperado ${configurationAuditBaselineCount}, encontrado ${finalConfigurationAuditCount}`,
-        );
-      }
-
       const allSaleIds = [...createdSaleIds];
       if (allSaleIds.length > 0) {
         // AccountingEntry: se identifican por (sourceType=SALE, sourceId in
@@ -388,6 +379,20 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
         await prisma.customer.deleteMany({
           where: { id: { in: createdCustomerIds } },
         });
+      }
+
+      // Verificaciones finales, DESPUÉS de que toda la limpieza física ya se
+      // ejecutó: un throw aquí nunca deja fixtures propios sin borrar (a
+      // diferencia de verificar esto antes de la limpieza, que saltaría el
+      // resto del bloque try en cuanto lanzara — defecto real detectado y
+      // corregido durante la validación del Bloque C).
+      const finalConfigurationAuditCount = await prisma.auditLog.count({
+        where: { action: AuditAction.CONFIGURATION_UPDATED },
+      });
+      if (finalConfigurationAuditCount !== configurationAuditBaselineCount) {
+        throw new Error(
+          `Residuo de auditoría CONFIGURATION_UPDATED no controlado: esperado ${configurationAuditBaselineCount}, encontrado ${finalConfigurationAuditCount}`,
+        );
       }
 
       const settingsCount = await prisma.companySettings.count();
@@ -657,13 +662,20 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
     });
   });
 
-  describe('§42 — Campos de IGV siguen bloqueados; sin activación de impuesto', () => {
-    it('PATCH taxEnabled/taxRate -> 400; Quote/Sale nuevas mantienen taxAmount 0.00', async () => {
-      const rejectTaxEnabled = await patchConfiguration({ taxEnabled: true });
-      expect(rejectTaxEnabled.status).toBe(400);
-
-      const rejectTaxRate = await patchConfiguration({ taxRate: '10.00' });
-      expect(rejectTaxRate.status).toBe(400);
+  describe('§42 — regresión: sin tocar configuración de IGV, Quote/Sale nuevas mantienen taxAmount 0.00', () => {
+    // taxEnabled/taxRate se desbloquearon en el Bloque C (Fase 10): la
+    // cobertura de "PATCH los rechaza" ya no aplica aquí (esa aserción
+    // ahora sería falsa y, peor, mutaría config real y corrompería el
+    // resto de la corrida — exactamente el defecto detectado y corregido
+    // durante la validación del Bloque C). Esa cobertura positiva vive en
+    // test/configuration-tax.e2e-spec.ts. Esta suite (Bloque B) solo
+    // verifica que, en su propio alcance (sin tocar taxEnabled/taxRate),
+    // el comportamiento por defecto (impuesto deshabilitado) se preserva.
+    it('Quote/Sale nuevas mantienen taxAmount 0.00 cuando esta suite nunca toca taxEnabled/taxRate', async () => {
+      const current = await request(app.getHttpServer())
+        .get('/api/v1/configuration')
+        .set('Cookie', adminCookie);
+      expect((current.body as SafeConfigurationBody).taxEnabled).toBe(false);
 
       const quote = await createQuote({
         customerId,

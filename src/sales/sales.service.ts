@@ -57,12 +57,13 @@ import {
   toSafeSaleListItem,
 } from './mappers/sale.mapper';
 import {
-  SALE_TAX_AMOUNT,
   assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertQuantityAllowedForUnit,
   calculateLineTotal,
   calculateSubtotal,
+  calculateTaxableBase,
+  calculateTaxAmount,
   calculateTotal,
   deriveDeliveryStatus,
   deriveSalePaymentSummary,
@@ -262,7 +263,16 @@ export class SalesService {
         subtotal,
         settings.maxDiscountPercent,
       );
-      const total = calculateTotal(subtotal, discountAmount, SALE_TAX_AMOUNT);
+      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
+      // (subtotal - descuento), con el mismo snapshot de configuración ya
+      // leído arriba — nunca una segunda lectura de SettingsReader.
+      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
+      const taxAmount = calculateTaxAmount(
+        taxableBase,
+        settings.taxEnabled,
+        settings.taxRate,
+      );
+      const total = calculateTotal(subtotal, discountAmount, taxAmount);
 
       if (
         initialPayment !== undefined &&
@@ -302,7 +312,7 @@ export class SalesService {
           sellerId: input.actorUserId,
           subtotal,
           discountAmount,
-          taxAmount: SALE_TAX_AMOUNT,
+          taxAmount,
           total,
           paidAmount,
           balanceDue,
@@ -335,7 +345,7 @@ export class SalesService {
         saleNumber: number,
         subtotal,
         discountAmount,
-        taxAmount: SALE_TAX_AMOUNT,
+        taxAmount,
         total,
         postedAt: confirmedAt,
         actorUserId: input.actorUserId,

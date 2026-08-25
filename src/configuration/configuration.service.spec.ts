@@ -670,10 +670,254 @@ describe('ConfigurationService', () => {
         }),
       );
     });
+  });
 
-    // Nota: taxEnabled/taxRate no pueden probarse aquí como "rechazados por
-    // el servicio" porque UpdateConfigurationInput ni siquiera los declara
-    // (TypeScript ya lo impide en tiempo de compilación); la prueba real de
-    // "siguen bloqueados" vive en el E2E dedicado de Bloque B (forbidNonWhitelisted).
+  describe('updateConfiguration — Bloque C (taxEnabled/taxRate)', () => {
+    it('ADMIN puede activar taxEnabled y registra CONFIGURATION_UPDATED con boolean old/new', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: true }),
+      );
+
+      const result = await service.updateConfiguration({
+        taxEnabled: true,
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.taxEnabled).toBe(true);
+      const updateArgs = prisma.tx.companySettings.update.mock.calls[0][0];
+      expect(updateArgs.data).toEqual({ taxEnabled: true });
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.CONFIGURATION_UPDATED,
+          metadata: {
+            changedFields: ['taxEnabled'],
+            oldValues: { taxEnabled: false },
+            newValues: { taxEnabled: true },
+          },
+        }),
+      );
+    });
+
+    it('rechaza activar taxEnabled cuando el taxRate YA vigente es 0.00 (invariante sobre el estado resultante)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('0.00'),
+        }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxEnabled: true,
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('rechaza poner taxRate=0.00 cuando taxEnabled YA está activo (invariante sobre el estado resultante)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '0.00',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+    });
+
+    it('permite desactivar taxEnabled Y poner taxRate=0.00 en el mismo PATCH', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('0.00'),
+        }),
+      );
+
+      const result = await service.updateConfiguration({
+        taxEnabled: false,
+        taxRate: '0.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.taxEnabled).toBe(false);
+      expect(result.taxRate).toBe('0.00');
+    });
+
+    it('permite activar taxEnabled cuando el taxRate YA vigente es > 0 (sin tocar taxRate en el mismo PATCH)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: true }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxEnabled: true,
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('acepta taxRate=100.00 cuando taxEnabled resultante es true', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ taxRate: new Prisma.Decimal('100.00') }),
+      );
+
+      const result = await service.updateConfiguration({
+        taxRate: '100.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.taxRate).toBe('100.00');
+    });
+
+    it('rechaza taxRate negativo', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: false }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '-1.00',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rechaza taxRate > 100', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: false }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '100.01',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rechaza taxRate con formato inválido (más de 2 decimales)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: false }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '18.123',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('acepta taxRate=0.00 cuando taxEnabled resultante (ya vigente) es false', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ taxRate: new Prisma.Decimal('0.00') }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '0.00',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('taxEnabled no-op (mismo valor ya vigente): sin update ni auditoría', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ taxEnabled: false }),
+      );
+
+      const result = await service.updateConfiguration({
+        taxEnabled: false,
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.taxEnabled).toBe(false);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('taxRate no-op (mismo valor normalizado ya vigente): sin update ni auditoría', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ taxRate: new Prisma.Decimal('18.00') }),
+      );
+
+      const result = await service.updateConfiguration({
+        taxRate: '18.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.taxRate).toBe('18.00');
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('rechazo por invariante cruzada no genera UPDATE ni auditoría (ambos verificados)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        }),
+      );
+
+      await expect(
+        service.updateConfiguration({
+          taxRate: '0.00',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
   });
 });

@@ -124,13 +124,15 @@ export function setupSwagger(app: INestApplication): boolean {
     .addTag(
       'Configuration',
       'Configuración global de la empresa: fila singleton única (identidad, ' +
-        'moneda, vigencia por defecto de cotización y descuento máximo ' +
-        'configurado; IGV se expone en modo lectura y se habilita por PATCH ' +
-        'en una fase posterior). GET para ADMIN y MANAGEMENT; PATCH solo ' +
-        'para ADMIN. Cambiar quoteValidityDays/maxDiscountPercent nunca ' +
-        'modifica cotizaciones o ventas ya existentes: solo aplica a ' +
-        'operaciones comerciales nuevas o efectivamente modificadas desde ' +
-        'ese momento.',
+        'moneda, vigencia por defecto de cotización, descuento máximo ' +
+        'configurado e IGV interno del sistema). GET para ADMIN y ' +
+        'MANAGEMENT; PATCH solo para ADMIN. taxEnabled/taxRate calculan IGV ' +
+        'a nivel de documento sobre precios que siempre se registran ANTES ' +
+        'de impuesto (Product.salePrice); NO es facturación electrónica, ' +
+        'NO es SUNAT, NO es PLE. Cambiar quoteValidityDays/' +
+        'maxDiscountPercent/taxEnabled/taxRate nunca modifica cotizaciones ' +
+        'o ventas ya existentes: solo aplica a operaciones comerciales ' +
+        'nuevas o efectivamente modificadas desde ese momento.',
     )
     .build();
 

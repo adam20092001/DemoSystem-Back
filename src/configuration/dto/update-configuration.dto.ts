@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEmail,
   IsInt,
   IsOptional,
@@ -17,9 +18,12 @@ import {
  * (quote-calculator.ts): decimal no negativo como texto, sin notación
  * científica, máximo 2 decimales (Decimal(5,2)). Hasta 3 dígitos enteros
  * cubre el máximo válido "100.00"; el rango 0.00-100.00 lo revalida
- * ConfigurationService (no lo expresa el patrón).
+ * ConfigurationService (no lo expresa el patrón). Compartido por
+ * maxDiscountPercent (Bloque B) y taxRate (Bloque C): ambos son el mismo
+ * tipo de columna (Decimal(5,2), 0.00-100.00) — nunca se inventa un segundo
+ * formato de entrada Decimal para el mismo shape.
  */
-export const MAX_DISCOUNT_PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
+export const PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
 
 /**
  * Recorta espacios perimetrales antes de que @IsEmail() evalúe el valor
@@ -33,11 +37,9 @@ function trimEmail({ value }: { value: unknown }): unknown {
 
 /**
  * Bloque A: campos de identidad y moneda. Bloque B (Fase 10): se agregan
- * quoteValidityDays y maxDiscountPercent. taxEnabled/taxRate NO se declaran
- * aquí a propósito — con forbidNonWhitelisted:true (ValidationPipe global),
- * enviarlos en el body produce 400 automáticamente, sin necesidad de una
- * validación manual adicional en el controller/servicio. Se habilitan en
- * el Bloque C.
+ * quoteValidityDays y maxDiscountPercent. Bloque C: se agregan taxEnabled y
+ * taxRate — con esto quedan activos los 10 campos editables aprobados;
+ * ningún campo de CompanySettings permanece bloqueado.
  *
  * Los campos `| null` aceptan null explícito (limpiar el valor existente)
  * además de undefined (no tocar): @IsOptional() de class-validator omite el
@@ -144,9 +146,32 @@ export class UpdateConfigurationDto {
   })
   @IsOptional()
   @IsString()
-  @Matches(MAX_DISCOUNT_PERCENT_PATTERN, {
+  @Matches(PERCENT_PATTERN, {
     message:
       'maxDiscountPercent debe ser un decimal no negativo, como texto, con máximo 2 decimales',
   })
   maxDiscountPercent?: string;
+
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      'Activa/desactiva el cálculo de IGV a nivel de documento. El par (taxEnabled, taxRate) resultante debe satisfacer: si taxEnabled=true, taxRate > 0. Nunca afecta cotizaciones/ventas ya existentes.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  taxEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    type: String,
+    example: '18.00',
+    description:
+      'Decimal no negativo, como texto, entre "0.00" y "100.00", máximo 2 decimales (mismo formato que maxDiscountPercent). Si taxEnabled resultante es true, debe ser > 0.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(PERCENT_PATTERN, {
+    message:
+      'taxRate debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+  })
+  taxRate?: string;
 }

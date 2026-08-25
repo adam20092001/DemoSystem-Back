@@ -1,6 +1,5 @@
 import { Prisma, SaleDeliveryStatus, SalePaymentStatus } from '@prisma/client';
 import {
-  SALE_TAX_AMOUNT,
   assertDiscountWithinSubtotal,
   assertQuantityAllowedForUnit,
   calculateLineTotal,
@@ -11,6 +10,8 @@ import {
   parseDiscountAmount,
   parseQuantity,
 } from './sale-calculator';
+
+const ZERO_TAX = new Prisma.Decimal(0);
 
 describe('sale-calculator (reexport de las primitivas Decimal de quote-calculator)', () => {
   describe('parseQuantity', () => {
@@ -112,7 +113,7 @@ describe('sale-calculator (reexport de las primitivas Decimal de quote-calculato
       const total = calculateTotal(
         subtotal,
         new Prisma.Decimal('0.00'),
-        SALE_TAX_AMOUNT,
+        ZERO_TAX,
       );
       expect(total.toFixed(2)).toBe('50.00');
     });
@@ -120,7 +121,7 @@ describe('sale-calculator (reexport de las primitivas Decimal de quote-calculato
     it('discount = subtotal -> total = 0.00', () => {
       const subtotal = new Prisma.Decimal('20.00');
       assertDiscountWithinSubtotal(subtotal, subtotal);
-      const total = calculateTotal(subtotal, subtotal, SALE_TAX_AMOUNT);
+      const total = calculateTotal(subtotal, subtotal, ZERO_TAX);
       expect(total.toFixed(2)).toBe('0.00');
     });
 
@@ -131,12 +132,6 @@ describe('sale-calculator (reexport de las primitivas Decimal de quote-calculato
           new Prisma.Decimal('10.00'),
         ),
       ).toThrow();
-    });
-  });
-
-  describe('SALE_TAX_AMOUNT', () => {
-    it('siempre 0.00', () => {
-      expect(SALE_TAX_AMOUNT.toFixed(2)).toBe('0.00');
     });
   });
 

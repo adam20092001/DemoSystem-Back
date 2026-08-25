@@ -39,12 +39,14 @@ export class ConfigurationController {
 
   @ApiOperation({
     summary:
-      'Actualizar la configuración de la empresa (identidad, moneda, vigencia de cotización y descuento máximo en este bloque)',
+      'Actualizar la configuración de la empresa (identidad, moneda, vigencia de cotización, descuento máximo e IGV)',
+    description:
+      'Con este bloque los 10 campos de CompanySettings quedan editables: ningún campo permanece bloqueado. taxEnabled/taxRate controlan el IGV interno del sistema (nunca facturación electrónica/SUNAT/PLE); si taxEnabled resultante es true, taxRate resultante debe ser > 0.',
   })
   @ApiOkResponse({ type: ConfigurationResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload vacío, campo en blanco/inválido, o taxEnabled/taxRate presentes (aún no editables en este bloque).',
+      'Payload vacío, campo en blanco/inválido, o el par (taxEnabled, taxRate) resultante viola la invariante (taxEnabled=true exige taxRate > 0).',
   })
   @Roles(RoleName.ADMIN)
   @Patch()
@@ -64,6 +66,8 @@ export class ConfigurationController {
       currencySymbol: dto.currencySymbol,
       quoteValidityDays: dto.quoteValidityDays,
       maxDiscountPercent: dto.maxDiscountPercent,
+      taxEnabled: dto.taxEnabled,
+      taxRate: dto.taxRate,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
       requesterRole: actor.role,

@@ -5,16 +5,19 @@ import { Prisma, SaleDeliveryStatus, SalePaymentStatus } from '@prisma/client';
  * Reutiliza las primitivas Decimal PURAS de quote-calculator.ts
  * (parseQuantity/parseDiscountAmount/assertQuantityAllowedForUnit/
  * calculateLineTotal/calculateSubtotal/assertDiscountWithinSubtotal/
- * assertDiscountWithinConfiguredLimit/calculateTotal) en vez de
- * duplicarlas: ninguna depende de QuoteStatus ni de ningún estado propio de
- * Cotizaciones — son aritmética Decimal(14,2)/Decimal(14,3) con las mismas
- * reglas de redondeo (HALF_UP) y los mismos patrones textuales estrictos
- * exigidos para Ventas (Bloque B, Fase 6; assertDiscountWithinConfiguredLimit
- * se agrega en la Fase 10, Bloque B, para el descuento máximo configurado en
- * la venta DIRECTA). No se modifica quote-calculator.ts. Duplicarlas aquí
- * arriesgaría que ambas fases divergieran silenciosamente en el redondeo
- * comercial; reexportarlas mantiene una única fuente de verdad para "cómo
- * se calcula una línea"/"cómo se limita un descuento".
+ * assertDiscountWithinConfiguredLimit/calculateTaxableBase/
+ * calculateTaxAmount/calculateTotal) en vez de duplicarlas: ninguna depende
+ * de QuoteStatus ni de ningún estado propio de Cotizaciones — son
+ * aritmética Decimal(14,2)/Decimal(14,3) con las mismas reglas de redondeo
+ * (HALF_UP) y los mismos patrones textuales estrictos exigidos para Ventas
+ * (Bloque B, Fase 6; assertDiscountWithinConfiguredLimit se agrega en la
+ * Fase 10, Bloque B, para el descuento máximo configurado en la venta
+ * DIRECTA; calculateTaxableBase/calculateTaxAmount se agregan en la Fase
+ * 10, Bloque C, para el IGV a nivel de documento en la venta DIRECTA). No
+ * se modifica quote-calculator.ts. Duplicarlas aquí arriesgaría que ambas
+ * fases divergieran silenciosamente en el redondeo comercial; reexportarlas
+ * mantiene una única fuente de verdad para "cómo se calcula una línea"/
+ * "cómo se limita un descuento"/"cómo se calcula el impuesto".
  * effectiveStatus()/assertEditable()/assertAcceptable()/assertRejectable()
  * de quote-calculator.ts SÍ son específicos de QuoteStatus y
  * deliberadamente no se reutilizan aquí.
@@ -27,11 +30,10 @@ export {
   calculateSubtotal,
   assertDiscountWithinSubtotal,
   assertDiscountWithinConfiguredLimit,
+  calculateTaxableBase,
+  calculateTaxAmount,
   calculateTotal,
 } from '../quotes/quote-calculator';
-
-/** IGV siempre 0.00 en la Fase 6 (mismo criterio D5 heredado de Quotes/Fase 5). */
-export const SALE_TAX_AMOUNT: Prisma.Decimal = new Prisma.Decimal(0);
 
 export interface SalePaymentSummary {
   paymentStatus: SalePaymentStatus;

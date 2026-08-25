@@ -36,7 +36,6 @@ import {
   toSafeQuoteListItem,
 } from './mappers/quote.mapper';
 import {
-  QUOTE_TAX_AMOUNT,
   assertAcceptable,
   assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
@@ -46,6 +45,8 @@ import {
   buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
+  calculateTaxableBase,
+  calculateTaxAmount,
   calculateTotal,
   effectiveStatus,
   parseDiscountAmount,
@@ -89,6 +90,7 @@ interface LockedQuoteRow {
   expirationDate: Date;
   subtotal: Prisma.Decimal;
   discountAmount: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
 }
 
 /**
@@ -188,7 +190,16 @@ export class QuotesService {
         subtotal,
         settings.maxDiscountPercent,
       );
-      const total = calculateTotal(subtotal, discountAmount, QUOTE_TAX_AMOUNT);
+      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
+      // (subtotal - descuento), nunca extraído de Product.salePrice ni
+      // aplicado por ítem. taxEnabled=false -> 0.00 sin importar taxRate.
+      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
+      const taxAmount = calculateTaxAmount(
+        taxableBase,
+        settings.taxEnabled,
+        settings.taxRate,
+      );
+      const total = calculateTotal(subtotal, discountAmount, taxAmount);
 
       const number = await this.documentSequenceService.next(
         tx,
@@ -210,7 +221,7 @@ export class QuotesService {
           expirationDate: toPrismaDate(resolvedExpirationDate),
           subtotal,
           discountAmount,
-          taxAmount: QUOTE_TAX_AMOUNT,
+          taxAmount,
           total,
           notes,
           items: {
@@ -374,20 +385,37 @@ export class QuotesService {
         parsedItems !== undefined ||
         (discountAmount !== undefined &&
           !discountAmount.equals(existing.discountAmount));
+
+      let taxAmount: Prisma.Decimal;
       if (affectsCommercialTotals) {
+        // Fase 10, Bloque C (§20 del plan aprobado): una modificación
+        // comercial siempre recalcula subtotal/descuento/impuesto/total con
+        // la configuración VIGENTE — nunca preserva parcialmente el
+        // impuesto histórico cuando el subtotal/descuento cambian. Una sola
+        // lectura de SettingsReader para todo (máximo configurado + IGV).
         const settings = await this.settingsReader.getCurrent(tx);
         assertDiscountWithinConfiguredLimit(
           effectiveDiscount,
           subtotal,
           settings.maxDiscountPercent,
         );
+        const taxableBase = calculateTaxableBase(subtotal, effectiveDiscount);
+        taxAmount = calculateTaxAmount(
+          taxableBase,
+          settings.taxEnabled,
+          settings.taxRate,
+        );
+        data.taxAmount = taxAmount;
+        updatedFields.push('taxAmount');
+      } else {
+        // No comercial: el impuesto histórico se preserva EXACTO, sin
+        // releer configuración ni recalcular — aunque taxEnabled/taxRate
+        // hayan cambiado desde que la cotización se creó (§19 del plan
+        // aprobado, previene deriva histórica retroactiva).
+        taxAmount = existing.taxAmount;
       }
 
-      const total = calculateTotal(
-        subtotal,
-        effectiveDiscount,
-        QUOTE_TAX_AMOUNT,
-      );
+      const total = calculateTotal(subtotal, effectiveDiscount, taxAmount);
 
       if (discountAmount !== undefined) {
         data.discountAmount = discountAmount;
@@ -609,7 +637,8 @@ export class QuotesService {
         issue_date       AS "issueDate",
         expiration_date  AS "expirationDate",
         subtotal,
-        discount_amount  AS "discountAmount"
+        discount_amount  AS "discountAmount",
+        tax_amount       AS "taxAmount"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE
