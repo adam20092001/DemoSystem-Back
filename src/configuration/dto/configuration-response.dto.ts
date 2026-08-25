@@ -44,14 +44,14 @@ export class ConfigurationResponseDto {
   @ApiProperty({
     example: 15,
     description:
-      'Bloque B: expuesto en modo lectura con su valor semilla; aún no editable por PATCH en el Bloque A.',
+      'Vigencia por defecto (días calendario) de una cotización nueva sin expirationDate explícito. Editable por PATCH desde el Bloque B; cambiarlo nunca modifica cotizaciones ya existentes.',
   })
   quoteValidityDays!: number;
 
   @ApiProperty({
     example: '100.00',
     description:
-      'Bloque B: expuesto en modo lectura con su valor semilla; aún no editable por PATCH en el Bloque A.',
+      'Descuento máximo permitido (porcentaje) para cotizaciones/ventas nuevas o comercialmente modificadas. Editable por PATCH desde el Bloque B; cambiarlo nunca revalida ni recalcula documentos ya existentes.',
   })
   maxDiscountPercent!: string;
 

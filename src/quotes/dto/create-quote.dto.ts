@@ -60,14 +60,17 @@ export class CreateQuoteDto {
   @IsUUID()
   customerId!: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     type: String,
     example: '2026-04-15',
     description:
-      'Fecha exacta YYYY-MM-DD (calendario real). Debe ser >= la fecha de emisión (hoy, America/Lima).',
+      'Fecha exacta YYYY-MM-DD (calendario real). Debe ser >= la fecha de emisión (hoy, America/Lima). ' +
+      'Si se omite (Fase 10, Bloque B), se calcula automáticamente como issueDate + ' +
+      'CompanySettings.quoteValidityDays (días calendario), configurado vía PATCH /configuration.',
   })
+  @IsOptional()
   @IsDateOnly()
-  expirationDate!: string;
+  expirationDate?: string;
 
   @ApiPropertyOptional({
     type: String,

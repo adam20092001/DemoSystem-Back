@@ -3,6 +3,7 @@ import { Prisma, QuoteStatus } from '@prisma/client';
 import {
   QUOTE_TAX_AMOUNT,
   assertAcceptable,
+  assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertEditable,
   assertQuantityAllowedForUnit,
@@ -199,6 +200,94 @@ describe('assertDiscountWithinSubtotal', () => {
       assertDiscountWithinSubtotal(
         new Prisma.Decimal('100.01'),
         new Prisma.Decimal('100.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+});
+
+describe('assertDiscountWithinConfiguredLimit (Fase 10, Bloque B)', () => {
+  it('max = 0, descuento 0: no lanza', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('0'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('0.00'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('max = 0, descuento > 0: BadRequestException', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('0.01'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('0.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('max = 10%, descuento exactamente en el límite: no lanza', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('10.00'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('10.00'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('max = 10%, descuento apenas por encima del límite: BadRequestException', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('10.01'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('10.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('max = 100%, descuento total (== subtotal): no lanza', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('100.00'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('subtotal = 0 y descuento = 0 (único caso posible por la invariante absoluta): no lanza sin importar max', () => {
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('0'),
+        new Prisma.Decimal('0'),
+        new Prisma.Decimal('0.00'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('caso Decimal exacto sin error de redondeo de punto flotante (33.33 sobre 100.00 con max 33.33%)', () => {
+    // 33.33 * 100 = 3333.00 <= 100.00 * 33.33 = 3333.00 exacto en Decimal;
+    // Number(33.33)/100*100.00 en punto flotante JS podría no dar 33.33
+    // exacto, produciendo un falso rechazo si se usara Number().
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('33.33'),
+        new Prisma.Decimal('100.00'),
+        new Prisma.Decimal('33.33'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('caso Decimal exacto: 0.01 por encima del límite calculado con decimales largos se rechaza', () => {
+    // subtotal=333.33, max=33.33% -> límite exacto = 333.33*33.33/100 =
+    // 111.099889..., así que un descuento de 111.10 (redondeado a 2
+    // decimales, como exige Decimal(14,2)) ya lo supera.
+    expect(() =>
+      assertDiscountWithinConfiguredLimit(
+        new Prisma.Decimal('111.10'),
+        new Prisma.Decimal('333.33'),
+        new Prisma.Decimal('33.33'),
       ),
     ).toThrow(BadRequestException);
   });

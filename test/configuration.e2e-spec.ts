@@ -333,13 +333,15 @@ describe('Configuration (e2e)', () => {
       expect(response.status).toBe(400);
     });
 
+    // quoteValidityDays/maxDiscountPercent se desbloquearon en el Bloque B
+    // (Fase 10): su cobertura de "editable ahora, tax sigue bloqueado" vive
+    // en test/configuration-commercial.e2e-spec.ts. Aquí solo permanecen
+    // taxEnabled/taxRate, que siguen bloqueados hasta el Bloque C.
     it.each([
       ['taxEnabled', true],
       ['taxRate', '10.00'],
-      ['quoteValidityDays', 30],
-      ['maxDiscountPercent', '50.00'],
     ])(
-      '%s en el body -> 400 (aún no editable en el Bloque A)',
+      '%s en el body -> 400 (aún no editable hasta el Bloque C)',
       async (field, value) => {
         const response = await request(app.getHttpServer())
           .patch('/api/v1/configuration')

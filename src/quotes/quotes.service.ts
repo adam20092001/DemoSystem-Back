@@ -19,12 +19,14 @@ import {
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import {
+  addCalendarDays,
   businessToday,
   fromPrismaDate,
   isValidDateOnly,
   toPrismaDate,
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
+import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
 import { DocumentSequenceService } from '../document-sequences/document-sequence.service';
 import {
@@ -36,6 +38,7 @@ import {
 import {
   QUOTE_TAX_AMOUNT,
   assertAcceptable,
+  assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertEditable,
   assertQuantityAllowedForUnit,
@@ -120,6 +123,7 @@ export class QuotesService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly documentSequenceService: DocumentSequenceService,
+    private readonly settingsReader: SettingsReader,
   ) {}
 
   async create(input: CreateQuoteInput): Promise<SafeQuote> {
@@ -130,7 +134,10 @@ export class QuotesService {
     }
     this.assertNoDuplicateProductIds(input.items.map((item) => item.productId));
 
-    if (!isValidDateOnly(input.expirationDate)) {
+    if (
+      input.expirationDate !== undefined &&
+      !isValidDateOnly(input.expirationDate)
+    ) {
       throw new BadRequestException(
         'La fecha de vencimiento debe ser una fecha válida en formato YYYY-MM-DD',
       );
@@ -144,13 +151,30 @@ export class QuotesService {
     }));
 
     const businessDate = businessToday();
-    if (input.expirationDate < businessDate) {
+    if (
+      input.expirationDate !== undefined &&
+      input.expirationDate < businessDate
+    ) {
       throw new BadRequestException(
         'La fecha de vencimiento no puede ser anterior a la fecha de emisión',
       );
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // Bloque 10, B: snapshot ÚNICO de configuración para esta operación.
+      // quoteValidityDays solo se usa si expirationDate se omitió;
+      // maxDiscountPercent SIEMPRE se necesita (incluso con expirationDate
+      // explícito), así que la lectura nunca se condiciona a eso.
+      const settings = await this.settingsReader.getCurrent(tx);
+
+      // resolvedExpirationDate: explícito gana tal cual (§10 aprobado, sin
+      // forzar quoteValidityDays sobre él); ausente -> issueDate (el MISMO
+      // businessDate ya resuelto arriba) + quoteValidityDays días
+      // calendario. Nunca una segunda businessToday() independiente.
+      const resolvedExpirationDate =
+        input.expirationDate ??
+        addCalendarDays(businessDate, settings.quoteValidityDays);
+
       const customer = await this.loadAndValidateCustomer(tx, input.customerId);
       const lines = await this.loadAndValidateItems(tx, parsedItems);
 
@@ -159,6 +183,11 @@ export class QuotesService {
       );
       const subtotal = calculateSubtotal(lineTotals);
       assertDiscountWithinSubtotal(discountAmount, subtotal);
+      assertDiscountWithinConfiguredLimit(
+        discountAmount,
+        subtotal,
+        settings.maxDiscountPercent,
+      );
       const total = calculateTotal(subtotal, discountAmount, QUOTE_TAX_AMOUNT);
 
       const number = await this.documentSequenceService.next(
@@ -178,7 +207,7 @@ export class QuotesService {
           customerAddress: customer.address,
           sellerId: input.actorUserId,
           issueDate: toPrismaDate(businessDate),
-          expirationDate: toPrismaDate(input.expirationDate),
+          expirationDate: toPrismaDate(resolvedExpirationDate),
           subtotal,
           discountAmount,
           taxAmount: QUOTE_TAX_AMOUNT,
@@ -330,6 +359,30 @@ export class QuotesService {
 
       const effectiveDiscount = discountAmount ?? existing.discountAmount;
       assertDiscountWithinSubtotal(effectiveDiscount, subtotal);
+
+      // Bloque 10, B (§14/§15 del plan aprobado): el máximo configurado
+      // solo se revalida cuando la actualización AFECTA realmente el par
+      // comercial — items presentes (el subtotal puede cambiar, se evalúa
+      // siempre que se reemplace el conjunto) o un discountAmount que
+      // difiere del ya persistido (reenviar el mismo valor nunca cuenta
+      // como cambio comercial nuevo). Una edición puramente no comercial
+      // (p. ej. solo notes/expirationDate) nunca vuelve a evaluar el
+      // descuento contra la configuración vigente, aunque esta se haya
+      // endurecido después de que la cotización ya existía — cero
+      // consultas a SettingsReader en ese caso.
+      const affectsCommercialTotals =
+        parsedItems !== undefined ||
+        (discountAmount !== undefined &&
+          !discountAmount.equals(existing.discountAmount));
+      if (affectsCommercialTotals) {
+        const settings = await this.settingsReader.getCurrent(tx);
+        assertDiscountWithinConfiguredLimit(
+          effectiveDiscount,
+          subtotal,
+          settings.maxDiscountPercent,
+        );
+      }
+
       const total = calculateTotal(
         subtotal,
         effectiveDiscount,

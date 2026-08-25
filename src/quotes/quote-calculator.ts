@@ -117,6 +117,37 @@ export function assertDiscountWithinSubtotal(
   }
 }
 
+/**
+ * Invariante de descuento máximo CONFIGURADO (Fase 10, Bloque B):
+ * discountAmount * 100 <= subtotal * maxDiscountPercent. Comparación
+ * cruzada por multiplicación, sin dividir ni redondear un "monto máximo
+ * permitido" intermedio (evitaría introducir un error de redondeo que no
+ * existe en los datos de entrada). Pura: únicamente Prisma.Decimal, sin
+ * Number()/parseFloat() ni aritmética de punto flotante de JS.
+ *
+ * Complementa a assertDiscountWithinSubtotal() (invariante absoluta,
+ * siempre 0 <= discountAmount <= subtotal); esta es la invariante adicional
+ * y configurable. Cuando subtotal = 0, discountAmount ya debe ser 0 por la
+ * invariante absoluta, así que 0*100 <= 0*maxDiscountPercent siempre se
+ * cumple trivialmente — sin necesidad de un caso especial.
+ *
+ * Única fuente de verdad reutilizada por Quotes y Sales (sale-calculator.ts
+ * la reexporta, mismo criterio que el resto de primitivas compartidas de
+ * este archivo): nunca se duplica una fórmula de porcentaje sutilmente
+ * distinta en cada dominio.
+ */
+export function assertDiscountWithinConfiguredLimit(
+  discountAmount: Prisma.Decimal,
+  subtotal: Prisma.Decimal,
+  maxDiscountPercent: Prisma.Decimal,
+): void {
+  if (discountAmount.mul(100).greaterThan(subtotal.mul(maxDiscountPercent))) {
+    throw new BadRequestException(
+      'El descuento supera el porcentaje máximo permitido por la configuración de la empresa',
+    );
+  }
+}
+
 /** total = subtotal - discountAmount + taxAmount. */
 export function calculateTotal(
   subtotal: Prisma.Decimal,

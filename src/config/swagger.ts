@@ -124,9 +124,13 @@ export function setupSwagger(app: INestApplication): boolean {
     .addTag(
       'Configuration',
       'Configuración global de la empresa: fila singleton única (identidad, ' +
-        'moneda; IGV y parámetros de cotización/descuento se exponen en ' +
-        'modo lectura desde este bloque y se habilitan por PATCH en fases ' +
-        'posteriores). GET para ADMIN y MANAGEMENT; PATCH solo para ADMIN.',
+        'moneda, vigencia por defecto de cotización y descuento máximo ' +
+        'configurado; IGV se expone en modo lectura y se habilita por PATCH ' +
+        'en una fase posterior). GET para ADMIN y MANAGEMENT; PATCH solo ' +
+        'para ADMIN. Cambiar quoteValidityDays/maxDiscountPercent nunca ' +
+        'modifica cotizaciones o ventas ya existentes: solo aplica a ' +
+        'operaciones comerciales nuevas o efectivamente modificadas desde ' +
+        'ese momento.',
     )
     .build();
 

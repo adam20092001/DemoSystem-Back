@@ -440,4 +440,240 @@ describe('ConfigurationService', () => {
       }
     });
   });
+
+  describe('updateConfiguration — Bloque B (quoteValidityDays/maxDiscountPercent)', () => {
+    it('ADMIN puede actualizar quoteValidityDays y registra CONFIGURATION_UPDATED con valores enteros', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ quoteValidityDays: 15 }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ quoteValidityDays: 30 }),
+      );
+
+      const result = await service.updateConfiguration({
+        quoteValidityDays: 30,
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.quoteValidityDays).toBe(30);
+      const updateArgs = prisma.tx.companySettings.update.mock.calls[0][0];
+      expect(updateArgs.data).toEqual({ quoteValidityDays: 30 });
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.CONFIGURATION_UPDATED,
+          metadata: {
+            changedFields: ['quoteValidityDays'],
+            oldValues: { quoteValidityDays: 15 },
+            newValues: { quoteValidityDays: 30 },
+          },
+        }),
+      );
+    });
+
+    it('rechaza quoteValidityDays = 0', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          quoteValidityDays: 0,
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza quoteValidityDays negativo', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          quoteValidityDays: -5,
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza quoteValidityDays no entero', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          quoteValidityDays: 15.5,
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('quoteValidityDays no-op (mismo valor ya vigente): sin update ni auditoría', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ quoteValidityDays: 15 }),
+      );
+
+      const result = await service.updateConfiguration({
+        quoteValidityDays: 15,
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.quoteValidityDays).toBe(15);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('acepta maxDiscountPercent = 0.00 (sin descuento permitido)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('100.00') }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('0.00') }),
+      );
+
+      const result = await service.updateConfiguration({
+        maxDiscountPercent: '0.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.maxDiscountPercent).toBe('0.00');
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            changedFields: ['maxDiscountPercent'],
+            oldValues: { maxDiscountPercent: '100.00' },
+            newValues: { maxDiscountPercent: '0.00' },
+          },
+        }),
+      );
+    });
+
+    it('acepta maxDiscountPercent = 100.00 (descuento total permitido)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('10.00') }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('100.00') }),
+      );
+
+      const result = await service.updateConfiguration({
+        maxDiscountPercent: '100.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.maxDiscountPercent).toBe('100.00');
+    });
+
+    it('acepta un valor Decimal intermedio', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('100.00') }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('33.33') }),
+      );
+
+      const result = await service.updateConfiguration({
+        maxDiscountPercent: '33.33',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.maxDiscountPercent).toBe('33.33');
+    });
+
+    it('rechaza maxDiscountPercent negativo', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          maxDiscountPercent: '-1.00',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza maxDiscountPercent > 100', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          maxDiscountPercent: '100.01',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza maxDiscountPercent con formato inválido (más de 2 decimales)', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.updateConfiguration({
+          maxDiscountPercent: '10.123',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('maxDiscountPercent no-op (mismo valor normalizado ya vigente): sin update ni auditoría', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ maxDiscountPercent: new Prisma.Decimal('100.00') }),
+      );
+
+      const result = await service.updateConfiguration({
+        maxDiscountPercent: '100.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(result.maxDiscountPercent).toBe('100.00');
+      expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('cambia ambos campos del Bloque B en un solo PATCH: changedFields/oldValues/newValues exactos', async () => {
+      prisma.tx.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({
+          quoteValidityDays: 15,
+          maxDiscountPercent: new Prisma.Decimal('100.00'),
+        }),
+      );
+      prisma.tx.companySettings.update.mockResolvedValue(
+        makeSettingsRow({
+          quoteValidityDays: 30,
+          maxDiscountPercent: new Prisma.Decimal('10.00'),
+        }),
+      );
+
+      await service.updateConfiguration({
+        quoteValidityDays: 30,
+        maxDiscountPercent: '10.00',
+        actorUserId: ACTOR_ID,
+        requesterRole: RoleName.ADMIN,
+      });
+
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            changedFields: ['quoteValidityDays', 'maxDiscountPercent'],
+            oldValues: { quoteValidityDays: 15, maxDiscountPercent: '100.00' },
+            newValues: { quoteValidityDays: 30, maxDiscountPercent: '10.00' },
+          },
+        }),
+      );
+    });
+
+    // Nota: taxEnabled/taxRate no pueden probarse aquí como "rechazados por
+    // el servicio" porque UpdateConfigurationInput ni siquiera los declara
+    // (TypeScript ya lo impide en tiempo de compilación); la prueba real de
+    // "siguen bloqueados" vive en el E2E dedicado de Bloque B (forbidNonWhitelisted).
+  });
 });

@@ -22,6 +22,8 @@ import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
+import { SettingsReader } from '../configuration/settings-reader.service';
+import { CompanySettingsSnapshot } from '../configuration/types/company-settings-snapshot';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
 import { PaymentEngine } from '../payments/payment.engine';
@@ -349,6 +351,26 @@ function createAccountingEngineMock() {
   };
 }
 
+function makeSettingsSnapshot(
+  overrides: Partial<CompanySettingsSnapshot> = {},
+): CompanySettingsSnapshot {
+  return {
+    currencyCode: 'PEN',
+    currencySymbol: 'S/',
+    taxEnabled: false,
+    taxRate: new Prisma.Decimal('18.00'),
+    quoteValidityDays: 15,
+    maxDiscountPercent: new Prisma.Decimal('100.00'),
+    ...overrides,
+  };
+}
+
+function createSettingsReaderMock() {
+  return {
+    getCurrent: jest.fn<Promise<CompanySettingsSnapshot>, [unknown?]>(),
+  };
+}
+
 describe('SalesService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
@@ -356,6 +378,7 @@ describe('SalesService', () => {
   let engine: ReturnType<typeof createEngineMock>;
   let paymentEngine: ReturnType<typeof createPaymentEngineMock>;
   let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
+  let settingsReader: ReturnType<typeof createSettingsReaderMock>;
   let service: SalesService;
 
   beforeEach(() => {
@@ -401,6 +424,8 @@ describe('SalesService', () => {
       sourceId: SALE_ID,
       eventType: 'REVERSAL',
     });
+    settingsReader = createSettingsReaderMock();
+    settingsReader.getCurrent.mockResolvedValue(makeSettingsSnapshot());
 
     service = new SalesService(
       prisma as unknown as PrismaService,
@@ -409,6 +434,7 @@ describe('SalesService', () => {
       engine as unknown as StockMovementEngine,
       paymentEngine as unknown as PaymentEngine,
       accountingEngine as unknown as AccountingEngine,
+      settingsReader as unknown as SettingsReader,
     );
 
     prisma.tx.$queryRaw.mockImplementation(
@@ -770,6 +796,109 @@ describe('SalesService', () => {
           return Promise.resolve(makeSaleDetailRow());
         });
         await service.createDirect(validDirectInput);
+      });
+
+      describe('Bloque 10, B — descuento máximo configurado (venta DIRECTA)', () => {
+        it('SettingsReader.getCurrent(tx) se llama exactamente una vez', async () => {
+          await service.createDirect(validDirectInput);
+          expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+          expect(settingsReader.getCurrent).toHaveBeenCalledWith(prisma.tx);
+        });
+
+        it('descuento por debajo del límite: permitido', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('10.00'),
+            }),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '0.50',
+            }),
+          ).resolves.toBeDefined();
+        });
+
+        it('descuento exactamente en el límite: permitido', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('10.00'),
+            }),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '1.00',
+            }),
+          ).resolves.toBeDefined();
+        });
+
+        it('descuento por encima del límite: 400', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('10.00'),
+            }),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '1.01',
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+        });
+
+        it('max = 100%: descuento total del subtotal permitido', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('100.00'),
+            }),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '10.00',
+            }),
+          ).resolves.toBeDefined();
+        });
+
+        it('max = 0: cualquier descuento positivo se rechaza', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('0.00'),
+            }),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '0.01',
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+        });
+
+        it('caso Decimal exacto, sin error de redondeo de punto flotante', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('33.33'),
+            }),
+          );
+          // subtotal 10.00 * 33.33% -> límite exacto 3.333; un descuento de
+          // 3.33 (máximo representable en Decimal(14,2)) queda por debajo.
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '3.33',
+            }),
+          ).resolves.toBeDefined();
+        });
+
+        it('no cambia el comportamiento de impuestos: taxAmount sigue en 0.00', async () => {
+          prisma.tx.sale.create.mockImplementation((args: unknown) => {
+            const created = args as { data: { taxAmount: Prisma.Decimal } };
+            expect(created.data.taxAmount.toFixed(2)).toBe('0.00');
+            return Promise.resolve(makeSaleDetailRow());
+          });
+          await service.createDirect(validDirectInput);
+        });
       });
     });
 
@@ -1675,6 +1804,58 @@ describe('SalesService', () => {
           return Promise.resolve(makeSaleDetailRow());
         });
         await service.createFromQuote(validConvertInput);
+      });
+
+      describe('Bloque 10, B — sin revalidación de descuento máximo (D18 aprobado)', () => {
+        it('cero llamadas a SettingsReader durante la conversión', async () => {
+          await service.createFromQuote(validConvertInput);
+          expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        });
+
+        it('cotización con 50% de descuento (creada bajo max=100%) convierte con éxito aunque el max VIGENTE ahora sea 10%', async () => {
+          // El max vigente configurado en settingsReader ni siquiera
+          // importa aquí (no se consulta), pero se fija a un valor bajo
+          // para demostrar que, si SE consultara, la conversión igual
+          // fallaría contra un descuento del 50% — y sin embargo el test
+          // demuestra que la conversión IGUAL tiene éxito.
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              maxDiscountPercent: new Prisma.Decimal('10.00'),
+            }),
+          );
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow(),
+              quote: makeQuoteRow({
+                subtotal: new Prisma.Decimal('100.00'),
+                discountAmount: new Prisma.Decimal('50.00'),
+                taxAmount: new Prisma.Decimal('0.00'),
+                total: new Prisma.Decimal('50.00'),
+              }),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+          prisma.tx.sale.create.mockImplementation((args: unknown) => {
+            const created = args as {
+              data: {
+                subtotal: Prisma.Decimal;
+                discountAmount: Prisma.Decimal;
+                taxAmount: Prisma.Decimal;
+                total: Prisma.Decimal;
+              };
+            };
+            expect(created.data.subtotal.toFixed(2)).toBe('100.00');
+            expect(created.data.discountAmount.toFixed(2)).toBe('50.00');
+            expect(created.data.taxAmount.toFixed(2)).toBe('0.00');
+            expect(created.data.total.toFixed(2)).toBe('50.00');
+            return Promise.resolve(makeSaleDetailRow());
+          });
+
+          await expect(
+            service.createFromQuote(validConvertInput),
+          ).resolves.toBeDefined();
+          expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        });
       });
     });
 

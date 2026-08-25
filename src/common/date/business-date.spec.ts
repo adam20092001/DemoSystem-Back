@@ -1,4 +1,5 @@
 import {
+  addCalendarDays,
   businessToday,
   endOfBusinessDayExclusiveUtc,
   fromPrismaDate,
@@ -80,6 +81,40 @@ describe('toPrismaDate', () => {
 
   it('lanza BadRequestException para formato inválido', () => {
     expect(() => toPrismaDate('15-03-2026')).toThrow();
+  });
+});
+
+describe('addCalendarDays', () => {
+  it('suma días dentro del mismo mes', () => {
+    expect(addCalendarDays('2026-08-24', 15)).toBe('2026-09-08');
+  });
+
+  it('transición normal de mes (fin de mes de 31 días)', () => {
+    expect(addCalendarDays('2026-01-20', 15)).toBe('2026-02-04');
+  });
+
+  it('transición de año', () => {
+    expect(addCalendarDays('2026-12-20', 15)).toBe('2027-01-04');
+  });
+
+  it('cruza el 29 de febrero en año bisiesto', () => {
+    expect(addCalendarDays('2024-02-20', 15)).toBe('2024-03-06');
+  });
+
+  it('no cruza el 29 de febrero en año no bisiesto (28 días en febrero)', () => {
+    expect(addCalendarDays('2026-02-20', 15)).toBe('2026-03-07');
+  });
+
+  it('0 días devuelve la misma fecha', () => {
+    expect(addCalendarDays('2026-06-15', 0)).toBe('2026-06-15');
+  });
+
+  it('1 día simple', () => {
+    expect(addCalendarDays('2026-06-15', 1)).toBe('2026-06-16');
+  });
+
+  it('lanza BadRequestException para una fecha base inválida', () => {
+    expect(() => addCalendarDays('2026-02-30', 15)).toThrow();
   });
 });
 

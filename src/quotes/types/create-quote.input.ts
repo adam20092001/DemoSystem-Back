@@ -12,8 +12,11 @@ export interface CreateQuoteItemInput {
  */
 export interface CreateQuoteInput {
   customerId: string;
-  /** YYYY-MM-DD. */
-  expirationDate: string;
+  /**
+   * YYYY-MM-DD. Ausente (Fase 10, Bloque B): QuotesService la calcula como
+   * issueDate + CompanySettings.quoteValidityDays.
+   */
+  expirationDate?: string;
   discountAmount?: string;
   notes?: string;
   items: CreateQuoteItemInput[];

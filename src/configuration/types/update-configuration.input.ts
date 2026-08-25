@@ -1,8 +1,9 @@
 import { RoleName } from '@prisma/client';
 
 /**
- * Bloque A: solo campos de identidad y moneda. Los campos `| null` aceptan
- * null explícito (limpiar el valor) además de undefined (no tocar), mismo
+ * Bloque A: campos de identidad y moneda. Bloque B (Fase 10): se agregan
+ * quoteValidityDays/maxDiscountPercent. Los campos `| null` aceptan null
+ * explícito (limpiar el valor) además de undefined (no tocar), mismo
  * criterio que UpdateCategoryInput. businessName nunca acepta null: es
  * NOT NULL en el esquema.
  *
@@ -18,6 +19,9 @@ export interface UpdateConfigurationInput {
   email?: string | null;
   currencyCode?: string;
   currencySymbol?: string;
+  quoteValidityDays?: number;
+  /** Decimal como texto, nunca number de JavaScript. */
+  maxDiscountPercent?: string;
   actorUserId: string;
   ipAddress?: string | null;
   requesterRole: RoleName;

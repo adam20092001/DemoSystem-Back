@@ -39,12 +39,12 @@ export class ConfigurationController {
 
   @ApiOperation({
     summary:
-      'Actualizar la configuración de la empresa (identidad y moneda en este bloque)',
+      'Actualizar la configuración de la empresa (identidad, moneda, vigencia de cotización y descuento máximo en este bloque)',
   })
   @ApiOkResponse({ type: ConfigurationResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload vacío, campo en blanco/inválido, o taxEnabled/taxRate/quoteValidityDays/maxDiscountPercent presentes (aún no editables en este bloque).',
+      'Payload vacío, campo en blanco/inválido, o taxEnabled/taxRate presentes (aún no editables en este bloque).',
   })
   @Roles(RoleName.ADMIN)
   @Patch()
@@ -62,6 +62,8 @@ export class ConfigurationController {
       email: dto.email,
       currencyCode: dto.currencyCode,
       currencySymbol: dto.currencySymbol,
+      quoteValidityDays: dto.quoteValidityDays,
+      maxDiscountPercent: dto.maxDiscountPercent,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
       requesterRole: actor.role,

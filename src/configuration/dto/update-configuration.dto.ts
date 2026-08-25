@@ -2,12 +2,24 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEmail,
+  IsInt,
   IsOptional,
   IsString,
   Length,
+  Matches,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
+
+/**
+ * Mismo criterio textual estricto que discountAmount en Quotes/Sales
+ * (quote-calculator.ts): decimal no negativo como texto, sin notación
+ * científica, máximo 2 decimales (Decimal(5,2)). Hasta 3 dígitos enteros
+ * cubre el máximo válido "100.00"; el rango 0.00-100.00 lo revalida
+ * ConfigurationService (no lo expresa el patrón).
+ */
+export const MAX_DISCOUNT_PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
 
 /**
  * Recorta espacios perimetrales antes de que @IsEmail() evalúe el valor
@@ -20,13 +32,12 @@ function trimEmail({ value }: { value: unknown }): unknown {
 }
 
 /**
- * Bloque A: solo campos de identidad y moneda. taxEnabled/taxRate/
- * quoteValidityDays/maxDiscountPercent NO se declaran aquí a propósito —
- * con forbidNonWhitelisted:true (ValidationPipe global), enviarlos en el
- * body produce 400 automáticamente, sin necesidad de una validación manual
- * adicional en el controller/servicio. Se habilitan en el Bloque B
- * (quoteValidityDays/maxDiscountPercent) y en el Bloque C (taxEnabled/
- * taxRate).
+ * Bloque A: campos de identidad y moneda. Bloque B (Fase 10): se agregan
+ * quoteValidityDays y maxDiscountPercent. taxEnabled/taxRate NO se declaran
+ * aquí a propósito — con forbidNonWhitelisted:true (ValidationPipe global),
+ * enviarlos en el body produce 400 automáticamente, sin necesidad de una
+ * validación manual adicional en el controller/servicio. Se habilitan en
+ * el Bloque C.
  *
  * Los campos `| null` aceptan null explícito (limpiar el valor existente)
  * además de undefined (no tocar): @IsOptional() de class-validator omite el
@@ -113,4 +124,29 @@ export class UpdateConfigurationDto {
   @MinLength(1)
   @MaxLength(5)
   currencySymbol?: string;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    example: 15,
+    description:
+      'Vigencia por defecto (días calendario) de una cotización nueva cuando no se envía expirationDate explícito. No modifica cotizaciones ya existentes.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  quoteValidityDays?: number;
+
+  @ApiPropertyOptional({
+    type: String,
+    example: '10.00',
+    description:
+      'Decimal no negativo, como texto, entre "0.00" y "100.00", máximo 2 decimales. Límite superior configurado para el descuento de cotizaciones/ventas nuevas o comercialmente modificadas; nunca revalida documentos ya existentes.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(MAX_DISCOUNT_PERCENT_PATTERN, {
+    message:
+      'maxDiscountPercent debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+  })
+  maxDiscountPercent?: string;
 }

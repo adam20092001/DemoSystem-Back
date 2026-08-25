@@ -33,6 +33,7 @@ import {
   startOfBusinessDayUtc,
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
+import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
 import { DocumentSequenceService } from '../document-sequences/document-sequence.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
@@ -57,6 +58,7 @@ import {
 } from './mappers/sale.mapper';
 import {
   SALE_TAX_AMOUNT,
+  assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertQuantityAllowedForUnit,
   calculateLineTotal,
@@ -194,6 +196,7 @@ export class SalesService {
     private readonly stockMovementEngine: StockMovementEngine,
     private readonly paymentEngine: PaymentEngine,
     private readonly accountingEngine: AccountingEngine,
+    private readonly settingsReader: SettingsReader,
   ) {}
 
   // ==================================================================
@@ -214,6 +217,12 @@ export class SalesService {
     const initialPayment = this.parseInitialPayment(input.payment);
 
     return this.prisma.$transaction(async (tx) => {
+      // Bloque 10, B: snapshot ÚNICO de configuración para esta operación
+      // (descuento máximo permitido en la venta DIRECTA). La conversión de
+      // cotización (createFromQuote) NUNCA llama a SettingsReader para
+      // esto — D18 aprobado: copia exacta del snapshot de la cotización.
+      const settings = await this.settingsReader.getCurrent(tx);
+
       const customer = await this.lockCustomerForSale(tx, input.customerId);
       this.assertCustomerUsable(customer);
 
@@ -248,6 +257,11 @@ export class SalesService {
 
       const subtotal = calculateSubtotal(lines.map((line) => line.lineTotal));
       assertDiscountWithinSubtotal(discountAmount, subtotal);
+      assertDiscountWithinConfiguredLimit(
+        discountAmount,
+        subtotal,
+        settings.maxDiscountPercent,
+      );
       const total = calculateTotal(subtotal, discountAmount, SALE_TAX_AMOUNT);
 
       if (

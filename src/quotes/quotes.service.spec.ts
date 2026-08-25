@@ -17,6 +17,8 @@ import {
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
+import { CompanySettingsSnapshot } from '../configuration/types/company-settings-snapshot';
+import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
 import { QuotesService } from './quotes.service';
 
@@ -160,10 +162,31 @@ function createSequenceServiceMock() {
   return { next: jest.fn<Promise<string>, [unknown, DocumentType]>() };
 }
 
+function makeSettingsSnapshot(
+  overrides: Partial<CompanySettingsSnapshot> = {},
+): CompanySettingsSnapshot {
+  return {
+    currencyCode: 'PEN',
+    currencySymbol: 'S/',
+    taxEnabled: false,
+    taxRate: new Prisma.Decimal('18.00'),
+    quoteValidityDays: 15,
+    maxDiscountPercent: new Prisma.Decimal('100.00'),
+    ...overrides,
+  };
+}
+
+function createSettingsReaderMock() {
+  return {
+    getCurrent: jest.fn<Promise<CompanySettingsSnapshot>, [unknown?]>(),
+  };
+}
+
 describe('QuotesService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let sequenceService: ReturnType<typeof createSequenceServiceMock>;
+  let settingsReader: ReturnType<typeof createSettingsReaderMock>;
   let service: QuotesService;
 
   beforeEach(() => {
@@ -176,11 +199,14 @@ describe('QuotesService', () => {
     auditService.record.mockResolvedValue(undefined);
     sequenceService = createSequenceServiceMock();
     sequenceService.next.mockResolvedValue('COT-000001');
+    settingsReader = createSettingsReaderMock();
+    settingsReader.getCurrent.mockResolvedValue(makeSettingsSnapshot());
 
     service = new QuotesService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
       sequenceService,
+      settingsReader as unknown as SettingsReader,
     );
 
     prisma.tx.customer.findUnique.mockResolvedValue(makeCustomerRow());
@@ -198,6 +224,14 @@ describe('QuotesService', () => {
   const validCreateInput = {
     customerId: CUSTOMER_ID,
     expirationDate: '2026-03-20',
+    items: [{ productId: PRODUCT_ID, quantity: '1' }],
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+  };
+
+  /** Mismo input válido, sin expirationDate (Bloque 10, B: dispara el cálculo por defecto). */
+  const validCreateInputWithoutExpiration = {
+    customerId: CUSTOMER_ID,
     items: [{ productId: PRODUCT_ID, quantity: '1' }],
     actorUserId: ACTOR_ID,
     ipAddress: '10.0.0.1',
@@ -440,6 +474,140 @@ describe('QuotesService', () => {
       await expect(
         service.create({ ...validCreateInput, discountAmount: '11.00' }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    describe('Bloque 10, B — vigencia por defecto y descuento máximo configurado', () => {
+      it('expirationDate omitido: usa issueDate + quoteValidityDays configurado', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ quoteValidityDays: 15 }),
+        );
+        await service.create(validCreateInputWithoutExpiration);
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { expirationDate: Date };
+        };
+        // FIXED_TODAY = '2026-03-15' + 15 días calendario = '2026-03-30'.
+        expect(createArgs.data.expirationDate.toISOString()).toBe(
+          '2026-03-30T00:00:00.000Z',
+        );
+      });
+
+      it('expirationDate explícito gana sobre el valor configurado', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ quoteValidityDays: 15 }),
+        );
+        await service.create({
+          ...validCreateInput,
+          expirationDate: '2026-12-25',
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { expirationDate: Date };
+        };
+        expect(createArgs.data.expirationDate.toISOString()).toBe(
+          '2026-12-25T00:00:00.000Z',
+        );
+      });
+
+      it('el mismo issueDate resuelto (businessDate) es la base del cálculo por defecto, nunca un segundo businessToday()', async () => {
+        const businessTodaySpy = jest.spyOn(
+          businessDateModule,
+          'businessToday',
+        );
+        await service.create(validCreateInputWithoutExpiration);
+        // Una sola invocación real de businessToday(): la resolución de la
+        // fecha por defecto reutiliza la variable ya calculada, no vuelve a
+        // preguntar "hoy".
+        expect(businessTodaySpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('SettingsReader.getCurrent(tx) se llama exactamente una vez, incluso con expirationDate explícito', async () => {
+        await service.create({
+          ...validCreateInput,
+          expirationDate: '2026-04-01',
+        });
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+        expect(settingsReader.getCurrent).toHaveBeenCalledWith(prisma.tx);
+      });
+
+      it('cambiar quoteValidityDays después no afecta una cotización ya creada (no hay backfill: cada creación resuelve su propio snapshot)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ quoteValidityDays: 15 }),
+        );
+        await service.create(validCreateInputWithoutExpiration);
+        const firstArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: { expirationDate: Date };
+        };
+        expect(firstArgs.data.expirationDate.toISOString()).toBe(
+          '2026-03-30T00:00:00.000Z',
+        );
+
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ quoteValidityDays: 30 }),
+        );
+        await service.create(validCreateInputWithoutExpiration);
+        const secondArgs = prisma.tx.quote.create.mock.calls[1][0] as {
+          data: { expirationDate: Date };
+        };
+        expect(secondArgs.data.expirationDate.toISOString()).toBe(
+          '2026-04-14T00:00:00.000Z',
+        );
+        // La primera cotización ya creada no se toca ni se recalcula.
+        expect(firstArgs.data.expirationDate.toISOString()).toBe(
+          '2026-03-30T00:00:00.000Z',
+        );
+      });
+
+      it('max = 0, descuento 0: permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('0.00'),
+          }),
+        );
+        await expect(service.create(validCreateInput)).resolves.toBeDefined();
+      });
+
+      it('max = 10%, descuento exactamente en el límite: permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({ ...validCreateInput, discountAmount: '1.00' }),
+        ).resolves.toBeDefined();
+      });
+
+      it('max = 10%, descuento por encima del límite: 400', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({ ...validCreateInput, discountAmount: '1.01' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('max = 100%, descuento total del subtotal: permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('100.00'),
+          }),
+        );
+        await expect(
+          service.create({ ...validCreateInput, discountAmount: '10.00' }),
+        ).resolves.toBeDefined();
+      });
+
+      it('el tope absoluto (descuento > subtotal) sigue funcionando independientemente del máximo configurado al 100%', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('100.00'),
+          }),
+        );
+        await expect(
+          service.create({ ...validCreateInput, discountAmount: '10.01' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
     });
 
     it('llama a DocumentSequenceService.next() después de validar cliente/producto', async () => {
@@ -785,6 +953,117 @@ describe('QuotesService', () => {
       expect(
         (prisma.tx.product as unknown as { update?: unknown }).update,
       ).toBeUndefined();
+    });
+
+    describe('Bloque 10, B — revalidación de descuento máximo solo ante cambio comercial efectivo', () => {
+      it('actualización puramente no comercial (solo notes): cero llamadas a SettingsReader', async () => {
+        await service.update({ ...baseUpdateInput, notes: 'x' });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+      });
+
+      it('actualización puramente no comercial (solo expirationDate): cero llamadas a SettingsReader', async () => {
+        await service.update({
+          ...baseUpdateInput,
+          expirationDate: '2026-04-01',
+        });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+      });
+
+      it('cotización histórica por encima del límite recién endurecido: una edición NO comercial sigue permitida (sin revalidar)', async () => {
+        // Cotización almacenada: subtotal=10.00, discountAmount=0 (mock
+        // base) — se simula "históricamente por encima" ajustando el mock
+        // de lock a un descuento del 30% ya persistido.
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ discountAmount: new Prisma.Decimal('3.00') }),
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({ ...baseUpdateInput, notes: 'Solo una nota' }),
+        ).resolves.toBeDefined();
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+      });
+
+      it('discountAmount reenviado con el MISMO valor ya persistido: no se trata como cambio comercial (sin SettingsReader)', async () => {
+        // makeLockedQuoteRow por defecto: discountAmount = 0.
+        await service.update({ ...baseUpdateInput, discountAmount: '0.00' });
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+      });
+
+      it('discountAmount cambiado a un valor distinto: revalida contra el máximo VIGENTE (una sola lectura)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({ ...baseUpdateInput, discountAmount: '1.00' }),
+        ).resolves.toBeDefined();
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+        expect(settingsReader.getCurrent).toHaveBeenCalledWith(prisma.tx);
+      });
+
+      it('discountAmount cambiado por encima del máximo vigente: 400', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({ ...baseUpdateInput, discountAmount: '1.01' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('items reemplazados (subtotal cambia): revalida contra el máximo vigente (una sola lectura), ratio por encima del límite -> 400', async () => {
+        // 2 unidades x 10.00 = subtotal 20.00; descuento existente 0 se
+        // mantiene (no se envía discountAmount), así que el ratio efectivo
+        // es 0% -> dentro del límite. Se fuerza un discountAmount explícito
+        // alto junto al reemplazo de items para probar el rechazo.
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({
+            ...baseUpdateInput,
+            items: [{ productId: PRODUCT_ID, quantity: '2' }],
+            discountAmount: '3.00',
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+      });
+
+      it('items reemplazados dentro del límite vigente: permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({
+            ...baseUpdateInput,
+            items: [{ productId: PRODUCT_ID, quantity: '2' }],
+            discountAmount: '2.00',
+          }),
+        ).resolves.toBeDefined();
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+      });
+
+      it('reemplazo de items siempre revalida, incluso si el subtotal resultante coincide por coincidencia con el anterior', async () => {
+        // El producto por defecto cuesta 10.00; reemplazar por la misma
+        // cantidad (1) produce el mismo subtotal (10.00), pero el
+        // reemplazo de items SIEMPRE cuenta como cambio comercial (§14/§15
+        // del plan aprobado): se evalúa igual, sin importar el resultado.
+        await service.update({
+          ...baseUpdateInput,
+          items: [{ productId: PRODUCT_ID, quantity: '1' }],
+        });
+        expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

@@ -18,6 +18,9 @@ import { UpdateConfigurationInput } from './types/update-configuration.input';
 /** ISO 4217: exactamente 3 letras mayúsculas. */
 const CURRENCY_CODE_PATTERN = /^[A-Z]{3}$/;
 
+/** Decimal(5,2) no negativo, hasta 3 dígitos enteros (cubre "100.00"), máximo 2 decimales. */
+const MAX_DISCOUNT_PERCENT_PATTERN = /^\d{1,3}(\.\d{1,2})?$/;
+
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
@@ -74,9 +77,9 @@ export class ConfigurationService {
   }
 
   /**
-   * Bloque A: solo campos de identidad y moneda. taxEnabled/taxRate/
-   * quoteValidityDays/maxDiscountPercent nunca llegan aquí — el DTO del
-   * controller no los declara y el ValidationPipe global
+   * Bloque A: campos de identidad y moneda. Bloque B (Fase 10): se agregan
+   * quoteValidityDays/maxDiscountPercent. taxEnabled/taxRate nunca llegan
+   * aquí — el DTO del controller no los declara y el ValidationPipe global
    * (forbidNonWhitelisted) ya rechazó la petición con 400 antes de este
    * punto si el cliente los envió.
    *
@@ -87,11 +90,15 @@ export class ConfigurationService {
    * ejecutar el UPDATE).
    *
    * changedFields/oldValues/newValues se construyen aquí mismo, campo por
-   * campo, siempre a partir de la whitelist cerrada de los 8 campos
-   * editables del Bloque A — nunca del body crudo de la petición. El
-   * saneador de auditoría (sanitizeAuditMetadata) impone además, como
-   * defensa independiente, que ninguna clave sobreviva dentro de
-   * oldValues/newValues si no figura en changedFields.
+   * campo, siempre a partir de la whitelist cerrada de los 10 campos
+   * editables (8 del Bloque A + 2 del Bloque B) — nunca del body crudo de
+   * la petición. El saneador de auditoría (sanitizeAuditMetadata) impone
+   * además, como defensa independiente, que ninguna clave sobreviva dentro
+   * de oldValues/newValues si no figura en changedFields. Cambiar estos
+   * valores nunca modifica cotizaciones/ventas ya existentes (sin backfill,
+   * sin recálculo al leer, sin actualización programada): solo afecta
+   * operaciones comerciales nuevas o efectivamente modificadas a partir de
+   * este momento (ver QuotesService/SalesService).
    */
   async updateConfiguration(
     input: UpdateConfigurationInput,
@@ -106,10 +113,12 @@ export class ConfigurationService {
       input.phone !== undefined ||
       input.email !== undefined ||
       input.currencyCode !== undefined ||
-      input.currencySymbol !== undefined;
+      input.currencySymbol !== undefined ||
+      input.quoteValidityDays !== undefined ||
+      input.maxDiscountPercent !== undefined;
     if (!hasAnyField) {
       throw new BadRequestException(
-        'Debe proveerse al menos un campo para actualizar: businessName, tradeName, taxId, address, phone, email, currencyCode o currencySymbol',
+        'Debe proveerse al menos un campo para actualizar: businessName, tradeName, taxId, address, phone, email, currencyCode, currencySymbol, quoteValidityDays o maxDiscountPercent',
       );
     }
 
@@ -219,6 +228,52 @@ export class ConfigurationService {
             'currencySymbol',
             existing.currencySymbol,
             currencySymbol,
+          );
+        }
+      }
+
+      if (input.quoteValidityDays !== undefined) {
+        if (
+          !Number.isInteger(input.quoteValidityDays) ||
+          input.quoteValidityDays <= 0
+        ) {
+          throw new BadRequestException(
+            'quoteValidityDays debe ser un entero mayor que cero',
+          );
+        }
+        if (input.quoteValidityDays !== existing.quoteValidityDays) {
+          data.quoteValidityDays = input.quoteValidityDays;
+          markChanged(
+            'quoteValidityDays',
+            existing.quoteValidityDays,
+            input.quoteValidityDays,
+          );
+        }
+      }
+
+      if (input.maxDiscountPercent !== undefined) {
+        if (!MAX_DISCOUNT_PERCENT_PATTERN.test(input.maxDiscountPercent)) {
+          throw new BadRequestException(
+            'maxDiscountPercent debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+          );
+        }
+        const maxDiscountPercent = new Prisma.Decimal(input.maxDiscountPercent);
+        if (
+          maxDiscountPercent.lessThan(0) ||
+          maxDiscountPercent.greaterThan(100)
+        ) {
+          throw new BadRequestException(
+            'maxDiscountPercent debe estar entre 0.00 y 100.00',
+          );
+        }
+        if (!maxDiscountPercent.equals(existing.maxDiscountPercent)) {
+          data.maxDiscountPercent = maxDiscountPercent;
+          // Auditoría siempre como string de 2 decimales fijos (§23 del
+          // plan aprobado), nunca el Decimal crudo ni un number de JS.
+          markChanged(
+            'maxDiscountPercent',
+            existing.maxDiscountPercent.toFixed(2),
+            maxDiscountPercent.toFixed(2),
           );
         }
       }
