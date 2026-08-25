@@ -25,6 +25,14 @@
 // constraints + seed de las seis cuentas; sin AccountingEngine, sin
 // integración con PaymentEngine/SalesService, sin auditoría contable, sin
 // HTTP todavía — eso llega en los Bloques B-D.
+// Fase 10, Bloque A: configuración de la empresa (CompanySettings), fila
+// singleton única. Modelo + migración + constraints + seed + SettingsReader
+// + GET/PATCH /api/v1/configuration (solo campos de identidad/moneda en
+// este bloque) + auditoría. quoteValidityDays/maxDiscountPercent se
+// integran con Cotizaciones/Ventas en el Bloque B; taxEnabled/taxRate con
+// el cálculo de IGV en el Bloque C. Sin cambios a document_sequences ni a
+// DocumentSequenceService en este bloque: la administración de secuencias
+// es el Bloque D.
 
 generator client {
   provider = "prisma-client-js"
@@ -961,4 +969,60 @@ model AccountingEntryLine {
   @@index([entryId])
   @@index([accountId, entryId])
   @@map("accounting_entry_lines")
+}
+
+// --- Configuración de la empresa (Fase 10, Bloque A) ------------------------
+
+/**
+ * Configuración global de la empresa: fila singleton única. `singleton` es a
+ * la vez UNIQUE y forzada por CHECK a valer siempre TRUE (migration.sql):
+ * ninguna de las dos restricciones por sí sola impide una segunda fila con
+ * el valor opuesto, pero combinadas sí. La ausencia de esta fila tras el
+ * seed se trata como violación de invariante interna (500), nunca como
+ * "crear on-demand" — mismo criterio que un DocumentSequence faltante en
+ * DocumentSequenceService.next().
+ * taxEnabled/taxRate/quoteValidityDays/maxDiscountPercent se exponen desde
+ * el Bloque A (GET), pero PATCH solo acepta los campos de identidad/moneda
+ * en este bloque: quoteValidityDays/maxDiscountPercent se habilitan en el
+ * Bloque B (integración con Cotizaciones/Ventas), taxEnabled/taxRate en el
+ * Bloque C (integración con IGV). Ningún módulo de negocio lee todavía esta
+ * tabla en el Bloque A: SettingsReader se exporta ahora para que los
+ * Bloques B/C lo consuman sin reestructurar el módulo.
+ */
+model CompanySettings {
+  id String @id @default(uuid()) @db.Uuid
+
+  // UNIQUE + CHECK(singleton = TRUE) en conjunto (migration.sql) hacen
+  // físicamente imposible una segunda fila, sin importar su valor.
+  singleton Boolean @unique @default(true)
+
+  businessName String  @map("business_name") @db.VarChar(150)
+  tradeName    String? @map("trade_name") @db.VarChar(150)
+  taxId        String? @map("tax_id") @db.VarChar(20)
+  address      String? @db.VarChar(300)
+  phone        String? @db.VarChar(30)
+  email        String? @db.VarChar(150)
+
+  currencyCode   String @default("PEN") @map("currency_code") @db.VarChar(3)
+  currencySymbol String @default("S/") @map("currency_symbol") @db.VarChar(5)
+
+  // Bloque C: activación y tasa de IGV. Editable por PATCH solo desde el
+  // Bloque C; el Bloque A los expone en GET con su valor semilla.
+  taxEnabled Boolean @default(false) @map("tax_enabled")
+  taxRate    Decimal @default(18.00) @map("tax_rate") @db.Decimal(5, 2)
+
+  // Bloque B: vigencia por defecto de una cotización y descuento máximo
+  // permitido. Editable por PATCH solo desde el Bloque B.
+  quoteValidityDays  Int     @default(15) @map("quote_validity_days")
+  maxDiscountPercent Decimal @default(100.00) @map("max_discount_percent") @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Las 7 CHECK (singleton = TRUE, business_name no en blanco vía BTRIM,
+  // tax_rate 0-100, quote_validity_days > 0, max_discount_percent 0-100,
+  // currency_code formato ISO de 3 letras mayúsculas, currency_symbol no en
+  // blanco vía BTRIM) se agregan a mano en migration.sql, mismo criterio
+  // que el resto del dominio.
+  @@map("company_settings")
 }

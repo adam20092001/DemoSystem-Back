@@ -18,9 +18,6 @@ const MAX_MONEY = new Prisma.Decimal('999999999999.99');
 const QUANTITY_PATTERN = /^\d{1,11}(\.\d{1,3})?$/;
 const DISCOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
 
-/** IGV siempre 0.00 en la Fase 5 (D5): configuración de impuestos llega en la Fase 10. */
-export const QUOTE_TAX_AMOUNT: Prisma.Decimal = new Prisma.Decimal(0);
-
 /**
  * Parsea y valida la cantidad de un ítem. Nunca confía en que el llamador
  * (DTO HTTP o input interno) ya la validó. Nunca usa Number()/parseFloat():
@@ -117,6 +114,37 @@ export function assertDiscountWithinSubtotal(
   }
 }
 
+/**
+ * Invariante de descuento máximo CONFIGURADO (Fase 10, Bloque B):
+ * discountAmount * 100 <= subtotal * maxDiscountPercent. Comparación
+ * cruzada por multiplicación, sin dividir ni redondear un "monto máximo
+ * permitido" intermedio (evitaría introducir un error de redondeo que no
+ * existe en los datos de entrada). Pura: únicamente Prisma.Decimal, sin
+ * Number()/parseFloat() ni aritmética de punto flotante de JS.
+ *
+ * Complementa a assertDiscountWithinSubtotal() (invariante absoluta,
+ * siempre 0 <= discountAmount <= subtotal); esta es la invariante adicional
+ * y configurable. Cuando subtotal = 0, discountAmount ya debe ser 0 por la
+ * invariante absoluta, así que 0*100 <= 0*maxDiscountPercent siempre se
+ * cumple trivialmente — sin necesidad de un caso especial.
+ *
+ * Única fuente de verdad reutilizada por Quotes y Sales (sale-calculator.ts
+ * la reexporta, mismo criterio que el resto de primitivas compartidas de
+ * este archivo): nunca se duplica una fórmula de porcentaje sutilmente
+ * distinta en cada dominio.
+ */
+export function assertDiscountWithinConfiguredLimit(
+  discountAmount: Prisma.Decimal,
+  subtotal: Prisma.Decimal,
+  maxDiscountPercent: Prisma.Decimal,
+): void {
+  if (discountAmount.mul(100).greaterThan(subtotal.mul(maxDiscountPercent))) {
+    throw new BadRequestException(
+      'El descuento supera el porcentaje máximo permitido por la configuración de la empresa',
+    );
+  }
+}
+
 /** total = subtotal - discountAmount + taxAmount. */
 export function calculateTotal(
   subtotal: Prisma.Decimal,
@@ -126,6 +154,50 @@ export function calculateTotal(
   const total = subtotal.minus(discountAmount).plus(taxAmount);
   assertMoneyWithinRange(total, 'total');
   return total;
+}
+
+/**
+ * Base imponible del IGV (Fase 10, Bloque C): taxableBase = subtotal -
+ * discountAmount. Nunca negativa en la práctica: assertDiscountWithinSubtotal
+ * ya garantiza discountAmount <= subtotal antes de que cualquier llamador
+ * invoque esto. Extraída como función propia (en vez de inline en cada
+ * llamador) porque tres sitios distintos la necesitan (creación de Quote,
+ * actualización comercial de Quote, creación directa de Sale) y debe ser
+ * exactamente la misma fórmula en los tres.
+ */
+export function calculateTaxableBase(
+  subtotal: Prisma.Decimal,
+  discountAmount: Prisma.Decimal,
+): Prisma.Decimal {
+  return subtotal.minus(discountAmount);
+}
+
+/**
+ * IGV a nivel de DOCUMENTO (Fase 10, Bloque C — Product.salePrice/
+ * lineTotal/subtotal siguen siendo SIEMPRE antes de impuesto; esta función
+ * nunca se invoca por ítem). taxEnabled=false -> 0.00 sin importar taxRate
+ * (nunca se lee ni se usa). taxEnabled=true -> ROUND(taxableBase * taxRate
+ * / 100, 2), redondeo ÚNICO HALF_UP (mismo criterio que calculateLineTotal:
+ * coincide con ROUND() de PostgreSQL, nunca el redondeo de punto flotante
+ * de JS). Pura: solo Prisma.Decimal, sin PrismaService/SettingsReader/
+ * inyección de Nest — única fuente de verdad reutilizada por Quotes y Sales
+ * (sale-calculator.ts la reexporta, mismo criterio que
+ * assertDiscountWithinConfiguredLimit).
+ */
+export function calculateTaxAmount(
+  taxableBase: Prisma.Decimal,
+  taxEnabled: boolean,
+  taxRate: Prisma.Decimal,
+): Prisma.Decimal {
+  if (!taxEnabled) {
+    return new Prisma.Decimal(0);
+  }
+  const taxAmount = taxableBase
+    .mul(taxRate)
+    .dividedBy(100)
+    .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  assertMoneyWithinRange(taxAmount, 'impuesto');
+  return taxAmount;
 }
 
 /**

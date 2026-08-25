@@ -4,11 +4,28 @@ import { PrismaService } from '../database/prisma.service';
 import { AuditAction } from './audit-action.enum';
 
 /**
- * Valores simples y no sensibles admitidos en metadata. Deliberadamente no
- * incluye `unknown`/`any`: cualquier estructura anidada arbitraria queda
- * fuera y debe aplanarse antes de auditar.
+ * Escalar simple y no sensible: la única forma de valor admitida dentro de
+ * un objeto anidado de metadata (ver AuditMetadataObject).
  */
-export type AuditMetadataValue = string | number | boolean | null | string[];
+export type AuditMetadataScalar = string | number | boolean | null;
+
+/**
+ * Objeto anidado de un solo nivel, exclusivamente de escalares. NUNCA
+ * `unknown`/`any`/`Record<string, unknown>`: no admite un segundo nivel de
+ * anidamiento, arrays de objetos, ni ninguna estructura arbitraria. Pensado
+ * para pares oldValues/newValues (Fase 10, Bloque A) construidos siempre en
+ * el servidor a partir de una whitelist explícita de campos conocidos —
+ * nunca a partir del body de la petición sin filtrar.
+ */
+export type AuditMetadataObject = Readonly<Record<string, AuditMetadataScalar>>;
+
+/**
+ * Valores admitidos en metadata. Deliberadamente NO incluye `unknown`/`any`
+ * ni un segundo nivel de anidamiento: cualquier estructura más profunda
+ * queda fuera y debe aplanarse antes de auditar.
+ */
+export type AuditMetadataValue =
+  AuditMetadataScalar | string[] | AuditMetadataObject;
 export type AuditMetadata = Record<string, AuditMetadataValue>;
 
 /** Cliente Prisma normal o cliente de transacción interactiva. */
@@ -211,12 +228,95 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'sourceId',
     'eventType',
   ],
+  // Fase 10, Bloque A. A diferencia de CATEGORY_UPDATED/UNIT_UPDATED/
+  // CUSTOMER_UPDATED (solo `updatedFields`), CONFIGURATION_UPDATED sí
+  // audita valores anterior/nuevo: ConfigurationService construye
+  // oldValues/newValues en el servidor a partir de una whitelist cerrada de
+  // los 8 campos editables del Bloque A (businessName/tradeName/taxId/
+  // address/phone/email/currencyCode/currencySymbol) — nunca del body crudo
+  // de la petición. changedFields acota además, a nivel del saneador (ver
+  // sanitizeAuditMetadata), qué claves pueden aparecer dentro de
+  // oldValues/newValues: cualquier clave que no figure en changedFields se
+  // descarta aunque el llamador la hubiera incluido por error. singleton/
+  // id/createdAt/updatedAt y los campos aún bloqueados del Bloque A
+  // (taxEnabled/taxRate/quoteValidityDays/maxDiscountPercent) nunca
+  // aparecen: ConfigurationService no los declara como editables en este
+  // bloque.
+  [AuditAction.CONFIGURATION_UPDATED]: [
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
+  // Fase 10, Bloque D. Mismo contrato que CONFIGURATION_UPDATED
+  // (changedFields + oldValues/newValues acotados a los campos realmente
+  // cambiados), más `documentType` como campo plano — permite identificar
+  // QUOTE/SALE sin depender de entityId. Los únicos campos editables son
+  // prefix/padding/currentNumber; nunca se audita id/updatedAt ni el valor
+  // "próximo" que emitiría next().
+  [AuditAction.SEQUENCE_UPDATED]: [
+    'documentType',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
 };
+
+function isPlainObject(
+  value: AuditMetadataValue,
+): value is AuditMetadataObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isAuditScalar(value: unknown): value is AuditMetadataScalar {
+  return (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    value === null
+  );
+}
+
+/**
+ * Sanea un valor-objeto anidado (p. ej. oldValues/newValues): descarta
+ * cualquier clave con nombre sensible conocido, cualquier valor que no sea
+ * un escalar (nunca arrays, nunca un segundo nivel de anidamiento), y —
+ * defensa de última línea, independiente de lo que haya construido el
+ * llamador — cualquier clave que no figure en `scopeKeys` cuando este se
+ * provee. No muta `value`.
+ */
+function sanitizeNestedObject(
+  value: AuditMetadataObject,
+  scopeKeys: readonly string[] | undefined,
+): AuditMetadataObject {
+  const sanitized: Record<string, AuditMetadataScalar> = {};
+  for (const key of Object.keys(value)) {
+    if (FORBIDDEN_METADATA_KEYS.has(key.toLowerCase())) {
+      continue;
+    }
+    if (scopeKeys !== undefined && !scopeKeys.includes(key)) {
+      continue;
+    }
+    const nestedValue: unknown = value[key];
+    if (isAuditScalar(nestedValue)) {
+      sanitized[key] = nestedValue;
+    }
+  }
+  return sanitized;
+}
 
 /**
  * Descarta cualquier clave no explícitamente permitida para la acción, y
  * como defensa adicional, cualquier clave que coincida con un nombre
  * sensible conocido, sea o no parte de la lista blanca. No muta `metadata`.
+ *
+ * Cuando el valor de una clave permitida es un objeto anidado (p. ej.
+ * oldValues/newValues, Fase 10), se sanea recursivamente con
+ * sanitizeNestedObject(): si `changedFields` está presente en el mismo
+ * payload como string[], acota además qué claves pueden sobrevivir dentro
+ * de ESE objeto anidado — así ninguna acción futura que reutilice este
+ * mismo patrón (changedFields + oldValues/newValues) puede filtrar un campo
+ * no declarado como realmente cambiado, sin importar qué construyó el
+ * llamador.
  */
 export function sanitizeAuditMetadata(
   action: AuditAction,
@@ -229,6 +329,11 @@ export function sanitizeAuditMetadata(
   const allowedKeys = ALLOWED_METADATA_KEYS_BY_ACTION[action];
   const sanitized: AuditMetadata = {};
 
+  const changedFieldsRaw = metadata.changedFields;
+  const changedFields = Array.isArray(changedFieldsRaw)
+    ? changedFieldsRaw
+    : undefined;
+
   for (const key of Object.keys(metadata)) {
     if (FORBIDDEN_METADATA_KEYS.has(key.toLowerCase())) {
       continue;
@@ -236,7 +341,10 @@ export function sanitizeAuditMetadata(
     if (!allowedKeys.includes(key)) {
       continue;
     }
-    sanitized[key] = metadata[key];
+    const value = metadata[key];
+    sanitized[key] = isPlainObject(value)
+      ? sanitizeNestedObject(value, changedFields)
+      : value;
   }
 
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;

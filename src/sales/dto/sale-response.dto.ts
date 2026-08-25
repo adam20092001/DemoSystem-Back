@@ -172,7 +172,11 @@ export class SaleListItemResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en el MVP.' })
+  @ApiProperty({
+    type: String,
+    description:
+      'IGV a nivel de documento (Fase 10, Bloque C): "0.00" si taxEnabled=false; ROUND(taxableBase * taxRate / 100, 2) si true. Copiado EXACTO desde la cotización cuando la venta proviene de una conversión (nunca recalculado).',
+  })
   taxAmount!: string;
 
   @ApiProperty({ type: String })
@@ -267,7 +271,11 @@ export class SaleResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en el MVP.' })
+  @ApiProperty({
+    type: String,
+    description:
+      'IGV a nivel de documento (Fase 10, Bloque C): "0.00" si taxEnabled=false; ROUND(taxableBase * taxRate / 100, 2) si true. Copiado EXACTO desde la cotización cuando la venta proviene de una conversión (nunca recalculado).',
+  })
   taxAmount!: string;
 
   @ApiProperty({ type: String })

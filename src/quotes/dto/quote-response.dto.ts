@@ -131,7 +131,11 @@ export class QuoteListItemResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en la Fase 5.' })
+  @ApiProperty({
+    type: String,
+    description:
+      'IGV a nivel de documento (Fase 10, Bloque C): "0.00" si taxEnabled=false; ROUND(taxableBase * taxRate / 100, 2) si true. Snapshot histórico congelado al crear/actualizar comercialmente.',
+  })
   taxAmount!: string;
 
   @ApiProperty({ type: String })
@@ -195,7 +199,11 @@ export class QuoteResponseDto {
   @ApiProperty({ type: String })
   discountAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Siempre "0.00" en la Fase 5.' })
+  @ApiProperty({
+    type: String,
+    description:
+      'IGV a nivel de documento (Fase 10, Bloque C): "0.00" si taxEnabled=false; ROUND(taxableBase * taxRate / 100, 2) si true. Snapshot histórico congelado al crear/actualizar comercialmente.',
+  })
   taxAmount!: string;
 
   @ApiProperty({ type: String })

@@ -121,6 +121,46 @@ export function setupSwagger(app: INestApplication): boolean {
         'reemplaza los reportes de la etiqueta Reports, y NO constituye una ' +
         'plataforma de Business Intelligence.',
     )
+    .addTag(
+      'Configuration',
+      'Configuración global de la empresa: fila singleton única (identidad, ' +
+        'moneda, vigencia por defecto de cotización, descuento máximo ' +
+        'configurado e IGV interno del sistema). GET para ADMIN y ' +
+        'MANAGEMENT; PATCH solo para ADMIN. taxEnabled/taxRate calculan IGV ' +
+        'a nivel de documento sobre precios que siempre se registran ANTES ' +
+        'de impuesto (Product.salePrice); NO es facturación electrónica, ' +
+        'NO es SUNAT, NO es PLE. Cambiar quoteValidityDays/' +
+        'maxDiscountPercent/taxEnabled/taxRate nunca modifica cotizaciones ' +
+        'o ventas ya existentes: solo aplica a operaciones comerciales ' +
+        'nuevas o efectivamente modificadas desde ese momento. Incluye ' +
+        'además la administración de secuencias de documentos ' +
+        '(/configuration/sequences: prefix/padding/currentNumber de QUOTE y ' +
+        'SALE). GET para ADMIN y MANAGEMENT; PATCH solo para ADMIN. El ' +
+        'frontend NUNCA genera ni previsualiza números de documento — no ' +
+        'existe ningún endpoint de "próximo número": la única generación es ' +
+        'interna, dentro de la transacción de cada cotización/venta. Un ' +
+        'cambio de configuración de secuencia afecta solo a los documentos ' +
+        'generados desde ese momento; los números ya emitidos son ' +
+        'históricos y nunca se modifican. currentNumber puede mantenerse ' +
+        'igual o avanzar; nunca puede disminuir respecto del valor actual.',
+    )
+    .addTag(
+      'Audit',
+      'Bitácora de auditoría de solo lectura (Fase 10, Bloque E): quién, ' +
+        'qué, cuándo, sobre qué entidad, para las acciones críticas del ' +
+        'sistema. GET /audit (paginado, con filtros) y GET /audit/:id, ' +
+        'ambos exclusivos para ADMIN y MANAGEMENT; ningún otro rol tiene ' +
+        'acceso. Orden fijo: más reciente primero (createdAt descendente, ' +
+        'id descendente como desempate). Los filtros de fecha (from/to) ' +
+        'usan el día de negocio America/Lima, igual criterio que Reports/ ' +
+        'Accounting/Payments. El listado nunca expone metadata ni dirección ' +
+        'IP: ambas solo están disponibles en el detalle, y la dirección IP ' +
+        'del detalle solo es visible para ADMIN (MANAGEMENT siempre recibe ' +
+        'null). No existe ninguna vía de mutación ni de exportación/purga ' +
+        'de auditoría; leer esta bitácora nunca genera, a su vez, una nueva ' +
+        'entrada de auditoría. No constituye cumplimiento legal/fiscal ni ' +
+        'un log técnico de cada request.',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, documentConfig);

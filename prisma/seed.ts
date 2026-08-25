@@ -4,6 +4,7 @@ import {
   CustomerStage,
   CustomerStatus,
   DocumentType,
+  Prisma,
   PrismaClient,
   RoleName,
 } from '@prisma/client';
@@ -321,6 +322,42 @@ async function seedAccounts(): Promise<void> {
   console.log(`Cuentas contables verificadas: ${SEED_ACCOUNTS.length}`);
 }
 
+/**
+ * Configuración de la empresa (Fase 10, Bloque A): fila singleton única.
+ * Mismo criterio de idempotencia que seedDocumentSequences() — `update: {}`
+ * a propósito: businessName/tradeName/taxId/address/phone/email/
+ * currencyCode/currencySymbol son configuración operativa editable por
+ * ADMIN vía PATCH /api/v1/configuration, nunca invariantes de dominio
+ * protegidas (a diferencia de seedGenericCustomer()/seedAccounts()).
+ * Reejecutar el seed después de que un administrador haya personalizado la
+ * configuración jamás debe restaurar los valores de fábrica. taxEnabled/
+ * taxRate/quoteValidityDays/maxDiscountPercent tampoco se tocan en el
+ * update por el mismo motivo, aunque en el Bloque A todavía no son
+ * editables por PATCH.
+ */
+async function seedCompanySettings(): Promise<void> {
+  await prisma.companySettings.upsert({
+    where: { singleton: true },
+    update: {},
+    create: {
+      singleton: true,
+      businessName: 'Empresa Comercial Demo S.A.C.',
+      tradeName: 'Comercial Demo',
+      taxId: null,
+      address: null,
+      phone: null,
+      email: null,
+      currencyCode: 'PEN',
+      currencySymbol: 'S/',
+      taxEnabled: false,
+      taxRate: new Prisma.Decimal('18.00'),
+      quoteValidityDays: 15,
+      maxDiscountPercent: new Prisma.Decimal('100.00'),
+    },
+  });
+  console.log('Configuración de la empresa verificada (fila singleton)');
+}
+
 async function main(): Promise<void> {
   await seedRoles();
   await seedInitialAdmin();
@@ -329,6 +366,7 @@ async function main(): Promise<void> {
   await seedGenericCustomer();
   await seedDocumentSequences();
   await seedAccounts();
+  await seedCompanySettings();
 }
 
 main()

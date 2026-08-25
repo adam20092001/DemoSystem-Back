@@ -94,6 +94,27 @@ export function fromPrismaDate(date: Date): string {
 }
 
 /**
+ * Suma `days` días calendario a una fecha YYYY-MM-DD (Fase 10, Bloque B:
+ * vigencia por defecto de una cotización = issueDate + quoteValidityDays).
+ * Aritmética pura sobre componentes UTC vía Date.UTC(): no depende del huso
+ * de la máquina donde corre el proceso (mismo criterio que toPrismaDate/
+ * fromPrismaDate). Date.UTC() normaliza el desborde de día más allá del fin
+ * de mes hacia el mes/año siguiente de forma nativa y correcta también en
+ * años bisiestos, así que no hace falta tabla de días-por-mes ni lógica de
+ * bisiesto manual.
+ */
+export function addCalendarDays(dateOnly: string, days: number): string {
+  if (!isValidDateOnly(dateOnly)) {
+    throw new BadRequestException(
+      `Fecha inválida: "${dateOnly}". Se espera una fecha real en formato YYYY-MM-DD.`,
+    );
+  }
+  const [year, month, day] = dateOnly.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return fromPrismaDate(shifted);
+}
+
+/**
  * Vencida únicamente cuando expirationDate < businessDate (igualdad =
  * vigente, sin semántica de hora). La comparación lexicográfica de strings
  * "YYYY-MM-DD" coincide con el orden cronológico, así que no hace falta

@@ -19,12 +19,14 @@ import {
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import {
+  addCalendarDays,
   businessToday,
   fromPrismaDate,
   isValidDateOnly,
   toPrismaDate,
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
+import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
 import { DocumentSequenceService } from '../document-sequences/document-sequence.service';
 import {
@@ -34,8 +36,8 @@ import {
   toSafeQuoteListItem,
 } from './mappers/quote.mapper';
 import {
-  QUOTE_TAX_AMOUNT,
   assertAcceptable,
+  assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertEditable,
   assertQuantityAllowedForUnit,
@@ -43,6 +45,8 @@ import {
   buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
+  calculateTaxableBase,
+  calculateTaxAmount,
   calculateTotal,
   effectiveStatus,
   parseDiscountAmount,
@@ -86,6 +90,7 @@ interface LockedQuoteRow {
   expirationDate: Date;
   subtotal: Prisma.Decimal;
   discountAmount: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
 }
 
 /**
@@ -120,6 +125,7 @@ export class QuotesService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly documentSequenceService: DocumentSequenceService,
+    private readonly settingsReader: SettingsReader,
   ) {}
 
   async create(input: CreateQuoteInput): Promise<SafeQuote> {
@@ -130,7 +136,10 @@ export class QuotesService {
     }
     this.assertNoDuplicateProductIds(input.items.map((item) => item.productId));
 
-    if (!isValidDateOnly(input.expirationDate)) {
+    if (
+      input.expirationDate !== undefined &&
+      !isValidDateOnly(input.expirationDate)
+    ) {
       throw new BadRequestException(
         'La fecha de vencimiento debe ser una fecha válida en formato YYYY-MM-DD',
       );
@@ -144,13 +153,30 @@ export class QuotesService {
     }));
 
     const businessDate = businessToday();
-    if (input.expirationDate < businessDate) {
+    if (
+      input.expirationDate !== undefined &&
+      input.expirationDate < businessDate
+    ) {
       throw new BadRequestException(
         'La fecha de vencimiento no puede ser anterior a la fecha de emisión',
       );
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // Bloque 10, B: snapshot ÚNICO de configuración para esta operación.
+      // quoteValidityDays solo se usa si expirationDate se omitió;
+      // maxDiscountPercent SIEMPRE se necesita (incluso con expirationDate
+      // explícito), así que la lectura nunca se condiciona a eso.
+      const settings = await this.settingsReader.getCurrent(tx);
+
+      // resolvedExpirationDate: explícito gana tal cual (§10 aprobado, sin
+      // forzar quoteValidityDays sobre él); ausente -> issueDate (el MISMO
+      // businessDate ya resuelto arriba) + quoteValidityDays días
+      // calendario. Nunca una segunda businessToday() independiente.
+      const resolvedExpirationDate =
+        input.expirationDate ??
+        addCalendarDays(businessDate, settings.quoteValidityDays);
+
       const customer = await this.loadAndValidateCustomer(tx, input.customerId);
       const lines = await this.loadAndValidateItems(tx, parsedItems);
 
@@ -159,7 +185,21 @@ export class QuotesService {
       );
       const subtotal = calculateSubtotal(lineTotals);
       assertDiscountWithinSubtotal(discountAmount, subtotal);
-      const total = calculateTotal(subtotal, discountAmount, QUOTE_TAX_AMOUNT);
+      assertDiscountWithinConfiguredLimit(
+        discountAmount,
+        subtotal,
+        settings.maxDiscountPercent,
+      );
+      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
+      // (subtotal - descuento), nunca extraído de Product.salePrice ni
+      // aplicado por ítem. taxEnabled=false -> 0.00 sin importar taxRate.
+      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
+      const taxAmount = calculateTaxAmount(
+        taxableBase,
+        settings.taxEnabled,
+        settings.taxRate,
+      );
+      const total = calculateTotal(subtotal, discountAmount, taxAmount);
 
       const number = await this.documentSequenceService.next(
         tx,
@@ -178,10 +218,10 @@ export class QuotesService {
           customerAddress: customer.address,
           sellerId: input.actorUserId,
           issueDate: toPrismaDate(businessDate),
-          expirationDate: toPrismaDate(input.expirationDate),
+          expirationDate: toPrismaDate(resolvedExpirationDate),
           subtotal,
           discountAmount,
-          taxAmount: QUOTE_TAX_AMOUNT,
+          taxAmount,
           total,
           notes,
           items: {
@@ -330,11 +370,52 @@ export class QuotesService {
 
       const effectiveDiscount = discountAmount ?? existing.discountAmount;
       assertDiscountWithinSubtotal(effectiveDiscount, subtotal);
-      const total = calculateTotal(
-        subtotal,
-        effectiveDiscount,
-        QUOTE_TAX_AMOUNT,
-      );
+
+      // Bloque 10, B (§14/§15 del plan aprobado): el máximo configurado
+      // solo se revalida cuando la actualización AFECTA realmente el par
+      // comercial — items presentes (el subtotal puede cambiar, se evalúa
+      // siempre que se reemplace el conjunto) o un discountAmount que
+      // difiere del ya persistido (reenviar el mismo valor nunca cuenta
+      // como cambio comercial nuevo). Una edición puramente no comercial
+      // (p. ej. solo notes/expirationDate) nunca vuelve a evaluar el
+      // descuento contra la configuración vigente, aunque esta se haya
+      // endurecido después de que la cotización ya existía — cero
+      // consultas a SettingsReader en ese caso.
+      const affectsCommercialTotals =
+        parsedItems !== undefined ||
+        (discountAmount !== undefined &&
+          !discountAmount.equals(existing.discountAmount));
+
+      let taxAmount: Prisma.Decimal;
+      if (affectsCommercialTotals) {
+        // Fase 10, Bloque C (§20 del plan aprobado): una modificación
+        // comercial siempre recalcula subtotal/descuento/impuesto/total con
+        // la configuración VIGENTE — nunca preserva parcialmente el
+        // impuesto histórico cuando el subtotal/descuento cambian. Una sola
+        // lectura de SettingsReader para todo (máximo configurado + IGV).
+        const settings = await this.settingsReader.getCurrent(tx);
+        assertDiscountWithinConfiguredLimit(
+          effectiveDiscount,
+          subtotal,
+          settings.maxDiscountPercent,
+        );
+        const taxableBase = calculateTaxableBase(subtotal, effectiveDiscount);
+        taxAmount = calculateTaxAmount(
+          taxableBase,
+          settings.taxEnabled,
+          settings.taxRate,
+        );
+        data.taxAmount = taxAmount;
+        updatedFields.push('taxAmount');
+      } else {
+        // No comercial: el impuesto histórico se preserva EXACTO, sin
+        // releer configuración ni recalcular — aunque taxEnabled/taxRate
+        // hayan cambiado desde que la cotización se creó (§19 del plan
+        // aprobado, previene deriva histórica retroactiva).
+        taxAmount = existing.taxAmount;
+      }
+
+      const total = calculateTotal(subtotal, effectiveDiscount, taxAmount);
 
       if (discountAmount !== undefined) {
         data.discountAmount = discountAmount;
@@ -556,7 +637,8 @@ export class QuotesService {
         issue_date       AS "issueDate",
         expiration_date  AS "expirationDate",
         subtotal,
-        discount_amount  AS "discountAmount"
+        discount_amount  AS "discountAmount",
+        tax_amount       AS "taxAmount"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE
