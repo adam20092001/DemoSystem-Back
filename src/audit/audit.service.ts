@@ -268,6 +268,10 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'oldValues',
     'newValues',
   ],
+  // KAN-18, Bloque B. Evento de sesión, no de administración de usuarios:
+  // solo los dos RoleName involucrados, nunca roleId, JWT, cookie ni el
+  // cuerpo de la petición.
+  [AuditAction.ACTIVE_ROLE_SWITCHED]: ['fromRole', 'toRole'],
 };
 
 function isPlainObject(

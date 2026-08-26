@@ -796,4 +796,24 @@ describe('sanitizeAuditMetadata', () => {
       saleNumber: 'NV-000005',
     });
   });
+
+  // KAN-18, Bloque B.
+  it('ACTIVE_ROLE_SWITCHED conserva solo fromRole/toRole', () => {
+    const metadata = {
+      fromRole: 'SELLER',
+      toRole: 'ADMIN',
+      userId: 'user-1',
+      token: 'jwt-no-deberia-llegar-aqui',
+    } as unknown as AuditMetadata;
+
+    const sanitized = sanitizeAuditMetadata(
+      AuditAction.ACTIVE_ROLE_SWITCHED,
+      metadata,
+    );
+
+    expect(sanitized).toEqual({ fromRole: 'SELLER', toRole: 'ADMIN' });
+    expect(JSON.stringify(sanitized)).not.toContain(
+      'jwt-no-deberia-llegar-aqui',
+    );
+  });
 });
