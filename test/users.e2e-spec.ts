@@ -22,7 +22,7 @@ interface SafeUserBody {
   id: string;
   username: string;
   email: string;
-  role: RoleName;
+  roles: RoleName[];
   status: string;
   mustChangePassword: boolean;
 }
@@ -122,13 +122,13 @@ describe('Users (e2e)', () => {
           username: createdUsername,
           email: `${createdUsername}@demosystem.test`,
           temporaryPassword: 'TemporalCreado123',
-          roleName: RoleName.WAREHOUSE,
+          roleNames: [RoleName.WAREHOUSE],
         });
 
       expect(response.status).toBe(201);
       const body = response.body as SafeUserBody;
       expect(body.username).toBe(createdUsername.toLowerCase());
-      expect(body.role).toBe(RoleName.WAREHOUSE);
+      expect(body.roles).toEqual([RoleName.WAREHOUSE]);
       expect(body.mustChangePassword).toBe(true);
       expect(response.body).not.toHaveProperty('passwordHash');
       expect(response.body).not.toHaveProperty('roleId');
@@ -153,7 +153,7 @@ describe('Users (e2e)', () => {
           username: createdUsername,
           email: `distinto-${Date.now()}@demosystem.test`,
           temporaryPassword: 'OtraTemporal123',
-          roleName: RoleName.SELLER,
+          roleNames: [RoleName.SELLER],
         });
 
       expect(response.status).toBe(409);
@@ -169,7 +169,7 @@ describe('Users (e2e)', () => {
           username: `distinto_${Date.now()}`,
           email: `${createdUsername}@demosystem.test`,
           temporaryPassword: 'OtraTemporal123',
-          roleName: RoleName.SELLER,
+          roleNames: [RoleName.SELLER],
         });
 
       expect(response.status).toBe(409);
@@ -185,7 +185,7 @@ describe('Users (e2e)', () => {
           username: `extra_${Date.now()}`,
           email: `extra_${Date.now()}@demosystem.test`,
           temporaryPassword: 'TemporalExtra123',
-          roleName: RoleName.SELLER,
+          roleNames: [RoleName.SELLER],
           roleId: 'algo-no-permitido',
         });
 
@@ -268,19 +268,25 @@ describe('Users (e2e)', () => {
       const response = await request(app.getHttpServer())
         .patch(`/api/v1/users/${admin.id}`)
         .set('Cookie', adminCookie)
-        .send({ roleName: RoleName.SELLER });
+        .send({ roleNames: [RoleName.SELLER] });
 
       expect(response.status).toBe(409);
 
       const refreshed = await prisma.user.findUniqueOrThrow({
         where: { id: admin.id },
-        select: { role: { select: { name: true } }, updatedAt: true },
+        select: {
+          roles: { select: { role: { select: { name: true } } } },
+          updatedAt: true,
+        },
       });
-      expect(refreshed.role.name).toBe(RoleName.ADMIN);
+      expect(refreshed.roles.map((r) => r.role.name)).toEqual([RoleName.ADMIN]);
       expect(refreshed.updatedAt.getTime()).toBe(admin.updatedAt.getTime());
 
       const activeAdmins = await prisma.user.count({
-        where: { role: { name: RoleName.ADMIN }, status: 'ACTIVE' },
+        where: {
+          roles: { some: { role: { name: RoleName.ADMIN } } },
+          status: 'ACTIVE',
+        },
       });
       expect(activeAdmins).toBe(1);
 

@@ -2,14 +2,14 @@ import { ApiProperty } from '@nestjs/swagger';
 import { RoleName, UserStatus } from '@prisma/client';
 
 /**
- * Forma pública de un usuario, únicamente para documentación Swagger.
- * Refleja SafeUser: nunca passwordHash, failedLoginAttempts ni roleId.
- * KAN-18, Bloque A: `role` (singular) se reemplaza por `roles` (uno o más
- * roles asignados) — esta es la administración persistente de usuarios,
- * distinta de la sesión (ver AuthSessionResponseDto/AuthenticatedUserResponseDto
- * en el módulo Auth, que sí exponen un único rol activo).
+ * Respuesta de `POST /auth/login` (KAN-18, Bloque A). Deliberadamente
+ * distinta de UserResponseDto (administración persistente de usuarios):
+ * `roles` son TODOS los roles asignados; `activeRole` es el único rol con
+ * el que esta sesión concreta autenticó — el mismo valor validado dentro
+ * del JWT (nunca expuesto en el cuerpo de la respuesta, solo en la cookie
+ * HttpOnly).
  */
-export class UserResponseDto {
+export class AuthSessionResponseDto {
   @ApiProperty({ example: 'b3f1c2a0-...-uuid' })
   id!: string;
 
@@ -28,11 +28,18 @@ export class UserResponseDto {
   @ApiProperty({
     enum: RoleName,
     isArray: true,
-    example: [RoleName.SELLER],
-    description:
-      'Todos los roles asignados al usuario, orden de presentación estable.',
+    example: [RoleName.ADMIN, RoleName.SELLER],
+    description: 'Todos los roles asignados al usuario.',
   })
   roles!: RoleName[];
+
+  @ApiProperty({
+    enum: RoleName,
+    example: RoleName.SELLER,
+    description:
+      'Rol con el que esta sesión quedó autenticada. Con un solo rol asignado, coincide con roles[0].',
+  })
+  activeRole!: RoleName;
 
   @ApiProperty({ enum: UserStatus, example: UserStatus.ACTIVE })
   status!: UserStatus;

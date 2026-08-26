@@ -52,7 +52,13 @@
  * más `documentType` como campo plano adicional para identificar QUOTE/SALE
  * sin depender de entityId. DocumentSequenceService.next() (generación
  * automática de correlativos) nunca audita: esta acción solo la emite la
- * administración manual expuesta en el Bloque D.
+ * administración manual expuesta en el Bloque D. ACTIVE_ROLE_SWITCHED se
+ * agrega en KAN-18, Bloque B: AuthService.switchRole() es su único emisor.
+ * Representa un evento de sesión/autenticación (activeRole del JWT de ESTA
+ * sesión), nunca una mutación persistente de User/UserRole — por eso nunca
+ * reutiliza USER_UPDATED. Solo se registra cuando el rol activo realmente
+ * cambia: una solicitud de cambio al mismo rol ya activo es un no-op
+ * explícito y no genera esta acción.
  */
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
@@ -106,4 +112,5 @@ export enum AuditAction {
   ACCOUNTING_ENTRY_REVERSED = 'ACCOUNTING_ENTRY_REVERSED',
   CONFIGURATION_UPDATED = 'CONFIGURATION_UPDATED',
   SEQUENCE_UPDATED = 'SEQUENCE_UPDATED',
+  ACTIVE_ROLE_SWITCHED = 'ACTIVE_ROLE_SWITCHED',
 }

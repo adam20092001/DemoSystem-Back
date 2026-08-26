@@ -1,4 +1,8 @@
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RoleName, UserStatus } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -26,6 +30,11 @@ interface UserUpdateArgs {
 
 const NOW = new Date('2026-01-01T00:00:00.000Z');
 
+/**
+ * KAN-18, Bloque A: `roles` (arreglo de membresías, cada una con su Role
+ * anidado) reemplaza a la relación singular `role` consumida por
+ * `toSafeUser()`/`resolveDefaultActiveRole()`.
+ */
 function makeSafeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'user-1',
@@ -38,9 +47,13 @@ function makeSafeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
     lastLoginAt: null,
     createdAt: NOW,
     updatedAt: NOW,
-    role: { name: RoleName.SELLER },
+    roles: [{ role: { name: RoleName.SELLER } }],
     ...overrides,
   };
+}
+
+function rolesOf(...names: RoleName[]) {
+  return names.map((name) => ({ role: { name } }));
 }
 
 function createPrismaMock() {
@@ -71,7 +84,7 @@ function createPasswordServiceMock() {
 
 function createTokenServiceMock() {
   return {
-    sign: jest.fn<Promise<string>, [string]>(),
+    sign: jest.fn<Promise<string>, [string, RoleName]>(),
   };
 }
 
@@ -135,6 +148,60 @@ describe('AuthService', () => {
       expect(result.user).not.toHaveProperty('token');
       expect(result.user).not.toHaveProperty('passwordHash');
       expect(JSON.stringify(result.user)).not.toContain('signed-jwt');
+    });
+
+    it('el login devuelve roles[] y el activeRole resuelto, y firma el JWT con ese mismo activeRole', async () => {
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: '$argon2id$hash',
+        status: UserStatus.ACTIVE,
+        failedLoginAttempts: 0,
+      });
+      passwordService.verify.mockResolvedValue(true);
+      prisma.tx.user.update.mockResolvedValue(
+        makeSafeUserRow({
+          roles: [
+            { role: { name: RoleName.ADMIN } },
+            { role: { name: RoleName.WAREHOUSE } },
+          ],
+        }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt');
+
+      const result = await service.login(credentials);
+
+      // Orden de default-active-role cerrado: SELLER > WAREHOUSE >
+      // MANAGEMENT > ADMIN — con ADMIN+WAREHOUSE asignados, gana WAREHOUSE.
+      expect(result.user.activeRole).toBe(RoleName.WAREHOUSE);
+      expect(result.user.roles).toEqual(
+        expect.arrayContaining([RoleName.ADMIN, RoleName.WAREHOUSE]),
+      );
+      expect(tokenService.sign).toHaveBeenCalledWith(
+        'user-1',
+        RoleName.WAREHOUSE,
+      );
+    });
+
+    it('con un único rol asignado, ese rol se preserva como activeRole', async () => {
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: '$argon2id$hash',
+        status: UserStatus.ACTIVE,
+        failedLoginAttempts: 0,
+      });
+      passwordService.verify.mockResolvedValue(true);
+      prisma.tx.user.update.mockResolvedValue(
+        makeSafeUserRow({ roles: [{ role: { name: RoleName.MANAGEMENT } }] }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt');
+
+      const result = await service.login(credentials);
+
+      expect(result.user.activeRole).toBe(RoleName.MANAGEMENT);
+      expect(tokenService.sign).toHaveBeenCalledWith(
+        'user-1',
+        RoleName.MANAGEMENT,
+      );
     });
 
     it('normaliza el identifier antes de buscar por username o email', async () => {
@@ -547,6 +614,146 @@ describe('AuthService', () => {
       expect(serialized).not.toContain('Temporal1234');
       expect(serialized).not.toContain('NuevaClaveSegura2026');
       expect(serialized).not.toContain('nuevo-hash');
+    });
+  });
+
+  describe('switchRole', () => {
+    const baseInput = {
+      userId: 'user-1',
+      currentActiveRole: RoleName.SELLER,
+      requestedRole: RoleName.ADMIN,
+      ipAddress: '10.0.0.5',
+    };
+
+    it('cambio exitoso: valida la membresía en vivo, firma un JWT con el nuevo rol, audita y devuelve la sesión actualizada', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER, RoleName.ADMIN) }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt-admin');
+
+      const result = await service.switchRole(baseInput);
+
+      expect(prisma.user.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'user-1' } }),
+      );
+      expect(tokenService.sign).toHaveBeenCalledWith('user-1', RoleName.ADMIN);
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: AuditAction.ACTIVE_ROLE_SWITCHED }),
+      );
+      expect(result.token).toBe('signed-jwt-admin');
+      expect(result.user.activeRole).toBe(RoleName.ADMIN);
+      expect(result.user.roles).toEqual(
+        expect.arrayContaining([RoleName.SELLER, RoleName.ADMIN]),
+      );
+    });
+
+    it('mismo rol (no-op): 200 con la sesión actual, sin firmar JWT ni auditar', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER, RoleName.ADMIN) }),
+      );
+
+      const result = await service.switchRole({
+        ...baseInput,
+        requestedRole: RoleName.SELLER,
+      });
+
+      expect(result.token).toBeNull();
+      expect(result.user.activeRole).toBe(RoleName.SELLER);
+      expect(tokenService.sign).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('rol no asignado: 403, sin firmar JWT ni auditar', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER) }),
+      );
+
+      await expect(service.switchRole(baseInput)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(tokenService.sign).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('usuario inexistente: 401, sin firmar JWT ni auditar', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.switchRole(baseInput)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(tokenService.sign).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it.each([UserStatus.BLOCKED, UserStatus.INACTIVE])(
+      'usuario %s: 401, sin firmar JWT ni auditar (defensa en profundidad; JwtAuthGuard ya filtra esto en producción)',
+      async (status) => {
+        prisma.user.findUnique.mockResolvedValue(
+          makeSafeUserRow({
+            status,
+            roles: rolesOf(RoleName.SELLER, RoleName.ADMIN),
+          }),
+        );
+
+        await expect(service.switchRole(baseInput)).rejects.toBeInstanceOf(
+          UnauthorizedException,
+        );
+        expect(tokenService.sign).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      },
+    );
+
+    it('la auditoría registra exactamente module/entityType/entityId/metadata, sin token/password/cookie', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER, RoleName.ADMIN) }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt-admin');
+
+      await service.switchRole(baseInput);
+
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-1',
+          module: 'AUTH',
+          action: AuditAction.ACTIVE_ROLE_SWITCHED,
+          entityType: 'User',
+          entityId: 'user-1',
+          metadata: { fromRole: RoleName.SELLER, toRole: RoleName.ADMIN },
+          ipAddress: '10.0.0.5',
+        }),
+      );
+      const serialized = JSON.stringify(auditService.record.mock.calls[0]);
+      expect(serialized).not.toContain('signed-jwt-admin');
+      expect(serialized).not.toMatch(/"token"/);
+      expect(serialized).not.toMatch(/"cookie"/i);
+    });
+
+    it('si la auditoría falla (con el token ya firmado en memoria), switchRole rechaza igual: el controller nunca recibe ese token', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER, RoleName.ADMIN) }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt-admin');
+      auditService.record.mockRejectedValue(new Error('fallo de auditoría'));
+
+      // El token SÍ se firma en memoria (orden: sign -> audit), pero como
+      // auditService.record() rechaza, switchRole() nunca llega a
+      // devolverlo — nunca se expone ni se persiste en ninguna cookie.
+      await expect(service.switchRole(baseInput)).rejects.toThrow(
+        'fallo de auditoría',
+      );
+      expect(tokenService.sign).toHaveBeenCalledWith('user-1', RoleName.ADMIN);
+    });
+
+    it('si la firma del JWT falla, switchRole rechaza y NUNCA llega a auditar (sin evento para un cambio que no produjo sesión)', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        makeSafeUserRow({ roles: rolesOf(RoleName.SELLER, RoleName.ADMIN) }),
+      );
+      tokenService.sign.mockRejectedValue(new Error('fallo al firmar el JWT'));
+
+      await expect(service.switchRole(baseInput)).rejects.toThrow(
+        'fallo al firmar el JWT',
+      );
+      expect(auditService.record).not.toHaveBeenCalled();
     });
   });
 });

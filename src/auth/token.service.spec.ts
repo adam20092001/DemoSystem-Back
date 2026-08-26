@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { RoleName } from '@prisma/client';
 import { CookieOptions, Request, Response } from 'express';
 import { CookieSameSite, EnvironmentVariables } from '../config/env.validation';
 import { JwtPayload, parseExpiresInToMs, TokenService } from './token.service';
@@ -61,25 +62,46 @@ describe('TokenService', () => {
   });
 
   describe('sign', () => {
-    it('firma un payload que contiene únicamente sub', async () => {
+    it('firma un payload que contiene exactamente sub y activeRole', async () => {
       jwtService.signAsync.mockResolvedValue('signed-token');
 
-      await service.sign('user-1');
+      await service.sign('user-1', RoleName.SELLER);
 
-      expect(jwtService.signAsync).toHaveBeenCalledWith({ sub: 'user-1' });
+      expect(jwtService.signAsync).toHaveBeenCalledWith({
+        sub: 'user-1',
+        activeRole: RoleName.SELLER,
+      });
       const [payload] = jwtService.signAsync.mock.calls[0];
-      expect(Object.keys(payload)).toEqual(['sub']);
+      expect(Object.keys(payload).sort()).toEqual(['activeRole', 'sub']);
     });
   });
 
   describe('verify', () => {
-    it('delega la verificación en JwtService y devuelve el payload', async () => {
-      jwtService.verifyAsync.mockResolvedValue({ sub: 'user-1' });
+    it('delega la verificación en JwtService y devuelve el payload cuando activeRole es válido', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        activeRole: RoleName.SELLER,
+      });
 
       const result = await service.verify('a-token');
 
       expect(jwtService.verifyAsync).toHaveBeenCalledWith('a-token');
-      expect(result).toEqual({ sub: 'user-1' });
+      expect(result).toEqual({ sub: 'user-1', activeRole: RoleName.SELLER });
+    });
+
+    it('rechaza un token legado sin activeRole (pre-KAN-18)', async () => {
+      jwtService.verifyAsync.mockResolvedValue({ sub: 'user-1' });
+
+      await expect(service.verify('legacy-token')).rejects.toThrow();
+    });
+
+    it('rechaza un activeRole que no es un RoleName real', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        activeRole: 'NOT_A_REAL_ROLE',
+      });
+
+      await expect(service.verify('a-token')).rejects.toThrow();
     });
   });
 

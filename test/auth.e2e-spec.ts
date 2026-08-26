@@ -1,8 +1,10 @@
 import { INestApplication } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { PrismaClient, RoleName, UserStatus } from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
+import { TokenService } from '../src/auth/token.service';
 import { hashPassword } from '../src/common/security/password.service';
 import { assertAuditRowHasNoSecrets } from './helpers/audit-assertions';
 import {
@@ -61,16 +63,22 @@ describe('Auth (e2e)', () => {
     const adminRole = await prisma.role.findUniqueOrThrow({
       where: { name: RoleName.ADMIN },
     });
-    await prisma.user.update({
+    const adminUser = await prisma.user.update({
       where: { username: E2E_ADMIN_USERNAME },
       data: {
         passwordHash: await hashPassword(E2E_ADMIN_SEED_PASSWORD),
-        roleId: adminRole.id,
         status: UserStatus.ACTIVE,
         mustChangePassword: true,
         failedLoginAttempts: 0,
         blockedAt: null,
       },
+    });
+    // KAN-18, Bloque A: reemplazo total de la membresía de rol (mismo
+    // criterio que test/helpers/fixtures.ts), nunca escritura directa de
+    // `roleId` (esa columna ya no existe en `User`).
+    await prisma.userRole.deleteMany({ where: { userId: adminUser.id } });
+    await prisma.userRole.create({
+      data: { userId: adminUser.id, roleId: adminRole.id },
     });
   });
 
@@ -96,6 +104,28 @@ describe('Auth (e2e)', () => {
       const response = await request(app.getHttpServer()).get(
         '/api/v1/auth/me',
       );
+      expect(response.status).toBe(401);
+    });
+  });
+
+  describe('KAN-18, Bloque A — rechazo de tokens legados pre-KAN-18', () => {
+    it('un JWT correctamente firmado pero sin activeRole (formato legado) responde 401, no un rol por defecto', async () => {
+      const admin = await prisma.user.findUniqueOrThrow({
+        where: { username: E2E_ADMIN_USERNAME },
+      });
+
+      // Firmado con la MISMA clave/algoritmo que la app real (JwtService del
+      // propio contenedor de Nest), pero con el payload { sub } pre-KAN-18,
+      // sin activeRole — exactamente lo que TokenService.verify() debe
+      // rechazar por forma, no por firma inválida.
+      const jwtService = app.get(JwtService);
+      const legacyToken = await jwtService.signAsync({ sub: admin.id });
+      const cookieName = app.get(TokenService).cookieName;
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Cookie', `${cookieName}=${legacyToken}`);
+
       expect(response.status).toBe(401);
     });
   });
@@ -240,8 +270,7 @@ describe('Auth (e2e)', () => {
         orderBy: { createdAt: 'desc' },
       });
       const blockedRow = rows.find(
-        (row) =>
-          (row.metadata as { reason: string }).reason === 'USER_BLOCKED',
+        (row) => (row.metadata as { reason: string }).reason === 'USER_BLOCKED',
       );
       expect(blockedRow).toBeDefined();
     });

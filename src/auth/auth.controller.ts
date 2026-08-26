@@ -10,7 +10,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBadRequestResponse,
   ApiCookieAuth,
+  ApiForbiddenResponse,
   ApiOperation,
   ApiResponse,
   ApiTags,
@@ -25,11 +27,14 @@ import { Public } from '../common/decorators/public.decorator';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
-import { UserResponseDto } from '../users/dto/user-response.dto';
 import { AuthService } from './auth.service';
+import { AuthSessionResponseDto } from './dto/auth-session-response.dto';
+import { AuthenticatedUserResponseDto } from './dto/authenticated-user-response.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
+import { SwitchRoleDto } from './dto/switch-role.dto';
 import { TokenService } from './token.service';
+import type { AuthSessionUser } from './types/auth-session-user';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -49,7 +54,7 @@ export class AuthController {
       'El JWT se entrega exclusivamente en una cookie HttpOnly; nunca en el ' +
       'cuerpo de la respuesta.',
   })
-  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 200, type: AuthSessionResponseDto })
   @ApiUnauthorizedResponse({
     description: 'Credenciales inválidas',
     type: ErrorResponseDto,
@@ -79,7 +84,7 @@ export class AuthController {
     @Body() dto: LoginDto,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<UserResponseDto> {
+  ): Promise<AuthSessionUser> {
     const { user, token } = await this.authService.login({
       identifier: dto.identifier,
       password: dto.password,
@@ -106,7 +111,7 @@ export class AuthController {
   @ApiCookieAuth(COOKIE_AUTH_NAME)
   @Get('me')
   @ApiOperation({ summary: 'Usuario autenticado, leído en vivo de PostgreSQL' })
-  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 200, type: AuthenticatedUserResponseDto })
   @ApiUnauthorizedResponse({ type: ErrorResponseDto })
   me(@CurrentUser() user: AuthenticatedUser): AuthenticatedUser {
     return user;
@@ -143,5 +148,62 @@ export class AuthController {
       newPassword: dto.newPassword,
       ipAddress: request.ip ?? null,
     });
+  }
+
+  // KAN-18, Bloque B: sin @Public() ni @AllowPendingPassword() a propósito —
+  // corre detrás de la misma cadena de guards globales que el resto de la
+  // API autenticada (JwtAuthGuard -> PasswordChangeGuard -> RolesGuard).
+  // Un usuario con mustChangePassword=true recibe 403 de PasswordChangeGuard
+  // antes de llegar aquí, igual que cualquier otra ruta protegida normal.
+  // Sin @Roles(): cualquier usuario autenticado puede intentar cambiar su
+  // propio rol activo, sin importar cuál sea; AuthService.switchRole()
+  // decide si el rol solicitado está realmente asignado.
+  @ApiCookieAuth(COOKIE_AUTH_NAME)
+  @Post('switch-role')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cambia el rol activo de ESTA sesión',
+    description:
+      'El rol solicitado debe estar entre los roles ya asignados al ' +
+      'usuario (verificado en vivo contra PostgreSQL en cada intento); ' +
+      'nunca modifica los roles asignados del usuario. activeRole es ' +
+      'exclusivo de la sesión/JWT actual: otra sesión/navegador del mismo ' +
+      'usuario no se ve afectada, y un login nuevo vuelve a resolver el ' +
+      'rol activo por defecto (orden cerrado SELLER > WAREHOUSE > ' +
+      'MANAGEMENT > ADMIN), sin recordar el último rol usado.',
+  })
+  @ApiResponse({ status: 200, type: AuthSessionResponseDto })
+  @ApiBadRequestResponse({
+    description:
+      'role ausente, no es un RoleName válido, o el cuerpo trae propiedades no declaradas',
+    type: ErrorResponseDto,
+  })
+  @ApiUnauthorizedResponse({ type: ErrorResponseDto })
+  @ApiForbiddenResponse({
+    description:
+      'Debe cambiar su contraseña antes de continuar, o el rol solicitado no está asignado a este usuario',
+    type: ErrorResponseDto,
+  })
+  async switchRole(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: SwitchRoleDto,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<AuthSessionUser> {
+    const result = await this.authService.switchRole({
+      userId: user.id,
+      currentActiveRole: user.role,
+      requestedRole: dto.role,
+      ipAddress: request.ip ?? null,
+    });
+
+    // No-op de mismo rol: result.token es null a propósito (ver
+    // AuthService.switchRole()) — la cookie existente permanece intacta, sin
+    // reemplazo ni re-emisión.
+    if (result.token !== null) {
+      this.tokenService.setAuthCookie(response, result.token);
+    }
+
+    return result.user;
   }
 }

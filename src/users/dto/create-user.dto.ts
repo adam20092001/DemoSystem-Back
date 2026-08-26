@@ -1,6 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { RoleName } from '@prisma/client';
 import {
+  ArrayMinSize,
+  ArrayUnique,
+  IsArray,
   IsEmail,
   IsEnum,
   IsNotEmpty,
@@ -15,8 +18,11 @@ import {
 } from '../../common/security/password-policy';
 
 /**
- * roleId nunca se acepta desde el cliente: el rol se resuelve en el servicio
- * a partir de roleName. actorUserId e ipAddress los provee el controller.
+ * roleId(s) nunca se aceptan desde el cliente: los roles se resuelven en el
+ * servicio a partir de roleNames. actorUserId e ipAddress los provee el
+ * controller. KAN-18, Bloque A: roleName (singular) se reemplaza por
+ * roleNames (uno o más, sin duplicados) — un usuario debe tener al menos un
+ * rol asignado.
  */
 export class CreateUserDto {
   @ApiProperty({ example: 'Juan', maxLength: 80 })
@@ -54,7 +60,15 @@ export class CreateUserDto {
   })
   temporaryPassword!: string;
 
-  @ApiProperty({ enum: RoleName, example: RoleName.SELLER })
-  @IsEnum(RoleName)
-  roleName!: RoleName;
+  @ApiProperty({
+    enum: RoleName,
+    isArray: true,
+    example: [RoleName.SELLER],
+    description: 'Uno o más roles a asignar. Sin duplicados; mínimo uno.',
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayUnique()
+  @IsEnum(RoleName, { each: true })
+  roleNames!: RoleName[];
 }

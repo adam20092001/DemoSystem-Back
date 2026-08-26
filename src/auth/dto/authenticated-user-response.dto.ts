@@ -2,14 +2,13 @@ import { ApiProperty } from '@nestjs/swagger';
 import { RoleName, UserStatus } from '@prisma/client';
 
 /**
- * Forma pública de un usuario, únicamente para documentación Swagger.
- * Refleja SafeUser: nunca passwordHash, failedLoginAttempts ni roleId.
- * KAN-18, Bloque A: `role` (singular) se reemplaza por `roles` (uno o más
- * roles asignados) — esta es la administración persistente de usuarios,
- * distinta de la sesión (ver AuthSessionResponseDto/AuthenticatedUserResponseDto
- * en el módulo Auth, que sí exponen un único rol activo).
+ * Respuesta de `GET /auth/me` (KAN-18, Bloque A). Refleja exactamente
+ * AuthenticatedUser: `role` es el único rol ACTIVO de esta sesión, ya
+ * validado en vivo contra PostgreSQL — nunca la colección completa de
+ * roles asignados (eso es UserResponseDto.roles, en la administración
+ * persistente de usuarios).
  */
-export class UserResponseDto {
+export class AuthenticatedUserResponseDto {
   @ApiProperty({ example: 'b3f1c2a0-...-uuid' })
   id!: string;
 
@@ -27,12 +26,11 @@ export class UserResponseDto {
 
   @ApiProperty({
     enum: RoleName,
-    isArray: true,
-    example: [RoleName.SELLER],
+    example: RoleName.SELLER,
     description:
-      'Todos los roles asignados al usuario, orden de presentación estable.',
+      'Rol activo de esta sesión, validado en vivo en cada petición.',
   })
-  roles!: RoleName[];
+  role!: RoleName;
 
   @ApiProperty({ enum: UserStatus, example: UserStatus.ACTIVE })
   status!: UserStatus;

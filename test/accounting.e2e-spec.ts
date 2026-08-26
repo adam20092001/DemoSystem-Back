@@ -2814,12 +2814,16 @@ describe('Basic Accounting (e2e)', () => {
           lastName: 'Temporal',
           passwordHash:
             '$2b$10$0000000000000000000000000000000000000000000000000',
-          roleId: (
-            await prisma.role.findUniqueOrThrow({
-              where: { name: RoleName.ADMIN },
-            })
-          ).id,
           status: 'ACTIVE',
+          // KAN-18, Bloque A: la membresía de rol ahora vive en UserRole,
+          // creada de forma anidada (nunca una columna roleId en User).
+          roles: {
+            create: {
+              role: {
+                connect: { name: RoleName.ADMIN },
+              },
+            },
+          },
         },
       });
       const entryId = await rawInsertEntry({

@@ -1,11 +1,26 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { RoleName } from '@prisma/client';
 import { CookieOptions, Request, Response } from 'express';
 import { EnvironmentVariables, NodeEnv } from '../config/env.validation';
 
+/**
+ * KAN-18, Bloque A: `activeRole` es el único rol de ESTA sesión (nunca la
+ * colección completa de roles asignados del usuario, que vive en
+ * PostgreSQL vía UserRole, jamás en el JWT). Un token legado pre-KAN-18
+ * (solo `{ sub }`) no tiene esta propiedad — TokenService.verify() lo
+ * rechaza explícitamente, sin fallback ni asignación silenciosa de rol.
+ */
 export interface JwtPayload {
   sub: string;
+  activeRole: RoleName;
+}
+
+const VALID_ROLE_NAMES: ReadonlySet<string> = new Set(Object.values(RoleName));
+
+function isValidRoleName(value: unknown): value is RoleName {
+  return typeof value === 'string' && VALID_ROLE_NAMES.has(value);
 }
 
 const EXPIRES_IN_UNIT_MS: Record<string, number> = {
@@ -26,8 +41,11 @@ export function parseExpiresInToMs(expiresIn: string): number {
 
 /**
  * Firma y verifica el JWT de sesión, y gestiona la cookie HttpOnly donde
- * viaja. El payload contiene únicamente { sub: userId } — nunca rol, email
- * ni ningún otro dato del usuario: el guard siempre recarga desde PostgreSQL.
+ * viaja. El payload contiene únicamente { sub: userId, activeRole } — nunca
+ * la colección completa de roles asignados, email ni ningún otro dato del
+ * usuario: el guard siempre recarga el usuario desde PostgreSQL en cada
+ * petición y revalida ahí mismo que activeRole siga vigente (KAN-18,
+ * Bloque A) — nunca confía en el rol solo porque el JWT esté firmado.
  */
 @Injectable()
 export class TokenService {
@@ -40,13 +58,30 @@ export class TokenService {
     return this.configService.get('AUTH_COOKIE_NAME', { infer: true });
   }
 
-  sign(userId: string): Promise<string> {
-    const payload: JwtPayload = { sub: userId };
+  sign(userId: string, activeRole: RoleName): Promise<string> {
+    const payload: JwtPayload = { sub: userId, activeRole };
     return this.jwtService.signAsync(payload);
   }
 
-  verify(token: string): Promise<JwtPayload> {
-    return this.jwtService.verifyAsync<JwtPayload>(token);
+  /**
+   * Verifica la firma/expiración Y la forma estructural del payload: un
+   * token legado pre-KAN-18 (solo `{ sub }`, sin activeRole, o con un
+   * activeRole que no es un RoleName real) se rechaza aquí mismo, igual que
+   * una firma inválida — nunca recibe un rol por defecto en silencio. Esto
+   * fuerza un login nuevo tras el despliegue, sin infraestructura de
+   * revocación adicional: el propio contrato estructural del payload basta.
+   */
+  async verify(token: string): Promise<JwtPayload> {
+    const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
+    if (
+      typeof payload.sub !== 'string' ||
+      !isValidRoleName(payload.activeRole)
+    ) {
+      throw new Error(
+        'Token de sesión con formato inválido (falta activeRole)',
+      );
+    }
+    return payload;
   }
 
   /** Lee la cookie de sesión de la petición. No confía en ningún otro origen. */
