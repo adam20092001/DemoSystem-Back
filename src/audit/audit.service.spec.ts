@@ -103,7 +103,7 @@ describe('sanitizeAuditMetadata', () => {
     const metadata: AuditMetadata = {
       username: 'jdoe',
       email: 'jdoe@demosystem.local',
-      roleName: 'SELLER',
+      roleNames: ['SELLER'],
     };
 
     const sanitized = sanitizeAuditMetadata(AuditAction.USER_CREATED, metadata);

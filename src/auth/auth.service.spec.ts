@@ -26,6 +26,11 @@ interface UserUpdateArgs {
 
 const NOW = new Date('2026-01-01T00:00:00.000Z');
 
+/**
+ * KAN-18, Bloque A: `roles` (arreglo de membresías, cada una con su Role
+ * anidado) reemplaza a la relación singular `role` consumida por
+ * `toSafeUser()`/`resolveDefaultActiveRole()`.
+ */
 function makeSafeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'user-1',
@@ -38,7 +43,7 @@ function makeSafeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
     lastLoginAt: null,
     createdAt: NOW,
     updatedAt: NOW,
-    role: { name: RoleName.SELLER },
+    roles: [{ role: { name: RoleName.SELLER } }],
     ...overrides,
   };
 }
@@ -71,7 +76,7 @@ function createPasswordServiceMock() {
 
 function createTokenServiceMock() {
   return {
-    sign: jest.fn<Promise<string>, [string]>(),
+    sign: jest.fn<Promise<string>, [string, RoleName]>(),
   };
 }
 
@@ -135,6 +140,60 @@ describe('AuthService', () => {
       expect(result.user).not.toHaveProperty('token');
       expect(result.user).not.toHaveProperty('passwordHash');
       expect(JSON.stringify(result.user)).not.toContain('signed-jwt');
+    });
+
+    it('el login devuelve roles[] y el activeRole resuelto, y firma el JWT con ese mismo activeRole', async () => {
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: '$argon2id$hash',
+        status: UserStatus.ACTIVE,
+        failedLoginAttempts: 0,
+      });
+      passwordService.verify.mockResolvedValue(true);
+      prisma.tx.user.update.mockResolvedValue(
+        makeSafeUserRow({
+          roles: [
+            { role: { name: RoleName.ADMIN } },
+            { role: { name: RoleName.WAREHOUSE } },
+          ],
+        }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt');
+
+      const result = await service.login(credentials);
+
+      // Orden de default-active-role cerrado: SELLER > WAREHOUSE >
+      // MANAGEMENT > ADMIN — con ADMIN+WAREHOUSE asignados, gana WAREHOUSE.
+      expect(result.user.activeRole).toBe(RoleName.WAREHOUSE);
+      expect(result.user.roles).toEqual(
+        expect.arrayContaining([RoleName.ADMIN, RoleName.WAREHOUSE]),
+      );
+      expect(tokenService.sign).toHaveBeenCalledWith(
+        'user-1',
+        RoleName.WAREHOUSE,
+      );
+    });
+
+    it('con un único rol asignado, ese rol se preserva como activeRole', async () => {
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: '$argon2id$hash',
+        status: UserStatus.ACTIVE,
+        failedLoginAttempts: 0,
+      });
+      passwordService.verify.mockResolvedValue(true);
+      prisma.tx.user.update.mockResolvedValue(
+        makeSafeUserRow({ roles: [{ role: { name: RoleName.MANAGEMENT } }] }),
+      );
+      tokenService.sign.mockResolvedValue('signed-jwt');
+
+      const result = await service.login(credentials);
+
+      expect(result.user.activeRole).toBe(RoleName.MANAGEMENT);
+      expect(tokenService.sign).toHaveBeenCalledWith(
+        'user-1',
+        RoleName.MANAGEMENT,
+      );
     });
 
     it('normaliza el identifier antes de buscar por username o email', async () => {

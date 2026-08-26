@@ -25,11 +25,13 @@ import { Public } from '../common/decorators/public.decorator';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
-import { UserResponseDto } from '../users/dto/user-response.dto';
 import { AuthService } from './auth.service';
+import { AuthSessionResponseDto } from './dto/auth-session-response.dto';
+import { AuthenticatedUserResponseDto } from './dto/authenticated-user-response.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { TokenService } from './token.service';
+import type { AuthSessionUser } from './types/auth-session-user';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -49,7 +51,7 @@ export class AuthController {
       'El JWT se entrega exclusivamente en una cookie HttpOnly; nunca en el ' +
       'cuerpo de la respuesta.',
   })
-  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 200, type: AuthSessionResponseDto })
   @ApiUnauthorizedResponse({
     description: 'Credenciales inválidas',
     type: ErrorResponseDto,
@@ -79,7 +81,7 @@ export class AuthController {
     @Body() dto: LoginDto,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<UserResponseDto> {
+  ): Promise<AuthSessionUser> {
     const { user, token } = await this.authService.login({
       identifier: dto.identifier,
       password: dto.password,
@@ -106,7 +108,7 @@ export class AuthController {
   @ApiCookieAuth(COOKIE_AUTH_NAME)
   @Get('me')
   @ApiOperation({ summary: 'Usuario autenticado, leído en vivo de PostgreSQL' })
-  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 200, type: AuthenticatedUserResponseDto })
   @ApiUnauthorizedResponse({ type: ErrorResponseDto })
   me(@CurrentUser() user: AuthenticatedUser): AuthenticatedUser {
     return user;

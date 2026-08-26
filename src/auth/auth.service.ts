@@ -11,9 +11,13 @@ import { checkPasswordPolicy } from '../common/security/password-policy';
 import { PasswordService } from '../common/security/password.service';
 import { EnvironmentVariables } from '../config/env.validation';
 import { PrismaService } from '../database/prisma.service';
-import { toSafeUser, USER_SAFE_SELECT } from '../users/mappers/user.mapper';
-import { SafeUser } from '../users/types/safe-user';
+import {
+  toSafeUser,
+  USER_WITH_ROLES_SELECT,
+} from '../users/mappers/user.mapper';
+import { resolveDefaultActiveRole } from './default-active-role';
 import { AccountBlockedException } from './exceptions/account-blocked.exception';
+import { AuthSessionUser } from './types/auth-session-user';
 import { TokenService } from './token.service';
 
 export interface LoginInput {
@@ -23,7 +27,7 @@ export interface LoginInput {
 }
 
 export interface LoginResult {
-  user: SafeUser;
+  user: AuthSessionUser;
   token: string;
 }
 
@@ -144,7 +148,7 @@ export class AuthService {
           blockedAt: null,
           lastLoginAt: new Date(),
         },
-        select: USER_SAFE_SELECT,
+        select: USER_WITH_ROLES_SELECT,
       });
 
       await this.auditService.record({
@@ -162,9 +166,14 @@ export class AuthService {
       return updated;
     });
 
-    const token = await this.tokenService.sign(found.id);
+    // KAN-18, Bloque A: el rol activo se resuelve con el orden determinista
+    // aprobado (SELLER > WAREHOUSE > MANAGEMENT > ADMIN) y nunca se persiste
+    // como "último usado" — cada login lo vuelve a resolver desde cero.
+    const safeUser = toSafeUser(user);
+    const activeRole = resolveDefaultActiveRole(safeUser.roles);
+    const token = await this.tokenService.sign(found.id, activeRole);
 
-    return { user: toSafeUser(user), token };
+    return { user: { ...safeUser, activeRole }, token };
   }
 
   async changePassword(input: ChangePasswordInput): Promise<void> {

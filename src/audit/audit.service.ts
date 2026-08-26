@@ -72,8 +72,17 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   // El identifier ingresado por quien intenta iniciar sesión nunca se
   // audita: solo un motivo seguro (USER_NOT_FOUND, INVALID_PASSWORD, etc.).
   [AuditAction.LOGIN_FAILED]: ['reason'],
-  [AuditAction.USER_CREATED]: ['username', 'email', 'roleName'],
-  [AuditAction.USER_UPDATED]: ['updatedFields', 'roleName'],
+  // KAN-18, Bloque A: roleName (singular) se reemplaza por roleNames (uno
+  // o más). USER_UPDATED agrega addedRoles/removedRoles para el cambio de
+  // roles asignados (reemplazo total) — solo nombres de rol, nunca Role.id,
+  // token, JWT ni contraseña.
+  [AuditAction.USER_CREATED]: ['username', 'email', 'roleNames'],
+  [AuditAction.USER_UPDATED]: [
+    'updatedFields',
+    'roleNames',
+    'addedRoles',
+    'removedRoles',
+  ],
   [AuditAction.USER_BLOCKED]: ['username'],
   [AuditAction.USER_UNBLOCKED]: ['username'],
   [AuditAction.PASSWORD_RESET]: ['username'],

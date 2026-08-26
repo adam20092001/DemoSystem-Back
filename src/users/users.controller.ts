@@ -93,7 +93,7 @@ export class UsersController {
       username: dto.username,
       email: dto.email,
       temporaryPassword: dto.temporaryPassword,
-      roleName: dto.roleName,
+      roleNames: dto.roleNames,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
@@ -101,11 +101,17 @@ export class UsersController {
 
   @Patch(':id')
   @ApiOperation({
-    summary: 'Edita firstName, lastName, email o roleName',
-    description: 'Al menos un campo es obligatorio.',
+    summary: 'Edita firstName, lastName, email o roleNames',
+    description:
+      'Al menos un campo es obligatorio. roleNames reemplaza TOTALMENTE el conjunto de roles asignados si se envía (nunca add/remove incremental); si se omite, los roles asignados no cambian.',
   })
   @ApiOkResponse({ type: UserResponseDto })
   @ApiNotFoundResponse({ type: ErrorResponseDto })
+  @ApiConflictResponse({
+    description:
+      'El cambio de roles dejaría al sistema sin ningún ADMIN activo',
+    type: ErrorResponseDto,
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateUserDto,
@@ -117,7 +123,7 @@ export class UsersController {
       firstName: dto.firstName,
       lastName: dto.lastName,
       email: dto.email,
-      roleName: dto.roleName,
+      roleNames: dto.roleNames,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });

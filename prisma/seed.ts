@@ -153,6 +153,9 @@ async function seedInitialAdmin(): Promise<void> {
     });
     const passwordHash = await hashPassword(rawPassword);
 
+    // KAN-18, Bloque A: la asignación de rol ahora vive en UserRole, creada
+    // en la MISMA operación (nested create) — nunca una fila de usuario
+    // transitoriamente sin ningún rol.
     await prisma.user.create({
       data: {
         firstName: 'Administrador',
@@ -160,9 +163,9 @@ async function seedInitialAdmin(): Promise<void> {
         username,
         email,
         passwordHash,
-        roleId: adminRole.id,
         status: 'ACTIVE',
         mustChangePassword: true,
+        roles: { create: { roleId: adminRole.id } },
       },
     });
     console.log(`Administrador inicial creado: ${username}`);

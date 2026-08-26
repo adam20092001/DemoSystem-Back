@@ -21,6 +21,10 @@ function createContext(
   } as unknown as ExecutionContext;
 }
 
+/**
+ * KAN-18, Bloque A: `roles` reemplaza a la relación singular `role` — un
+ * usuario puede tener uno o más UserRole, cada uno con su Role anidado.
+ */
 function makeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'user-1',
@@ -33,7 +37,7 @@ function makeUserRow(overrides: Partial<Record<string, unknown>> = {}) {
     lastLoginAt: null,
     createdAt: NOW,
     updatedAt: NOW,
-    role: { name: RoleName.SELLER },
+    roles: [{ role: { name: RoleName.SELLER } }],
     ...overrides,
   };
 }
@@ -82,9 +86,25 @@ describe('JwtAuthGuard', () => {
     );
   });
 
+  it('rechaza un token legado sin activeRole (TokenService.verify ya lo rechaza)', async () => {
+    tokenService.extractFromRequest.mockReturnValue('legacy-token');
+    tokenService.verify.mockRejectedValue(
+      new Error('Token de sesión con formato inválido (falta activeRole)'),
+    );
+    const context = createContext({});
+
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+  });
+
   it('rechaza si el usuario del token ya no existe', async () => {
     tokenService.extractFromRequest.mockReturnValue('a-token');
-    tokenService.verify.mockResolvedValue({ sub: 'missing-id' });
+    tokenService.verify.mockResolvedValue({
+      sub: 'missing-id',
+      activeRole: RoleName.SELLER,
+    });
     prisma.user.findUnique.mockResolvedValue(null);
     const context = createContext({});
 
@@ -97,7 +117,10 @@ describe('JwtAuthGuard', () => {
     'rechaza un usuario con estado %s',
     async (status) => {
       tokenService.extractFromRequest.mockReturnValue('a-token');
-      tokenService.verify.mockResolvedValue({ sub: 'user-1' });
+      tokenService.verify.mockResolvedValue({
+        sub: 'user-1',
+        activeRole: RoleName.SELLER,
+      });
       prisma.user.findUnique.mockResolvedValue(makeUserRow({ status }));
       const context = createContext({});
 
@@ -107,9 +130,12 @@ describe('JwtAuthGuard', () => {
     },
   );
 
-  it('adjunta el usuario seguro a request.user cuando el token y el estado son válidos', async () => {
+  it('adjunta el usuario seguro a request.user cuando el activeRole está asignado', async () => {
     tokenService.extractFromRequest.mockReturnValue('a-token');
-    tokenService.verify.mockResolvedValue({ sub: 'user-1' });
+    tokenService.verify.mockResolvedValue({
+      sub: 'user-1',
+      activeRole: RoleName.SELLER,
+    });
     prisma.user.findUnique.mockResolvedValue(makeUserRow());
     const request: Partial<AuthenticatedRequest> = {};
     const context = createContext(request);
@@ -119,13 +145,57 @@ describe('JwtAuthGuard', () => {
       expect.objectContaining({ id: 'user-1', role: RoleName.SELLER }),
     );
     expect(request.user).not.toHaveProperty('passwordHash');
+    expect(request.user).not.toHaveProperty('roles');
   });
 
-  it('no confía en un rol del token: siempre consulta el rol en PostgreSQL', async () => {
+  it('acepta un activeRole distinto entre varios roles asignados (ADMIN + SELLER, activo SELLER)', async () => {
     tokenService.extractFromRequest.mockReturnValue('a-token');
-    tokenService.verify.mockResolvedValue({ sub: 'user-1' });
+    tokenService.verify.mockResolvedValue({
+      sub: 'user-1',
+      activeRole: RoleName.SELLER,
+    });
     prisma.user.findUnique.mockResolvedValue(
-      makeUserRow({ role: { name: RoleName.ADMIN } }),
+      makeUserRow({
+        roles: [
+          { role: { name: RoleName.ADMIN } },
+          { role: { name: RoleName.SELLER } },
+        ],
+      }),
+    );
+    const request: Partial<AuthenticatedRequest> = {};
+    const context = createContext(request);
+
+    await guard.canActivate(context);
+
+    expect(request.user?.role).toBe(RoleName.SELLER);
+  });
+
+  it('rechaza un activeRole que ya no está entre los roles asignados (revocado tras emitir el token)', async () => {
+    tokenService.extractFromRequest.mockReturnValue('a-token');
+    tokenService.verify.mockResolvedValue({
+      sub: 'user-1',
+      activeRole: RoleName.ADMIN,
+    });
+    // El usuario ahora solo tiene SELLER: ADMIN le fue quitado después de
+    // que este token se emitió.
+    prisma.user.findUnique.mockResolvedValue(
+      makeUserRow({ roles: [{ role: { name: RoleName.SELLER } }] }),
+    );
+    const context = createContext({});
+
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('no confía en el activeRole del token solo porque esté firmado: siempre lo revalida en vivo contra PostgreSQL', async () => {
+    tokenService.extractFromRequest.mockReturnValue('a-token');
+    tokenService.verify.mockResolvedValue({
+      sub: 'user-1',
+      activeRole: RoleName.ADMIN,
+    });
+    prisma.user.findUnique.mockResolvedValue(
+      makeUserRow({ roles: [{ role: { name: RoleName.ADMIN } }] }),
     );
     const request: Partial<AuthenticatedRequest> = {};
     const context = createContext(request);

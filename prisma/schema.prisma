@@ -100,14 +100,35 @@ enum InventoryMovementOrigin {
 }
 
 model Role {
-  id          String   @id @default(uuid()) @db.Uuid
-  name        RoleName @unique
-  description String?  @db.VarChar(200)
-  users       User[]
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String     @id @default(uuid()) @db.Uuid
+  name        RoleName   @unique
+  description String?    @db.VarChar(200)
+  userRoles   UserRole[]
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
 
   @@map("roles")
+}
+
+// KAN-18: un User puede tener uno o más roles asignados (autorización
+// persistente); la sesión/JWT elige exactamente UNO como rol activo
+// (activeRole, nunca persistido en User — ver TokenService/JwtAuthGuard).
+// onDelete: Cascade del lado de User (quitar la membresía de un usuario
+// eliminado es correcto); onDelete: Restrict del lado de Role (mismo
+// criterio que el antiguo User.roleId: un Role en uso no puede eliminarse).
+// @@unique([userId, roleId]) impide asignar el mismo rol dos veces al mismo
+// usuario; sirve además como target de upsert idempotente en seed/fixtures.
+model UserRole {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId    String   @map("role_id") @db.Uuid
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
 }
 
 model User {
@@ -117,8 +138,12 @@ model User {
   username                 String              @unique @db.VarChar(50)
   email                    String              @unique @db.VarChar(150)
   passwordHash             String              @map("password_hash") @db.VarChar(255)
-  roleId                   String              @map("role_id") @db.Uuid
-  role                     Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  // KAN-18: roleId/role (relación singular) se reemplazan por roles
+  // (UserRole[]) — autorización persistente de uno o más roles. El rol
+  // ACTIVO de una sesión nunca se persiste aquí (ver TokenService.sign()/
+  // JwtAuthGuard): solo vive en el JWT firmado, validado en vivo contra
+  // esta colección en cada petición.
+  roles                    UserRole[]
   status                   UserStatus          @default(ACTIVE)
   mustChangePassword       Boolean             @default(true) @map("must_change_password")
   failedLoginAttempts      Int                 @default(0) @map("failed_login_attempts")
@@ -149,7 +174,6 @@ model User {
   // relation — su reversión es una fila nueva con su propio createdBy.
   createdAccountingEntries AccountingEntry[]   @relation("AccountingEntryCreatedBy")
 
-  @@index([roleId])
   @@index([status])
   @@map("users")
 }

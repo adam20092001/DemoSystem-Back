@@ -18,7 +18,12 @@ export interface FixtureUserInput {
 /**
  * Crea o restablece un usuario de prueba a un estado conocido, para que las
  * pruebas sean repetibles sin depender de una re-siembra manual entre
- * ejecuciones.
+ * ejecuciones. KAN-18, Bloque A: el contrato EXTERNO se preserva a
+ * propósito (`roleName: RoleName`, un solo rol) para no obligar a ~16
+ * suites E2E no relacionadas a volverse conscientes de multi-rol —
+ * internamente, la fixture asegura que el usuario tenga exactamente esa
+ * única fila UserRole asignada (nunca dos filas tras una reejecución: se
+ * reemplaza por completo, igual criterio que UsersService.updateUser()).
  */
 export async function upsertFixtureUser(
   prisma: PrismaClient,
@@ -34,18 +39,29 @@ export async function upsertFixtureUser(
     firstName: input.firstName ?? 'E2E',
     lastName: input.lastName ?? 'Fixture',
     passwordHash,
-    roleId: role.id,
     status: input.status ?? UserStatus.ACTIVE,
     mustChangePassword: input.mustChangePassword ?? false,
     failedLoginAttempts: input.failedLoginAttempts ?? 0,
     blockedAt: input.blockedAt ?? null,
   };
 
-  return prisma.user.upsert({
+  const user = await prisma.user.upsert({
     where: { username: input.username },
     create: { username: input.username, ...data },
     update: data,
   });
+
+  // Reemplazo total de la membresía de rol (nunca add/remove incremental,
+  // mismo criterio que UsersService.updateUser()): garantiza exactamente
+  // un UserRole = el solicitado, sin importar qué haya dejado una
+  // ejecución previa (incluyendo un rol distinto de una fixture anterior
+  // con el mismo username).
+  await prisma.userRole.deleteMany({ where: { userId: user.id } });
+  await prisma.userRole.create({
+    data: { userId: user.id, roleId: role.id },
+  });
+
+  return user;
 }
 
 /**
@@ -61,15 +77,24 @@ export async function ensureActiveTestAdmin(
   });
   const passwordHash = await hashPassword(E2E_ADMIN_ACTIVE_PASSWORD);
 
-  return prisma.user.update({
+  const user = await prisma.user.update({
     where: { username: E2E_ADMIN_USERNAME },
     data: {
       passwordHash,
-      roleId: role.id,
       status: UserStatus.ACTIVE,
       mustChangePassword: false,
       failedLoginAttempts: 0,
       blockedAt: null,
     },
   });
+
+  // Mismo criterio de reemplazo total que upsertFixtureUser(): garantiza
+  // exactamente un UserRole = ADMIN para el admin de pruebas, sin importar
+  // qué haya dejado una ejecución previa.
+  await prisma.userRole.deleteMany({ where: { userId: user.id } });
+  await prisma.userRole.create({
+    data: { userId: user.id, roleId: role.id },
+  });
+
+  return user;
 }
