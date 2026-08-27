@@ -109,6 +109,11 @@ function makeQuoteRow(overrides: Partial<Record<string, unknown>> = {}) {
     discountAmount: new Prisma.Decimal('0.00'),
     taxAmount: new Prisma.Decimal('0.00'),
     total: new Prisma.Decimal('10.00'),
+    // Fase 11, Bloque B: contexto de moneda/impuesto copiado VERBATIM a Sale
+    // en la conversión (nunca releído de CompanySettings).
+    currencyCode: 'PEN',
+    taxEnabled: false,
+    taxRate: new Prisma.Decimal('18.00'),
     ...overrides,
   };
 }
@@ -183,6 +188,10 @@ function makeSaleDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
     discountAmount: new Prisma.Decimal('0.00'),
     taxAmount: new Prisma.Decimal('0.00'),
     total: new Prisma.Decimal('10.00'),
+    // Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial.
+    currencyCode: 'PEN',
+    taxEnabled: false,
+    taxRate: new Prisma.Decimal('18.00'),
     paidAmount: new Prisma.Decimal('0.00'),
     balanceDue: new Prisma.Decimal('10.00'),
     items: [makeSaleItemRow()],
@@ -475,6 +484,24 @@ describe('SalesService', () => {
     it('crea correctamente y devuelve SafeSale', async () => {
       const result = await service.createDirect(validDirectInput);
       expect(result.id).toBe(SALE_ID);
+    });
+
+    it('Fase 11, Bloque B: snapshotea currencyCode/taxEnabled/taxRate con el MISMO settings ya leído para taxAmount, sin una segunda lectura', async () => {
+      settingsReader.getCurrent.mockResolvedValue(
+        makeSettingsSnapshot({
+          currencyCode: 'USD',
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('20.00'),
+        }),
+      );
+      await service.createDirect(validDirectInput);
+      const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(createArgs.data.currencyCode).toBe('USD');
+      expect(createArgs.data.taxEnabled).toBe(true);
+      expect(createArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
+      expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
     });
 
     it('items vacíos -> 400 sin abrir transacción', async () => {
@@ -1637,6 +1664,35 @@ describe('SalesService', () => {
       ).resolves.toBeDefined();
     });
 
+    it('Fase 11, Bloque B: copia currencyCode/taxEnabled/taxRate VERBATIM de Quote, incluso si CompanySettings vigente ya difiere', async () => {
+      // La cotización quedó snapshoteada con USD/true/20.00; CompanySettings
+      // vigente al momento de la conversión es completamente distinto
+      // (PEN/false/18.00, el default de makeSettingsSnapshot()) — nunca debe
+      // usarse, ni siquiera leerse, para estos 3 campos.
+      prisma.tx.$queryRaw.mockImplementation(
+        createQueryRawRouter({
+          customer: makeCustomerRow(),
+          quote: makeQuoteRow({
+            currencyCode: 'USD',
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('20.00'),
+          }),
+          products: new Map([[PRODUCT_ID, makeProductRow()]]),
+        }),
+      );
+      await service.createFromQuote(validConvertInput);
+      const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(createArgs.data.currencyCode).toBe('USD');
+      expect(createArgs.data.taxEnabled).toBe(true);
+      expect(createArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
+      // D18 aprobado (Fase 6): la conversión NUNCA llama a SettingsReader
+      // para el snapshot comercial/fiscal — ni siquiera para leerlo y
+      // descartarlo.
+      expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+    });
+
     it('ACCEPTED: conversión exitosa', async () => {
       prisma.tx.$queryRaw.mockImplementation(
         createQueryRawRouter({
@@ -2765,6 +2821,9 @@ describe('SalesService', () => {
           discountAmount: new Prisma.Decimal('0.00'),
           taxAmount: new Prisma.Decimal('0.00'),
           total: new Prisma.Decimal('10.00'),
+          currencyCode: 'PEN',
+          taxEnabled: false,
+          taxRate: new Prisma.Decimal('18.00'),
           paidAmount: new Prisma.Decimal('0.00'),
           balanceDue: new Prisma.Decimal('10.00'),
           confirmedAt: new Date('2026-03-15T12:00:00.000Z'),

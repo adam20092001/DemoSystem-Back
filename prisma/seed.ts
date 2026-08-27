@@ -4,6 +4,7 @@ import {
   CustomerStage,
   CustomerStatus,
   DocumentType,
+  FiscalDocumentType,
   Prisma,
   PrismaClient,
   RoleName,
@@ -298,6 +299,51 @@ async function seedDocumentSequences(): Promise<void> {
 }
 
 /**
+ * Serie fiscal de demostración por tipo de documento electrónico (Fase 11,
+ * Bloque B — fundación fiscal, sin emisión todavía). Mismo criterio EXACTO
+ * que seedDocumentSequences(): `update: {}` a propósito — currentNumber es
+ * el ÚLTIMO número emitido y jamás debe retroceder en una reejecución del
+ * seed; el upsert por (documentType, series) solo garantiza que la fila
+ * exista la primera vez, después queda intacta. Este seed NUNCA crea filas
+ * de ElectronicDocument.
+ */
+async function seedFiscalSeries(): Promise<void> {
+  await prisma.fiscalSeries.upsert({
+    where: {
+      documentType_series: {
+        documentType: FiscalDocumentType.FACTURA,
+        series: 'F001',
+      },
+    },
+    update: {},
+    create: {
+      documentType: FiscalDocumentType.FACTURA,
+      series: 'F001',
+      currentNumber: 0,
+      active: true,
+    },
+  });
+  console.log('Serie fiscal verificada: FACTURA / F001');
+
+  await prisma.fiscalSeries.upsert({
+    where: {
+      documentType_series: {
+        documentType: FiscalDocumentType.BOLETA,
+        series: 'B001',
+      },
+    },
+    update: {},
+    create: {
+      documentType: FiscalDocumentType.BOLETA,
+      series: 'B001',
+      currentNumber: 0,
+      active: true,
+    },
+  });
+  console.log('Serie fiscal verificada: BOLETA / B001');
+}
+
+/**
  * Cuentas de sistema del plan de cuentas básico (Fase 8, Bloque A). Mismo
  * criterio que seedGenericCustomer(): systemKey/code/name/type son
  * invariantes de dominio, no configuración editable, así que el `update`
@@ -370,6 +416,7 @@ async function main(): Promise<void> {
   await seedDocumentSequences();
   await seedAccounts();
   await seedCompanySettings();
+  await seedFiscalSeries();
 }
 
 main()

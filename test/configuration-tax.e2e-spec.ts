@@ -37,6 +37,7 @@ import { createTestPrismaClient } from './helpers/prisma-test-client';
 interface SafeConfigurationBody {
   id: string;
   businessName: string;
+  currencyCode: string;
   taxEnabled: boolean;
   taxRate: string;
   quoteValidityDays: number;
@@ -50,6 +51,9 @@ interface SafeQuoteBody {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
 }
 
 interface SafeSaleBody {
@@ -59,6 +63,9 @@ interface SafeSaleBody {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
 }
 
 describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
@@ -254,6 +261,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   afterAll(async () => {
     try {
       const restoreResponse = await patchConfiguration({
+        currencyCode: baseline.currencyCode,
         taxEnabled: baseline.taxEnabled,
         taxRate: baseline.taxRate,
         quoteValidityDays: baseline.quoteValidityDays,
@@ -680,6 +688,96 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         (line) => line.accountId === vatAccountId,
       );
       expect(vatLine?.creditAmount.toFixed(2)).toBe('16.20');
+    });
+  });
+
+  describe('§46 — Snapshot de contexto fiscal (Fase 11, Bloque B): currencyCode/taxEnabled/taxRate', () => {
+    it('cotización creada bajo USD+IGV 18% activo persiste ese contexto exacto', async () => {
+      await patchConfiguration({
+        currencyCode: 'USD',
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+
+      const quote = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(quote.status).toBe(201);
+      expect(quote.body.currencyCode).toBe('USD');
+      expect(quote.body.taxEnabled).toBe(true);
+      expect(quote.body.taxRate).toBe('18.00');
+
+      await patchConfiguration({ currencyCode: 'PEN' });
+      await trackLatestConfigurationAuditRow();
+    });
+
+    it('venta directa creada bajo USD+IGV 18% activo persiste ese mismo contexto (misma lectura de settings que taxAmount)', async () => {
+      await patchConfiguration({
+        currencyCode: 'USD',
+        taxEnabled: true,
+        taxRate: '18.00',
+      });
+      await trackLatestConfigurationAuditRow();
+
+      const sale = await createDirectSale({
+        customerId,
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(sale.status).toBe(201);
+      expect(sale.body.currencyCode).toBe('USD');
+      expect(sale.body.taxEnabled).toBe(true);
+      expect(sale.body.taxRate).toBe('18.00');
+
+      await patchConfiguration({ currencyCode: 'PEN' });
+      await trackLatestConfigurationAuditRow();
+    });
+
+    it('conversión Cotización -> Venta copia VERBATIM currencyCode/taxEnabled/taxRate de la cotización, aunque la configuración vigente ya haya cambiado', async () => {
+      await patchConfiguration({
+        currencyCode: 'USD',
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+
+      const quote = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(quote.status).toBe(201);
+      expect(quote.body.currencyCode).toBe('USD');
+      expect(quote.body.taxEnabled).toBe(true);
+      expect(quote.body.taxRate).toBe('18.00');
+
+      // Configuración vigente cambia drásticamente ANTES de la conversión:
+      // moneda distinta e IGV desactivado. La venta debe seguir copiando el
+      // contexto congelado de la cotización, nunca releer CompanySettings.
+      await patchConfiguration({ currencyCode: 'PEN', taxEnabled: false });
+      await trackLatestConfigurationAuditRow();
+
+      const conversion = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.body.id}`)
+        .set('Cookie', adminCookie)
+        .send({});
+      expect(conversion.status).toBe(201);
+      const sale = conversion.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+
+      expect(sale.currencyCode).toBe('USD');
+      expect(sale.taxEnabled).toBe(true);
+      expect(sale.taxRate).toBe('18.00');
+      // Explícitamente NO el contexto vigente al momento de convertir.
+      expect(sale.currencyCode).not.toBe('PEN');
+      expect(sale.taxEnabled).not.toBe(false);
+
+      await patchConfiguration({ currencyCode: 'PEN', taxEnabled: true });
+      await trackLatestConfigurationAuditRow();
     });
   });
 });

@@ -518,6 +518,20 @@ model Quote {
   taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
   total          Decimal @db.Decimal(14, 2)
 
+  // Fase 11, Bloque B: contexto de moneda/impuesto vigente en el momento
+  // EXACTO en que se calculó el snapshot comercial de arriba (mismo
+  // instante que taxAmount) — mismos tipos/CHECK que CompanySettings.
+  // Nunca se releen para exponer una respuesta ni se recalculan por
+  // separado: se escriben juntos con subtotal/discountAmount/taxAmount/
+  // total en create()/update() (solo cuando ese update afecta realmente
+  // los montos comerciales) y se copian VERBATIM en la conversión a Sale.
+  // Sin esto, facturación electrónica no tendría forma segura de saber con
+  // qué moneda/tasa de IGV se emitió históricamente un documento si
+  // CompanySettings cambia después.
+  currencyCode String  @map("currency_code") @db.VarChar(3)
+  taxEnabled   Boolean @map("tax_enabled")
+  taxRate      Decimal @map("tax_rate") @db.Decimal(5, 2)
+
   notes String?     @db.VarChar(1000)
   items QuoteItem[]
 
@@ -657,6 +671,15 @@ model Sale {
   taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
   total          Decimal @db.Decimal(14, 2)
 
+  // Fase 11, Bloque B: mismo criterio que Quote (arriba). En una venta
+  // directa se copian del ÚNICO snapshot de SettingsReader ya leído para
+  // taxAmount (nunca una segunda lectura); en una venta desde cotización se
+  // copian VERBATIM de Quote, igual que subtotal/discountAmount/taxAmount/
+  // total — nunca de CompanySettings vigente al convertir.
+  currencyCode String  @map("currency_code") @db.VarChar(3)
+  taxEnabled   Boolean @map("tax_enabled")
+  taxRate      Decimal @map("tax_rate") @db.Decimal(5, 2)
+
   paidAmount Decimal @default(0) @map("paid_amount") @db.Decimal(14, 2)
   balanceDue Decimal @map("balance_due") @db.Decimal(14, 2)
 
@@ -682,6 +705,12 @@ model Sale {
   // adelante reconciliará su valor contra SUM(payments ACTIVE) para ventas
   // ACTIVE); esta relación no introduce columnas de resumen duplicadas.
   payments Payment[]
+
+  // Documentos fiscales electrónicos (Fase 11, Bloque B: solo el modelo/
+  // relación; sin emisión todavía). Sale sigue siendo la única fuente de
+  // verdad comercial — ElectronicDocument es un agregado fiscal aparte,
+  // nunca al revés.
+  electronicDocuments ElectronicDocument[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1049,4 +1078,239 @@ model CompanySettings {
   // blanco vía BTRIM) se agregan a mano en migration.sql, mismo criterio
   // que el resto del dominio.
   @@map("company_settings")
+}
+
+// --- Facturación electrónica (Fase 11, Bloque B: fundación fiscal) ---------
+//
+// Sale sigue siendo la transacción comercial; ElectronicDocument es un
+// agregado FISCAL aparte, generado a partir de una Sale ya confirmada
+// (Fase 11A, decisión cerrada #2). Este bloque NO implementa emision: solo
+// el modelo de datos, sin FiscalSeriesService/ElectronicDocumentsService/
+// proveedor/controllers/DTOs/Swagger/auditoria/impresion (eso es el
+// siguiente bloque).
+//
+// Numeracion fiscal deliberadamente SEPARADA de DocumentSequence/
+// DocumentType (que siguen sirviendo exclusivamente a QUOTE/SALE
+// comerciales, sin modificar): FiscalSeries admite multiples series activas
+// por tipo de documento fiscal (p. ej. F001 y F002 para FACTURA), algo que
+// el documentType unico de DocumentSequence no puede representar.
+
+// Tipos de documento fiscal (Fase 11A #3): enum PROPIO, nunca una extension
+// de DocumentType (que es exclusivamente comercial). Solo los dos tipos
+// primarios del MVP; NOTA_CREDITO/NOTA_DEBITO son fuera de alcance de este
+// bloque (ver el indice unico parcial de ElectronicDocument mas abajo,
+// disenado para admitirlos despues sin redisenar Sale).
+enum FiscalDocumentType {
+  FACTURA
+  BOLETA
+}
+
+// Ciclo de vida INTERNO del documento fiscal, deliberadamente distinto del
+// estado crudo que cualquier proveedor real devuelva (Fase 11A #21):
+// providerStatus/providerMessage en ElectronicDocument cargan el vocabulario
+// propio del proveedor; este enum nunca se contamina con esos valores.
+// CREATED: numero fiscal ya asignado, aun no comunicado. SUBMITTED: en
+// curso o comunicado, en espera de resolucion. SUBMISSION_FAILED: fallo
+// TECNICO (red/timeout), reintentable con el MISMO numero, nunca una
+// asignacion nueva. ACCEPTED/REJECTED: resolucion final del proveedor.
+// Sin PENDING (redundante con CREATED), sin VOIDED/CANCELLED/CREDIT_NOTE
+// (extension futura de notas de credito, Fase 11A #34) en este bloque.
+enum ElectronicDocumentStatus {
+  CREATED
+  SUBMITTED
+  SUBMISSION_FAILED
+  ACCEPTED
+  REJECTED
+}
+
+/**
+ * Numeracion fiscal por (documentType, series): tabla dedicada, nunca una
+ * generalizacion de DocumentSequence (Fase 11A #9, decision cerrada:
+ * DocumentSequence.documentType es unico, asi que no puede representar
+ * varias series activas para un mismo tipo de documento). current_number es
+ * el ULTIMO numero emitido (0 = ninguno todavia), mismo criterio que
+ * DocumentSequence.currentNumber. El futuro FiscalSeriesService
+ * incrementara con un unico UPDATE ... RETURNING dentro de la transaccion
+ * del llamador, igual que DocumentSequenceService.next(). Sin logica de
+ * asignacion en este bloque: solo el modelo.
+ */
+model FiscalSeries {
+  id String @id @default(uuid()) @db.Uuid
+
+  documentType FiscalDocumentType @map("document_type")
+
+  // Exactamente 4 caracteres alfanumericos en mayuscula, primer caracter
+  // fijo por tipo de documento (F.../B...); ver los 2 CHECK agregados a
+  // mano en migration.sql (Fase 11A #23: reglas de serie aprobadas para
+  // Peru, sin implicar mapeo UBL/proveedor todavia).
+  series String @db.VarChar(4)
+
+  currentNumber Int     @default(0) @map("current_number")
+  active        Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  electronicDocuments ElectronicDocument[]
+
+  // Una serie es unica POR tipo de documento: permite multiples series
+  // activas por tipo sin ningun cambio de esquema futuro. El CHECK de
+  // formato de serie (migration.sql) ya distingue F.../B... por
+  // documentType, asi que en la practica una serie nunca podria reutilizarse
+  // entre FACTURA y BOLETA de todos modos: el indice compuesto es la
+  // garantia real a nivel de base de datos.
+  @@unique([documentType, series])
+  @@map("fiscal_series")
+}
+
+/**
+ * Agregado fiscal (Fase 11, Bloque B, solo modelo, sin logica de emision).
+ * Snapshot completo e inmutable desde el momento de creacion (Fase 11A
+ * #15/#19): ningun campo de este modelo se recalcula ni se relee desde
+ * Customer/Product/CompanySettings despues de creado. El futuro
+ * ElectronicDocumentsService sera responsable de poblar estos campos
+ * copiando desde Sale (identidad de cliente y montos ya congelados ahi) y
+ * desde CompanySettings vigente SOLO en el instante de emision (issuer*).
+ * providerCode es VARCHAR, nunca un enum de Prisma (Fase 11A #22, decision
+ * cerrada de este bloque): agregar un proveedor futuro (PSE, SUNAT directo)
+ * nunca debe requerir una migracion de base de datos.
+ */
+model ElectronicDocument {
+  id String @id @default(uuid()) @db.Uuid
+
+  saleId String @map("sale_id") @db.Uuid
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  fiscalSeriesId String       @map("fiscal_series_id") @db.Uuid
+  fiscalSeries   FiscalSeries @relation(fields: [fiscalSeriesId], references: [id], onDelete: Restrict)
+
+  // documentType/series/number se copian del FiscalSeries usado en el
+  // momento de la asignacion (denormalizado a proposito, mismo criterio que
+  // Sale.number frente a DocumentSequence): la identidad fiscal de un
+  // documento ya emitido nunca debe depender de un JOIN vivo hacia
+  // FiscalSeries para mostrarse ni para su unicidad.
+  documentType FiscalDocumentType @map("document_type")
+  series       String             @db.VarChar(4)
+  // 1..99,999,999 (Fase 11A #23). Sin fullNumber almacenado (Fase 11A
+  // #13, decision cerrada de este bloque): el futuro mapper/renderer arma
+  // "F001-00000001" (relleno a 8 digitos) a partir de series+number.
+  number       Int
+
+  status ElectronicDocumentStatus @default(CREATED)
+
+  // Nunca un enum (ver comentario del modelo). "MOCK" es el unico valor que
+  // existira cuando el siguiente bloque implemente el proveedor; ningun
+  // proveedor se implementa en este bloque.
+  providerCode String @map("provider_code") @db.VarChar(20)
+
+  currencyCode String @map("currency_code") @db.VarChar(3)
+
+  // Snapshot del EMISOR (Fase 11A #16/#19): copiado de CompanySettings en el
+  // instante de emision, nunca releido despues. issuerAddress nullable
+  // porque CompanySettings.address ya es nullable hoy (Fase 11A #21: no se
+  // agregan columnas nuevas a CompanySettings en este bloque).
+  issuerTaxId        String  @map("issuer_tax_id") @db.VarChar(20)
+  issuerBusinessName String  @map("issuer_business_name") @db.VarChar(150)
+  issuerAddress      String? @map("issuer_address") @db.VarChar(300)
+
+  // Snapshot del CLIENTE (Fase 11A #16/#19): se copiara del snapshot YA
+  // congelado en Sale (customerDocumentType/customerDocumentNumber/
+  // customerName/customerAddress), nunca de una lectura viva de Customer.
+  customerDocumentType   CustomerDocumentType? @map("customer_document_type")
+  customerDocumentNumber String?               @map("customer_document_number") @db.VarChar(32)
+  customerName           String                @map("customer_name") @db.VarChar(150)
+  customerAddress        String?               @map("customer_address") @db.VarChar(300)
+
+  // Snapshot MONETARIO (Fase 11A #16/#19): se copiara de Sale.subtotal/
+  // discountAmount/taxAmount/total, nunca recalculado. A diferencia de
+  // Sale (que no persiste una base imponible separada), aqui SI se
+  // almacena taxableBase de forma explicita (Bloque 11B #16): un documento
+  // fiscal debe mostrar la base imponible como linea propia.
+  subtotal       Decimal @db.Decimal(14, 2)
+  discountAmount Decimal @map("discount_amount") @db.Decimal(14, 2)
+  taxableBase    Decimal @map("taxable_base") @db.Decimal(14, 2)
+  taxAmount      Decimal @map("tax_amount") @db.Decimal(14, 2)
+  total          Decimal @db.Decimal(14, 2)
+
+  // Metadata de proveedor: opaca para el dominio (nunca se ramifica logica
+  // de negocio sobre providerStatus/providerMessage; ver Fase 11A #21/#28).
+  // Todos nullable: no existen hasta el primer intento de envio, que este
+  // bloque no implementa.
+  providerExternalId String? @map("provider_external_id") @db.VarChar(100)
+  providerStatus     String? @map("provider_status") @db.VarChar(50)
+  providerMessage    String? @map("provider_message") @db.VarChar(500)
+
+  // Contador de intentos de envio (Fase 11A #25/#29): incrementado por el
+  // futuro ElectronicDocumentsService en cada intento real al proveedor,
+  // nunca en este bloque.
+  submissionCount Int @default(0) @map("submission_count")
+
+  // issuedAt: instante de creacion/asignacion del numero fiscal (analogo a
+  // Sale.confirmedAt), sin @default: el futuro servicio lo fija
+  // explicitamente. Los demas son nullable hasta que ocurra cada evento.
+  issuedAt        DateTime  @map("issued_at")
+  lastSubmittedAt DateTime? @map("last_submitted_at")
+  acceptedAt      DateTime? @map("accepted_at")
+  rejectedAt      DateTime? @map("rejected_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  items ElectronicDocumentItem[]
+
+  // Identidad fiscal unica a nivel de base de datos: dos documentos nunca
+  // pueden compartir (documentType, series, number) (Fase 11A #18).
+  @@unique([documentType, series, number])
+  // Ademas del indice unico parcial de "documento primario" (agregado a
+  // mano en migration.sql, ver comentario ahi), se indexan por separado los
+  // campos de consulta previstos por las futuras rutas de lista/detalle
+  // (Fase 11A #40/#41): saleId (el unico parcial no cubre necesariamente
+  // toda consulta futura, p. ej. una nota de credito), status, createdAt,
+  // customerDocumentNumber.
+  @@index([saleId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([customerDocumentNumber])
+  @@map("electronic_documents")
+}
+
+/**
+ * Snapshot inmutable de linea (Fase 11A #11/#14, decision cerrada: NUNCA
+ * una FK a SaleItem/Product). Copiado desde SaleItem en el instante de
+ * creacion del documento fiscal; un cambio posterior de Product/SaleItem
+ * jamas debe poder alterar un item fiscal ya emitido. Sin campos de
+ * impuesto/descuento por linea, sin codigo de catalogo SUNAT, sin campos
+ * UBL (Fase 11A #14/#47, decision cerrada de este bloque: requieren una
+ * decision regulatoria/de proveedor explicita, fuera de alcance aqui).
+ */
+model ElectronicDocumentItem {
+  id String @id @default(uuid()) @db.Uuid
+
+  electronicDocumentId String             @map("electronic_document_id") @db.Uuid
+  electronicDocument   ElectronicDocument @relation(fields: [electronicDocumentId], references: [id], onDelete: Cascade)
+
+  lineNumber Int @map("line_number")
+
+  productSku  String @map("product_sku") @db.VarChar(40)
+  description String @db.VarChar(150)
+
+  unitCode         String @map("unit_code") @db.VarChar(15)
+  unitName         String @map("unit_name") @db.VarChar(60)
+  unitAbbreviation String @map("unit_abbreviation") @db.VarChar(10)
+
+  quantity  Decimal @db.Decimal(14, 3)
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: inmutable desde su creacion, mismo criterio que
+  // SaleItem/QuoteItem. Como maximo una linea por numero por documento;
+  // electronicDocumentId como prefijo izquierdo de este unico compuesto ya
+  // cubre "cargar items de un documento" (mismo criterio que SaleItem: no
+  // se agrega un indice adicional, seria redundante). Los 4 CHECK
+  // (lineNumber >= 1, quantity > 0, unitPrice >= 0, lineTotal >= 0) y el
+  // CHECK de aritmetica exacta se agregan a mano en migration.sql.
+  @@unique([electronicDocumentId, lineNumber])
+  @@map("electronic_document_items")
 }

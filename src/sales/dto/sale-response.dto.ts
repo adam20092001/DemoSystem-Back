@@ -184,6 +184,27 @@ export class SaleListItemResponseDto {
 
   @ApiProperty({
     type: String,
+    example: 'PEN',
+    description:
+      'Fase 11, Bloque B: contexto de moneda vigente al calcular este snapshot comercial. Congelado; nunca se actualiza si CompanySettings cambia después.',
+  })
+  currencyCode!: string;
+
+  @ApiProperty({
+    description:
+      'Fase 11, Bloque B: si el IGV estaba activo al calcular este snapshot comercial. Congelado, mismo criterio que taxAmount.',
+  })
+  taxEnabled!: boolean;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Fase 11, Bloque B: tasa de IGV vigente al calcular este snapshot comercial. Congelada, mismo criterio que taxAmount.',
+  })
+  taxRate!: string;
+
+  @ApiProperty({
+    type: String,
     description:
       'Para una venta ACTIVE, suma de sus pagos ACTIVE (módulo Pagos). Para una venta ANULADA, congelado con su valor histórico previo a la anulación.',
   })
@@ -280,6 +301,27 @@ export class SaleResponseDto {
 
   @ApiProperty({ type: String })
   total!: string;
+
+  @ApiProperty({
+    type: String,
+    example: 'PEN',
+    description:
+      'Fase 11, Bloque B: contexto de moneda vigente al calcular este snapshot comercial. Congelado; nunca se actualiza si CompanySettings cambia después.',
+  })
+  currencyCode!: string;
+
+  @ApiProperty({
+    description:
+      'Fase 11, Bloque B: si el IGV estaba activo al calcular este snapshot comercial. Congelado, mismo criterio que taxAmount.',
+  })
+  taxEnabled!: boolean;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Fase 11, Bloque B: tasa de IGV vigente al calcular este snapshot comercial. Congelada, mismo criterio que taxAmount.',
+  })
+  taxRate!: string;
 
   @ApiProperty({
     type: String,

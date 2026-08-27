@@ -49,6 +49,10 @@ export interface SafeQuoteListItem {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  /** Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial. */
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
   itemCount: number;
   createdAt: Date;
   updatedAt: Date;
@@ -72,6 +76,10 @@ export interface SafeQuote {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  /** Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial. */
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
   notes: string | null;
   items: SafeQuoteItem[];
   createdAt: Date;

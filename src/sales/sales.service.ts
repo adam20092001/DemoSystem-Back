@@ -149,6 +149,11 @@ interface LockedQuoteRow {
   discountAmount: Prisma.Decimal;
   taxAmount: Prisma.Decimal;
   total: Prisma.Decimal;
+  // Fase 11, Bloque B: contexto de moneda/impuesto, copiado VERBATIM a Sale
+  // (§8 del kickoff aprobado) — nunca releído de CompanySettings al convertir.
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: Prisma.Decimal;
 }
 
 interface LockedSaleRow {
@@ -314,6 +319,12 @@ export class SalesService {
           discountAmount,
           taxAmount,
           total,
+          // Fase 11, Bloque B: mismo snapshot ÚNICO de settings ya leído
+          // arriba para taxAmount — nunca una segunda lectura de
+          // SettingsReader (§9 del kickoff aprobado).
+          currencyCode: settings.currencyCode,
+          taxEnabled: settings.taxEnabled,
+          taxRate: settings.taxRate,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -545,6 +556,12 @@ export class SalesService {
           discountAmount,
           taxAmount,
           total,
+          // Fase 11, Bloque B: copiados VERBATIM de Quote (§8 del kickoff
+          // aprobado), igual criterio que subtotal/discountAmount/taxAmount/
+          // total arriba — nunca de CompanySettings vigente al convertir.
+          currencyCode: quote.currencyCode,
+          taxEnabled: quote.taxEnabled,
+          taxRate: quote.taxRate,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -1090,7 +1107,10 @@ export class SalesService {
         subtotal,
         discount_amount           AS "discountAmount",
         tax_amount                AS "taxAmount",
-        total
+        total,
+        currency_code             AS "currencyCode",
+        tax_enabled               AS "taxEnabled",
+        tax_rate                  AS "taxRate"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE
