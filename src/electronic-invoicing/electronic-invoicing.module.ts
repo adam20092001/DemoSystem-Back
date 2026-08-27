@@ -4,19 +4,23 @@ import {
   ElectronicInvoicingProviderCode,
   EnvironmentVariables,
 } from '../config/env.validation';
+import { ElectronicDocumentsController } from './controllers/electronic-documents.controller';
+import { FiscalSeriesController } from './controllers/fiscal-series.controller';
+import { SaleElectronicDocumentsController } from './controllers/sale-electronic-documents.controller';
 import { ElectronicDocumentsService } from './electronic-documents.service';
 import { FiscalSeriesService } from './fiscal-series.service';
 import { MockElectronicInvoicingProvider } from './providers/mock-electronic-invoicing.provider';
 import { ELECTRONIC_INVOICING_PROVIDER } from './providers/electronic-invoicing-provider.token';
 
 /**
- * Módulo de facturación electrónica (Fase 11, Bloque C). Deliberadamente
- * SIN controllers: no existe API pública en este bloque (Fase 11D). Solo
- * componentes internos, consumibles por un futuro controller o por otro
- * módulo que decida importar ElectronicInvoicingModule explícitamente —
- * SalesModule/PaymentsModule/AccountingModule/CustomersModule/ReportsModule
- * NO lo importan (ninguna dependencia inversa: la emisión fiscal consume a
- * Sale, nunca al revés).
+ * Módulo de facturación electrónica. Desde la Fase 11, Bloque D, expone la
+ * API pública ya aprobada del motor (Bloque C): emisión, listado, detalle,
+ * reintento y descubrimiento de series. SalesModule/PaymentsModule/
+ * AccountingModule/CustomersModule/ReportsModule siguen sin importar este
+ * módulo (ninguna dependencia inversa: la emisión fiscal consume a Sale,
+ * nunca al revés) — SaleElectronicDocumentsController expone una ruta
+ * anidada bajo /sales/:saleId/electronic-documents sin que SalesModule
+ * participe en absoluto.
  *
  * PrismaService y AuditService llegan de módulos globales (Database,
  * Audit): no se importan explícitamente aquí. SettingsReader
@@ -27,6 +31,11 @@ import { ELECTRONIC_INVOICING_PROVIDER } from './providers/electronic-invoicing-
  * siempre del snapshot ya congelado de Sale, nunca de una lectura vigente.
  */
 @Module({
+  controllers: [
+    SaleElectronicDocumentsController,
+    ElectronicDocumentsController,
+    FiscalSeriesController,
+  ],
   providers: [
     ElectronicDocumentsService,
     FiscalSeriesService,

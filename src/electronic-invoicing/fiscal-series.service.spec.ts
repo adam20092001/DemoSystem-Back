@@ -1,5 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { FiscalDocumentType, Prisma } from '@prisma/client';
+import { PrismaService } from '../database/prisma.service';
 import { MAX_FISCAL_NUMBER } from './constants/electronic-invoicing.constants';
 import { FiscalSeriesService } from './fiscal-series.service';
 
@@ -11,13 +12,99 @@ function createTxMock() {
   };
 }
 
+function createPrismaMock() {
+  return {
+    fiscalSeries: {
+      findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+    },
+  };
+}
+
 describe('FiscalSeriesService', () => {
   let tx: ReturnType<typeof createTxMock>;
+  let prisma: ReturnType<typeof createPrismaMock>;
   let service: FiscalSeriesService;
 
   beforeEach(() => {
     tx = createTxMock();
-    service = new FiscalSeriesService();
+    prisma = createPrismaMock();
+    service = new FiscalSeriesService(prisma as unknown as PrismaService);
+  });
+
+  describe('list', () => {
+    const ROW = {
+      id: FISCAL_SERIES_ID,
+      documentType: FiscalDocumentType.FACTURA,
+      series: 'F001',
+      currentNumber: 5,
+      active: true,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+    };
+
+    it('mapea las filas a SafeFiscalSeries, sin nextNumber', async () => {
+      prisma.fiscalSeries.findMany.mockResolvedValue([ROW]);
+
+      const result = await service.list({});
+
+      expect(result).toEqual([
+        {
+          id: FISCAL_SERIES_ID,
+          documentType: FiscalDocumentType.FACTURA,
+          series: 'F001',
+          currentNumber: 5,
+          active: true,
+          createdAt: ROW.createdAt,
+          updatedAt: ROW.updatedAt,
+        },
+      ]);
+      expect(result[0]).not.toHaveProperty('nextNumber');
+    });
+
+    it('ordena documentType ASC, series ASC', async () => {
+      prisma.fiscalSeries.findMany.mockResolvedValue([]);
+
+      await service.list({});
+
+      expect(prisma.fiscalSeries.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ documentType: 'asc' }, { series: 'asc' }],
+        }),
+      );
+    });
+
+    it('aplica el filtro documentType', async () => {
+      prisma.fiscalSeries.findMany.mockResolvedValue([]);
+
+      await service.list({ documentType: FiscalDocumentType.BOLETA });
+
+      const call = prisma.fiscalSeries.findMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({ documentType: FiscalDocumentType.BOLETA });
+    });
+
+    it('aplica el filtro active', async () => {
+      prisma.fiscalSeries.findMany.mockResolvedValue([]);
+
+      await service.list({ active: false });
+
+      const call = prisma.fiscalSeries.findMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({ active: false });
+    });
+
+    it('sin filtros: where vacío (devuelve todas las series)', async () => {
+      prisma.fiscalSeries.findMany.mockResolvedValue([]);
+
+      await service.list({});
+
+      const call = prisma.fiscalSeries.findMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({});
+    });
   });
 
   it('currentNumber 0 -> el UPDATE lo incrementa y devuelve 1', async () => {

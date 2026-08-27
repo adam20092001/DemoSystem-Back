@@ -168,6 +168,12 @@ function createPrismaMock() {
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
+    // Bloque 11D: list()/findDetail() leen directamente, sin transacción.
+    electronicDocument: {
+      findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+      count: jest.fn<Promise<number>, [Record<string, unknown>]>(),
+      findUnique: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    },
   };
 }
 
@@ -953,6 +959,188 @@ describe('ElectronicDocumentsService', () => {
       await expect(
         service.retrySubmission(DOCUMENT_ID, ACTOR_ID, null),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ====================================================================
+  // Bloque 11D — list()/findDetail()
+  // ====================================================================
+  describe('list', () => {
+    function makeListRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: DOCUMENT_ID,
+        saleId: SALE_ID,
+        sale: { number: SALE_NUMBER },
+        documentType: FiscalDocumentType.FACTURA,
+        series: 'F001',
+        number: 7,
+        status: ElectronicDocumentStatus.ACCEPTED,
+        currencyCode: 'PEN',
+        customerDocumentType: CustomerDocumentType.RUC,
+        customerDocumentNumber: '20123456789',
+        customerName: 'Distribuidora Fiscal SAC',
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('0.00'),
+        taxableBase: new Prisma.Decimal('100.00'),
+        taxAmount: new Prisma.Decimal('18.00'),
+        total: new Prisma.Decimal('118.00'),
+        providerCode: 'MOCK',
+        providerStatus: 'ACCEPTED',
+        issuedAt: new Date('2026-03-15T12:00:00.000Z'),
+        lastSubmittedAt: new Date('2026-03-15T12:00:01.000Z'),
+        acceptedAt: new Date('2026-03-15T12:00:02.000Z'),
+        rejectedAt: null,
+        createdAt: new Date('2026-03-15T12:00:00.000Z'),
+        updatedAt: new Date('2026-03-15T12:00:02.000Z'),
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      prisma.electronicDocument.findMany.mockResolvedValue([makeListRow()]);
+      prisma.electronicDocument.count.mockResolvedValue(1);
+    });
+
+    it('nunca selecciona items (select de listado sin relación anidada)', async () => {
+      await service.list({});
+
+      const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
+        select: Record<string, unknown>;
+      };
+      expect(call.select).not.toHaveProperty('items');
+    });
+
+    it('computa fullNumber y nunca expone providerExternalId', async () => {
+      const result = await service.list({});
+
+      expect(result.data[0].fullNumber).toBe('F001-00000007');
+      expect(result.data[0]).not.toHaveProperty('providerExternalId');
+      expect(result.data[0].saleNumber).toBe(SALE_NUMBER);
+    });
+
+    it('pagina con page/limit por defecto y respeta el máximo de 100', async () => {
+      await service.list({ limit: 500 });
+
+      const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
+        take: number;
+        skip: number;
+      };
+      expect(call.take).toBe(100);
+      expect(call.skip).toBe(0);
+    });
+
+    it('ordena issuedAt desc, id desc', async () => {
+      await service.list({});
+
+      const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
+        orderBy: unknown;
+      };
+      expect(call.orderBy).toEqual([{ issuedAt: 'desc' }, { id: 'desc' }]);
+    });
+
+    it.each([
+      ['documentType', { documentType: FiscalDocumentType.BOLETA }],
+      ['status', { status: ElectronicDocumentStatus.SUBMITTED }],
+      ['series', { series: 'F001' }],
+      ['saleId', { saleId: SALE_ID }],
+      ['customerDocumentNumber', { customerDocumentNumber: '20123456789' }],
+    ])('aplica el filtro %s', async (_name, filter) => {
+      await service.list(filter);
+
+      const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
+        where: { AND: Record<string, unknown>[] };
+      };
+      expect(call.where.AND).toContainEqual(filter);
+    });
+
+    it('issuedFrom posterior a issuedTo -> BadRequestException', async () => {
+      await expect(
+        service.list({ issuedFrom: '2026-03-31', issuedTo: '2026-03-01' }),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('findDetail', () => {
+    function makeDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: DOCUMENT_ID,
+        saleId: SALE_ID,
+        sale: { number: SALE_NUMBER },
+        documentType: FiscalDocumentType.FACTURA,
+        series: 'F001',
+        number: 7,
+        status: ElectronicDocumentStatus.ACCEPTED,
+        currencyCode: 'PEN',
+        customerDocumentType: CustomerDocumentType.RUC,
+        customerDocumentNumber: '20123456789',
+        customerName: 'Distribuidora Fiscal SAC',
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('0.00'),
+        taxableBase: new Prisma.Decimal('100.00'),
+        taxAmount: new Prisma.Decimal('18.00'),
+        total: new Prisma.Decimal('118.00'),
+        providerCode: 'MOCK',
+        providerStatus: 'ACCEPTED',
+        issuedAt: new Date('2026-03-15T12:00:00.000Z'),
+        lastSubmittedAt: new Date('2026-03-15T12:00:01.000Z'),
+        acceptedAt: new Date('2026-03-15T12:00:02.000Z'),
+        rejectedAt: null,
+        createdAt: new Date('2026-03-15T12:00:00.000Z'),
+        updatedAt: new Date('2026-03-15T12:00:02.000Z'),
+        issuerTaxId: '20100000001',
+        issuerBusinessName: 'Empresa Demo SAC',
+        issuerAddress: 'Av. Principal 100',
+        customerAddress: 'Av. Siempre Viva 123',
+        providerMessage:
+          'Documento aceptado por el proveedor de demostración (MOCK).',
+        submissionCount: 1,
+        items: [
+          {
+            lineNumber: 1,
+            productSku: 'SKU-001',
+            description: 'Producto Fiscal',
+            unitCode: 'UND',
+            unitName: 'Unidad',
+            unitAbbreviation: 'und',
+            quantity: new Prisma.Decimal('2.000'),
+            unitPrice: new Prisma.Decimal('50.00'),
+            lineTotal: new Prisma.Decimal('100.00'),
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('documento inexistente -> NotFoundException', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(null);
+
+      await expect(service.findDetail(DOCUMENT_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('devuelve items, issuer, providerMessage/submissionCount, nunca providerExternalId', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      const result = await service.findDetail(DOCUMENT_ID);
+
+      expect(result.fullNumber).toBe('F001-00000007');
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].productSku).toBe('SKU-001');
+      expect(result.issuerBusinessName).toBe('Empresa Demo SAC');
+      expect(result.submissionCount).toBe(1);
+      expect(result).not.toHaveProperty('providerExternalId');
+    });
+
+    it('el select de detalle carga los ítems en un único nested select (sin N+1)', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetail(DOCUMENT_ID);
+
+      const call = prisma.electronicDocument.findUnique.mock.calls[0][0] as {
+        select: { items: unknown };
+      };
+      expect(call.select.items).toBeDefined();
     });
   });
 });

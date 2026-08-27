@@ -24,3 +24,17 @@ export const RUC_PATTERN = /^\d{11}$/;
 
 /** Código de proveedor del Bloque 11C: el único soportado hasta que exista un PSE real. */
 export const MOCK_PROVIDER_CODE = 'MOCK';
+
+/**
+ * Formato de serie por tipo de documento (Bloque 11B/11D): exactamente 4
+ * caracteres alfanuméricos en mayúscula, primer caracter fijo por tipo.
+ * Idénticos a los CHECK de base de datos (fiscal_series_series_format_by_type)
+ * — la validación del DTO de emisión (Bloque 11D) es una capa de UX que
+ * nunca sustituye esa restricción real; el servicio/base de datos siguen
+ * siendo la autoridad final.
+ */
+export const FACTURA_SERIES_PATTERN = /^F[A-Z0-9]{3}$/;
+export const BOLETA_SERIES_PATTERN = /^B[A-Z0-9]{3}$/;
+
+/** Relleno de FiscalSeries.number para armar fullNumber (Bloque 11D §14): "F001-00000001". */
+export const FISCAL_NUMBER_PAD_LENGTH = 8;

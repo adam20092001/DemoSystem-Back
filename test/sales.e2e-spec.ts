@@ -4365,10 +4365,16 @@ describe('Sales (e2e)', () => {
       // operaciones, sin cambios. Fase 9, Bloque B: filtra por prefijo real
       // del recurso (no por substring "sales") porque los nuevos reportes
       // GET /reports/sales-by-product|customer|seller también contienen
-      // "sales" en el path y no deben contarse aquí.
+      // "sales" en el path y no deben contarse aquí. Fase 11, Bloque D:
+      // excluye igual criterio la ruta anidada
+      // /sales/{saleId}/electronic-documents (registrada por
+      // SaleElectronicDocumentsController, un controller distinto de
+      // SalesController) — mismo motivo exacto que "payments".
       const salePaths = Object.keys(doc.paths).filter(
         (path) =>
-          path.startsWith('/api/v1/sales') && !path.includes('payments'),
+          path.startsWith('/api/v1/sales') &&
+          !path.includes('payments') &&
+          !path.includes('electronic-documents'),
       );
       expect(new Set(salePaths).size).toBe(7);
       let totalOps = 0;

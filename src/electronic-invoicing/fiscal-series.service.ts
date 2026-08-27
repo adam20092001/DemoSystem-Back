@@ -4,7 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { FiscalDocumentType, Prisma } from '@prisma/client';
+import { PrismaService } from '../database/prisma.service';
 import { MAX_FISCAL_NUMBER } from './constants/electronic-invoicing.constants';
+import { ListFiscalSeriesQuery } from './types/list-fiscal-series.query';
+import { SafeFiscalSeries } from './types/safe-fiscal-series';
 
 /** Resultado de una asignación exitosa: el número YA es el que corresponde emitir. */
 export interface FiscalNumberAllocation {
@@ -42,6 +45,41 @@ interface FiscalSeriesLookupRow {
  */
 @Injectable()
 export class FiscalSeriesService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Descubrimiento de solo lectura (Bloque 11D §20/§21/§25): la emisión
+   * exige una serie explícita, así que el cliente necesita poder listar
+   * las disponibles. Sin paginación (catálogo pequeño por diseño); orden
+   * fijo documentType ASC, series ASC. NUNCA calcula/expone un "próximo
+   * número" (§22): currentNumber es puramente informativo y puede quedar
+   * obsoleto de inmediato ante emisión concurrente.
+   */
+  async list(query: ListFiscalSeriesQuery): Promise<SafeFiscalSeries[]> {
+    const where: Prisma.FiscalSeriesWhereInput = {};
+    if (query.documentType !== undefined) {
+      where.documentType = query.documentType;
+    }
+    if (query.active !== undefined) {
+      where.active = query.active;
+    }
+
+    const rows = await this.prisma.fiscalSeries.findMany({
+      where,
+      orderBy: [{ documentType: 'asc' }, { series: 'asc' }],
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      documentType: row.documentType,
+      series: row.series,
+      currentNumber: row.currentNumber,
+      active: row.active,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
   async allocateNext(
     tx: Prisma.TransactionClient,
     documentType: FiscalDocumentType,

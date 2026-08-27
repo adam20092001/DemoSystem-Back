@@ -16,6 +16,12 @@ import {
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import {
+  isValidDateOnly,
+  startOfBusinessDayUtc,
+  endOfBusinessDayExclusiveUtc,
+} from '../common/date/business-date';
+import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import {
   BOLETA_GENERIC_CUSTOMER_MAX_TOTAL,
@@ -23,9 +29,13 @@ import {
 } from './constants/electronic-invoicing.constants';
 import { FiscalSeriesService } from './fiscal-series.service';
 import {
+  ELECTRONIC_DOCUMENT_DETAIL_SELECT,
+  ELECTRONIC_DOCUMENT_LIST_SELECT,
   ELECTRONIC_DOCUMENT_SAFE_SELECT,
   ElectronicDocumentSafeRow,
   toElectronicDocumentSnapshot,
+  toSafeElectronicDocument,
+  toSafeElectronicDocumentListItem,
 } from './mappers/electronic-document.mapper';
 import { RetryableProviderSubmissionError } from './providers/electronic-invoicing-provider-errors';
 import type {
@@ -36,7 +46,16 @@ import type {
 import { ELECTRONIC_INVOICING_PROVIDER } from './providers/electronic-invoicing-provider.token';
 import { ElectronicDocumentSnapshot } from './types/electronic-document-snapshot';
 import { IssueElectronicDocumentCommand } from './types/issue-electronic-document.command';
+import { ListElectronicDocumentsQuery } from './types/list-electronic-documents.query';
 import { SaleFiscalSnapshot } from './types/sale-fiscal-snapshot';
+import {
+  SafeElectronicDocument,
+  SafeElectronicDocumentListItem,
+} from './types/safe-electronic-document';
+
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
 
 /**
  * Motor de emisión fiscal interna (Fase 11, Bloque C). Sin controller, sin
@@ -101,6 +120,123 @@ export class ElectronicDocumentsService {
       actorUserId,
       ipAddress ?? null,
     );
+  }
+
+  // ==================================================================
+  // Bloque 11D — lectura HTTP (§10-§16, §24)
+  // ==================================================================
+
+  /**
+   * Listado paginado (§10/§11/§24). NUNCA carga ítems (select dedicado, sin
+   * relación anidada). SELLER tiene acceso total, mismo criterio ya
+   * descubierto y preservado de SalesController/SalesService (§6 del
+   * kickoff): esta capa NO aplica ningún filtro de propiedad por vendedor.
+   */
+  async list(
+    query: ListElectronicDocumentsQuery,
+  ): Promise<PaginatedResult<SafeElectronicDocumentListItem>> {
+    const page =
+      query.page !== undefined && query.page > 0
+        ? Math.floor(query.page)
+        : DEFAULT_PAGE;
+    const limit = Math.min(
+      query.limit !== undefined && query.limit > 0
+        ? Math.floor(query.limit)
+        : DEFAULT_LIMIT,
+      MAX_LIMIT,
+    );
+    const skip = (page - 1) * limit;
+
+    this.assertValidDateRangeQuery(query);
+
+    const conditions: Prisma.ElectronicDocumentWhereInput[] = [];
+    if (query.documentType !== undefined) {
+      conditions.push({ documentType: query.documentType });
+    }
+    if (query.status !== undefined) {
+      conditions.push({ status: query.status });
+    }
+    if (query.series !== undefined) {
+      conditions.push({ series: query.series });
+    }
+    if (query.saleId !== undefined) {
+      conditions.push({ saleId: query.saleId });
+    }
+    if (query.customerDocumentNumber !== undefined) {
+      conditions.push({
+        customerDocumentNumber: query.customerDocumentNumber,
+      });
+    }
+    if (query.issuedFrom !== undefined) {
+      conditions.push({
+        issuedAt: { gte: startOfBusinessDayUtc(query.issuedFrom) },
+      });
+    }
+    if (query.issuedTo !== undefined) {
+      conditions.push({
+        issuedAt: { lt: endOfBusinessDayExclusiveUtc(query.issuedTo) },
+      });
+    }
+
+    const where: Prisma.ElectronicDocumentWhereInput =
+      conditions.length > 0 ? { AND: conditions } : {};
+
+    const [rows, total] = await Promise.all([
+      this.prisma.electronicDocument.findMany({
+        where,
+        select: ELECTRONIC_DOCUMENT_LIST_SELECT,
+        orderBy: [{ issuedAt: 'desc' }, { id: 'desc' }],
+        skip,
+        take: limit,
+      }),
+      this.prisma.electronicDocument.count({ where }),
+    ]);
+
+    return {
+      data: rows.map(toSafeElectronicDocumentListItem),
+      page,
+      limit,
+      total,
+      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * Detalle (§13/§15/§24): un único select anidado para los ítems, sin
+   * N+1. Mismo criterio de visibilidad que list(): sin restricción de
+   * propiedad por vendedor (SELLER ya tiene acceso total en Sales).
+   */
+  async findDetail(id: string): Promise<SafeElectronicDocument> {
+    const row = await this.prisma.electronicDocument.findUnique({
+      where: { id },
+      select: ELECTRONIC_DOCUMENT_DETAIL_SELECT,
+    });
+    if (row === null) {
+      throw new NotFoundException('El documento fiscal no existe');
+    }
+    return toSafeElectronicDocument(row);
+  }
+
+  private assertValidDateRangeQuery(query: ListElectronicDocumentsQuery): void {
+    if (query.issuedFrom !== undefined && !isValidDateOnly(query.issuedFrom)) {
+      throw new BadRequestException(
+        'issuedFrom debe ser una fecha válida en formato YYYY-MM-DD',
+      );
+    }
+    if (query.issuedTo !== undefined && !isValidDateOnly(query.issuedTo)) {
+      throw new BadRequestException(
+        'issuedTo debe ser una fecha válida en formato YYYY-MM-DD',
+      );
+    }
+    if (
+      query.issuedFrom !== undefined &&
+      query.issuedTo !== undefined &&
+      query.issuedFrom > query.issuedTo
+    ) {
+      throw new BadRequestException(
+        'issuedFrom no puede ser posterior a issuedTo',
+      );
+    }
   }
 
   // ==================================================================
