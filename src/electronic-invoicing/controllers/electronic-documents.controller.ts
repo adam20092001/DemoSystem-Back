@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -18,6 +19,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiParam,
+  ApiProduces,
   ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -35,6 +37,7 @@ import {
 } from '../dto/electronic-document-response.dto';
 import { ListElectronicDocumentsQueryDto } from '../dto/list-electronic-documents-query.dto';
 import { ElectronicDocumentsService } from '../electronic-documents.service';
+import { ElectronicDocumentRenderer } from '../printing/electronic-document.renderer';
 import { SafeElectronicDocumentListItem } from '../types/safe-electronic-document';
 
 /**
@@ -61,6 +64,7 @@ const RETRY_ROLES = [RoleName.ADMIN] as const;
 export class ElectronicDocumentsController {
   constructor(
     private readonly electronicDocumentsService: ElectronicDocumentsService,
+    private readonly renderer: ElectronicDocumentRenderer,
   ) {}
 
   @ApiOperation({
@@ -90,6 +94,27 @@ export class ElectronicDocumentsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<ElectronicDocumentResponseDto> {
     return this.electronicDocumentsService.findDetail(id);
+  }
+
+  @ApiOperation({
+    summary:
+      'Representación impresa de demostración del documento fiscal (HTML)',
+    description:
+      'HTML autocontenido pensado para visualizar/imprimir desde el navegador, generado en memoria ÚNICAMENTE a partir del snapshot ya persistido de ElectronicDocument/ElectronicDocumentItem (nunca CompanySettings/Customer/Product en vivo): la representación histórica no cambia aunque esos datos cambien después. No se genera ni almacena ningún archivo. NO es una representación fiscal real: sin QR, sin XML/UBL, sin CDR, sin firma digital. El proveedor "MOCK" es de demostración — su resultado ACCEPTED nunca implica aceptación, registro ni validez tributaria ante SUNAT, y el HTML lo declara explícitamente.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiProduces('text/html')
+  @ApiOkResponse({
+    description: 'Documento HTML de demostración, listo para imprimir.',
+    content: { 'text/html': { schema: { type: 'string' } } },
+  })
+  @ApiNotFoundResponse({ description: 'No existe.' })
+  @Roles(...READ_ROLES)
+  @Get(':id/print')
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  async print(@Param('id', ParseUUIDPipe) id: string): Promise<string> {
+    const doc = await this.electronicDocumentsService.findDetail(id);
+    return this.renderer.render(doc);
   }
 
   @ApiOperation({

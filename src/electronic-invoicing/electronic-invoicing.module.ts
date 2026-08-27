@@ -9,6 +9,7 @@ import { FiscalSeriesController } from './controllers/fiscal-series.controller';
 import { SaleElectronicDocumentsController } from './controllers/sale-electronic-documents.controller';
 import { ElectronicDocumentsService } from './electronic-documents.service';
 import { FiscalSeriesService } from './fiscal-series.service';
+import { ElectronicDocumentRenderer } from './printing/electronic-document.renderer';
 import { MockElectronicInvoicingProvider } from './providers/mock-electronic-invoicing.provider';
 import { ELECTRONIC_INVOICING_PROVIDER } from './providers/electronic-invoicing-provider.token';
 
@@ -39,6 +40,7 @@ import { ELECTRONIC_INVOICING_PROVIDER } from './providers/electronic-invoicing-
   providers: [
     ElectronicDocumentsService,
     FiscalSeriesService,
+    ElectronicDocumentRenderer,
     MockElectronicInvoicingProvider,
     {
       provide: ELECTRONIC_INVOICING_PROVIDER,

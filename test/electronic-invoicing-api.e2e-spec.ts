@@ -71,6 +71,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   let productId: string;
   let rucCustomerId: string;
   let genericCustomerId: string;
+  let xssCustomerId: string;
 
   let companySettingsId: string;
   let companySettingsBaseline: {
@@ -239,6 +240,12 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   function getDoc(cookie: string, id: string) {
     return request(app.getHttpServer())
       .get(`/api/v1/electronic-documents/${id}`)
+      .set('Cookie', cookie);
+  }
+
+  function printDoc(cookie: string, id: string) {
+    return request(app.getHttpServer())
+      .get(`/api/v1/electronic-documents/${id}/print`)
       .set('Cookie', cookie);
   }
 
@@ -465,6 +472,24 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
     });
     genericCustomerId = genericCustomer.id;
 
+    // Bloque 11E §40: cliente propio con contenido HTML-sensible en su
+    // nombre/dirección, creado directamente vía Prisma (nunca vía HTTP: el
+    // DTO de Customers no es el objeto bajo prueba aquí) — camino
+    // fixture-owned legítimo para probar el escapado del renderer contra
+    // datos realmente persistidos.
+    const xssCustomer = await prisma.customer.create({
+      data: {
+        customerType: CustomerType.COMPANY,
+        customerStage: CustomerStage.CUSTOMER,
+        status: CustomerStatus.ACTIVE,
+        documentType: CustomerDocumentType.RUC,
+        documentNumber: '20999999999',
+        name: '<script>alert(1)</script> & "SAC"',
+        address: '<script>alert(2)</script>',
+      },
+    });
+    xssCustomerId = xssCustomer.id;
+
     await prisma.fiscalSeries.create({
       data: {
         documentType: FiscalDocumentType.FACTURA,
@@ -572,6 +597,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       }
 
       await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
+      await prisma.customer.deleteMany({ where: { id: xssCustomerId } });
       await prisma.product.deleteMany({ where: { id: productId } });
       await prisma.unit.deleteMany({ where: { id: unitId } });
       await prisma.category.deleteMany({ where: { id: categoryId } });
@@ -1363,6 +1389,161 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
           },
         }),
       ).toBe(0);
+    });
+  });
+
+  // ====================================================================
+  // Bloque 11E — GET /electronic-documents/:id/print
+  // ====================================================================
+  describe('GET /electronic-documents/:id/print — representación imprimible de demostración (Bloque 11E)', () => {
+    it('§35 FACTURA: 200, text/html, encabezado, fullNumber, emisor/cliente/ítem, aviso MOCK, sin providerExternalId', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '2',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const doc = issued.body as { id: string; fullNumber: string };
+      createdDocumentIds.push(doc.id);
+
+      const printed = await printDoc(adminCookie, doc.id);
+      expect(printed.status).toBe(200);
+      expect(printed.headers['content-type']).toContain('text/html');
+      expect(printed.text).toContain('FACTURA ELECTRÓNICA');
+      expect(printed.text).toContain(doc.fullNumber);
+      expect(printed.text).toContain('Empresa Demo Fiscal API E2E SAC');
+      expect(printed.text).toContain('Distribuidora API E2E SAC');
+      expect(printed.text).toContain('E2EEIVAPI-P-');
+      expect(printed.text).toContain('DOCUMENTO DE DEMOSTRACIÓN');
+      expect(printed.text).not.toContain('providerExternalId');
+    });
+
+    it('§36 BOLETA: 200, encabezado, fullNumber correcto, representación "Público general"', async () => {
+      const sale = await createFixtureSale({
+        customerId: genericCustomerId,
+        quantity: '14', // 14 * 50.00 = 700.00
+        payment: { method: 'CASH', amount: '700.00' },
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.BOLETA,
+        series: BOLETA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const doc = issued.body as { id: string; fullNumber: string };
+      createdDocumentIds.push(doc.id);
+
+      const printed = await printDoc(adminCookie, doc.id);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('BOLETA ELECTRÓNICA');
+      expect(printed.text).toContain(doc.fullNumber);
+      expect(printed.text).toContain('Público general');
+    });
+
+    it('§37 autorización: ADMIN/SELLER/MANAGEMENT 200, WAREHOUSE 403, sin cookie 401', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      const doc = issued.body as { id: string };
+      createdDocumentIds.push(doc.id);
+
+      expect((await printDoc(adminCookie, doc.id)).status).toBe(200);
+      expect((await printDoc(sellerCookie, doc.id)).status).toBe(200);
+      expect((await printDoc(managementCookie, doc.id)).status).toBe(200);
+      expect((await printDoc(warehouseCookie, doc.id)).status).toBe(403);
+
+      const unauthenticated = await request(app.getHttpServer()).get(
+        `/api/v1/electronic-documents/${doc.id}/print`,
+      );
+      expect(unauthenticated.status).toBe(401);
+    });
+
+    it('§38 documento inexistente -> 404', async () => {
+      const response = await printDoc(adminCookie, NON_EXISTENT_UUID);
+      expect(response.status).toBe(404);
+    });
+
+    it('§39 snapshot histórico: mutar CompanySettings/Customer/Product en vivo no altera una representación ya emitida', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '2',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const doc = issued.body as { id: string };
+      createdDocumentIds.push(doc.id);
+
+      const before = await printDoc(adminCookie, doc.id);
+      expect(before.status).toBe(200);
+      const htmlBefore = before.text;
+
+      // Mutar EN VIVO: CompanySettings, el propio Customer RUC, y el
+      // Product — ninguno debe reflejarse en una representación ya emitida.
+      await prisma.companySettings.update({
+        where: { id: companySettingsId },
+        data: { businessName: 'MUTADO DESPUES DE EMITIR SAC' },
+      });
+      await prisma.customer.update({
+        where: { id: rucCustomerId },
+        data: { name: 'CLIENTE MUTADO DESPUES DE EMITIR' },
+      });
+      await prisma.product.update({
+        where: { id: productId },
+        data: { name: 'PRODUCTO MUTADO DESPUES DE EMITIR' },
+      });
+
+      try {
+        const after = await printDoc(adminCookie, doc.id);
+        expect(after.status).toBe(200);
+        expect(after.text).toBe(htmlBefore);
+        expect(after.text).not.toContain('MUTADO DESPUES DE EMITIR');
+      } finally {
+        // Restaurar exactamente el estado esperado por el resto de la
+        // suite (nunca dejar la mutación filtrarse a otras pruebas).
+        await prisma.companySettings.update({
+          where: { id: companySettingsId },
+          data: { businessName: 'Empresa Demo Fiscal API E2E SAC' },
+        });
+        await prisma.customer.update({
+          where: { id: rucCustomerId },
+          data: { name: 'Distribuidora API E2E SAC' },
+        });
+        await prisma.product.update({
+          where: { id: productId },
+          data: { name: 'Producto E2E Facturacion API' },
+        });
+      }
+    });
+
+    it('§40 XSS: escapa contenido HTML-sensible en el nombre/dirección del cliente', async () => {
+      const sale = await createFixtureSale({
+        customerId: xssCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const doc = issued.body as { id: string };
+      createdDocumentIds.push(doc.id);
+
+      const printed = await printDoc(adminCookie, doc.id);
+      expect(printed.status).toBe(200);
+      expect(printed.text).not.toContain('<script>alert(1)</script>');
+      expect(printed.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(printed.text).not.toContain('<script>alert(2)</script>');
+      expect(printed.text).toContain('&lt;script&gt;alert(2)&lt;/script&gt;');
     });
   });
 

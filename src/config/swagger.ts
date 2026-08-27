@@ -158,9 +158,12 @@ export function setupSwagger(app: INestApplication): boolean {
         'se reintenta automáticamente ni se fuerza un cambio de estado). ' +
         'El proveedor vigente es "MOCK" (integración de demostración): su ' +
         'resultado ACCEPTED es SIMULADO — en ningún caso implica una ' +
-        'aceptación real ante SUNAT ni ningún otro ente fiscal. Sin ' +
-        'impresión/PDF/QR, sin notas de crédito/débito, sin proveedor real ' +
-        'en este bloque.',
+        'aceptación real ante SUNAT ni ningún otro ente fiscal. ' +
+        'GET /electronic-documents/:id/print (Fase 11, Bloque E) genera en ' +
+        'memoria una representación HTML de demostración a partir del ' +
+        'snapshot ya persistido — sin PDF, sin QR, sin XML/UBL, sin CDR, ' +
+        'sin firma digital, sin archivo almacenado. Sin notas de crédito/ ' +
+        'débito, sin proveedor real en este bloque.',
     )
     .addTag(
       'Fiscal Series',
