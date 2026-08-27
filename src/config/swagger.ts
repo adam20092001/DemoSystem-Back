@@ -145,6 +145,37 @@ export function setupSwagger(app: INestApplication): boolean {
         'igual o avanzar; nunca puede disminuir respecto del valor actual.',
     )
     .addTag(
+      'Electronic Invoicing',
+      'Emisión de documentos fiscales (FACTURA/BOLETA) para una venta ya ' +
+        'confirmada — un agregado FISCAL separado de Sale, que sigue ' +
+        'siendo la única fuente de verdad comercial. La serie fiscal es ' +
+        'SIEMPRE explícita (nunca autoseleccionada); solo se admite UN ' +
+        'documento fiscal primario por venta (409 ante un segundo intento, ' +
+        'sin importar el estado del existente). El reintento ' +
+        '(POST /electronic-documents/:id/retry, solo ADMIN) únicamente se ' +
+        'admite con el documento en SUBMISSION_FAILED: SUBMITTED puede ' +
+        'representar un resultado REMOTO DESCONOCIDO del proveedor (nunca ' +
+        'se reintenta automáticamente ni se fuerza un cambio de estado). ' +
+        'El proveedor vigente es "MOCK" (integración de demostración): su ' +
+        'resultado ACCEPTED es SIMULADO — en ningún caso implica una ' +
+        'aceptación real ante SUNAT ni ningún otro ente fiscal. ' +
+        'GET /electronic-documents/:id/print (Fase 11, Bloque E) genera en ' +
+        'memoria una representación HTML de demostración a partir del ' +
+        'snapshot ya persistido — sin PDF, sin QR, sin XML/UBL, sin CDR, ' +
+        'sin firma digital, sin archivo almacenado. Sin notas de crédito/ ' +
+        'débito, sin proveedor real en este bloque.',
+    )
+    .addTag(
+      'Fiscal Series',
+      'Descubrimiento de solo lectura de las series fiscales disponibles ' +
+        '(F001/B001 sembradas para esta demo), necesario porque la emisión ' +
+        'exige una serie explícita. currentNumber es puramente informativo ' +
+        '(último número YA emitido): nunca se expone un "próximo número", ' +
+        'que la emisión concurrente podría dejar obsoleto de inmediato. ' +
+        'Sin administración (crear/editar/desactivar series) en este ' +
+        'bloque.',
+    )
+    .addTag(
       'Audit',
       'Bitácora de auditoría de solo lectura (Fase 10, Bloque E): quién, ' +
         'qué, cuándo, sobre qué entidad, para las acciones críticas del ' +

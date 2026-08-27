@@ -223,6 +223,12 @@ export class QuotesService {
           discountAmount,
           taxAmount,
           total,
+          // Fase 11, Bloque B: contexto de moneda/impuesto congelado con el
+          // MISMO snapshot de settings ya leído arriba para taxAmount —
+          // nunca una segunda lectura de SettingsReader.
+          currencyCode: settings.currencyCode,
+          taxEnabled: settings.taxEnabled,
+          taxRate: settings.taxRate,
           notes,
           items: {
             create: lines.map((line, index) => ({
@@ -407,11 +413,22 @@ export class QuotesService {
         );
         data.taxAmount = taxAmount;
         updatedFields.push('taxAmount');
+        // Fase 11, Bloque B: el contexto de moneda/impuesto se actualiza EN
+        // EL MISMO momento que taxAmount, con el mismo snapshot de
+        // settings ya leído arriba — nunca por separado, nunca una
+        // segunda lectura. Sería inconsistente recalcular taxAmount con la
+        // configuración vigente pero dejar taxEnabled/taxRate desactualizados.
+        data.currencyCode = settings.currencyCode;
+        data.taxEnabled = settings.taxEnabled;
+        data.taxRate = settings.taxRate;
+        updatedFields.push('currencyCode', 'taxEnabled', 'taxRate');
       } else {
         // No comercial: el impuesto histórico se preserva EXACTO, sin
         // releer configuración ni recalcular — aunque taxEnabled/taxRate
         // hayan cambiado desde que la cotización se creó (§19 del plan
-        // aprobado, previene deriva histórica retroactiva).
+        // aprobado, previene deriva histórica retroactiva). Por el mismo
+        // motivo, currencyCode/taxEnabled/taxRate tampoco se tocan aquí
+        // (Prisma conserva el valor ya persistido al no incluirlos en `data`).
         taxAmount = existing.taxAmount;
       }
 

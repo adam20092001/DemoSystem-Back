@@ -75,6 +75,10 @@ export interface SafeSaleListItem {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  /** Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial. */
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
   paidAmount: string;
   balanceDue: string;
   itemCount: number;
@@ -106,6 +110,10 @@ export interface SafeSale {
   discountAmount: string;
   taxAmount: string;
   total: string;
+  /** Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial. */
+  currencyCode: string;
+  taxEnabled: boolean;
+  taxRate: string;
   paidAmount: string;
   balanceDue: string;
 

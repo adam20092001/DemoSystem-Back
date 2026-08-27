@@ -74,6 +74,9 @@ const SAFE_SALE_DETAIL_KEYS = [
   'discountAmount',
   'taxAmount',
   'total',
+  'currencyCode',
+  'taxEnabled',
+  'taxRate',
   'paidAmount',
   'balanceDue',
   'items',
@@ -105,6 +108,9 @@ const SAFE_SALE_LIST_ITEM_KEYS = [
   'discountAmount',
   'taxAmount',
   'total',
+  'currencyCode',
+  'taxEnabled',
+  'taxRate',
   'paidAmount',
   'balanceDue',
   'itemCount',
@@ -1070,6 +1076,9 @@ describe('Sales (e2e)', () => {
         discountAmount,
         taxAmount: new Prisma.Decimal(0),
         total,
+        currencyCode: 'PEN',
+        taxEnabled: false,
+        taxRate: new Prisma.Decimal('18.00'),
         items: {
           create: itemsWithTotals.map((item) => ({
             productId: item.productId,
@@ -1148,6 +1157,9 @@ describe('Sales (e2e)', () => {
         discountAmount: new Prisma.Decimal('0.00'),
         taxAmount: new Prisma.Decimal('0.00'),
         total: new Prisma.Decimal('0.00'),
+        currencyCode: 'PEN',
+        taxEnabled: false,
+        taxRate: new Prisma.Decimal('18.00'),
         paidAmount: new Prisma.Decimal('0.00'),
         balanceDue: new Prisma.Decimal('0.00'),
         confirmedAt: new Date(),
@@ -1217,16 +1229,17 @@ describe('Sales (e2e)', () => {
         (id, number, status, payment_status, delivery_status, customer_id,
          customer_is_generic, customer_type, customer_document_type,
          customer_document_number, customer_name, customer_address, seller_id,
-         quote_id, subtotal, discount_amount, tax_amount, total, paid_amount,
-         balance_due, confirmed_at, cancelled_at, cancellation_reason,
-         cancelled_by_user_id, created_at, updated_at)
+         quote_id, subtotal, discount_amount, tax_amount, total, currency_code,
+         tax_enabled, tax_rate, paid_amount, balance_due, confirmed_at,
+         cancelled_at, cancellation_reason, cancelled_by_user_id, created_at,
+         updated_at)
       VALUES
         (gen_random_uuid(), ${o.number}, ${o.status}::"SaleStatus", ${o.paymentStatus}::"SalePaymentStatus",
          ${o.deliveryStatus}::"SaleDeliveryStatus", ${o.customerId}::uuid,
          ${o.customerIsGeneric}, ${o.customerType}::"CustomerType", ${o.customerDocumentType}::"CustomerDocumentType",
          ${o.customerDocumentNumber}, ${o.customerName}, ${o.customerAddress}, ${o.sellerId}::uuid,
          ${o.quoteId}::uuid, ${o.subtotal}::numeric, ${o.discountAmount}::numeric, ${o.taxAmount}::numeric,
-         ${o.total}::numeric, ${o.paidAmount}::numeric, ${o.balanceDue}::numeric,
+         ${o.total}::numeric, 'PEN', false, 18.00, ${o.paidAmount}::numeric, ${o.balanceDue}::numeric,
          now(), ${o.cancelledAt}::timestamp, ${o.cancellationReason}, ${o.cancelledByUserId}::uuid,
          now(), now())
     `;
@@ -4352,10 +4365,16 @@ describe('Sales (e2e)', () => {
       // operaciones, sin cambios. Fase 9, Bloque B: filtra por prefijo real
       // del recurso (no por substring "sales") porque los nuevos reportes
       // GET /reports/sales-by-product|customer|seller también contienen
-      // "sales" en el path y no deben contarse aquí.
+      // "sales" en el path y no deben contarse aquí. Fase 11, Bloque D:
+      // excluye igual criterio la ruta anidada
+      // /sales/{saleId}/electronic-documents (registrada por
+      // SaleElectronicDocumentsController, un controller distinto de
+      // SalesController) — mismo motivo exacto que "payments".
       const salePaths = Object.keys(doc.paths).filter(
         (path) =>
-          path.startsWith('/api/v1/sales') && !path.includes('payments'),
+          path.startsWith('/api/v1/sales') &&
+          !path.includes('payments') &&
+          !path.includes('electronic-documents'),
       );
       expect(new Set(salePaths).size).toBe(7);
       let totalOps = 0;

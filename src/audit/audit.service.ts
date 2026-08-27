@@ -272,6 +272,42 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   // solo los dos RoleName involucrados, nunca roleId, JWT, cookie ni el
   // cuerpo de la petición.
   [AuditAction.ACTIVE_ROLE_SWITCHED]: ['fromRole', 'toRole'],
+  // Fase 11, Bloque C. ElectronicDocumentsService es el único emisor de las
+  // 4. Nunca credenciales/secretos de proveedor, nunca el request/response
+  // crudo, nunca stack trace, nunca providerMessage completo (puede
+  // contener texto libre del proveedor): solo identidad estructural del
+  // documento y, en las 3 de resultado, el providerStatus ya saneado.
+  [AuditAction.ELECTRONIC_DOCUMENT_CREATED]: [
+    'documentType',
+    'series',
+    'number',
+    'saleNumber',
+    'providerCode',
+  ],
+  [AuditAction.ELECTRONIC_DOCUMENT_ACCEPTED]: [
+    'documentType',
+    'series',
+    'number',
+    'saleNumber',
+    'providerCode',
+    'providerStatus',
+  ],
+  [AuditAction.ELECTRONIC_DOCUMENT_REJECTED]: [
+    'documentType',
+    'series',
+    'number',
+    'saleNumber',
+    'providerCode',
+    'providerStatus',
+  ],
+  [AuditAction.ELECTRONIC_DOCUMENT_SUBMISSION_FAILED]: [
+    'documentType',
+    'series',
+    'number',
+    'saleNumber',
+    'providerCode',
+    'providerStatus',
+  ],
 };
 
 function isPlainObject(

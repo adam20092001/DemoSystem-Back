@@ -1,4 +1,9 @@
-import { CookieSameSite, NodeEnv, validateEnv } from './env.validation';
+import {
+  CookieSameSite,
+  ElectronicInvoicingProviderCode,
+  NodeEnv,
+  validateEnv,
+} from './env.validation';
 
 // Secreto de prueba: 64 caracteres hex, no es un secreto real de ningún entorno.
 const VALID_JWT_SECRET =
@@ -286,6 +291,39 @@ describe('validateEnv', () => {
       });
 
       expect(config.PRODUCT_IMAGE_MAX_SIZE_BYTES).toBe(1024);
+    });
+  });
+
+  describe('ELECTRONIC_INVOICING_PROVIDER', () => {
+    it('usa "mock" como valor por defecto', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        ELECTRONIC_INVOICING_PROVIDER: undefined,
+      });
+
+      expect(config.ELECTRONIC_INVOICING_PROVIDER).toBe(
+        ElectronicInvoicingProviderCode.Mock,
+      );
+    });
+
+    it('acepta "mock" explícito', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        ELECTRONIC_INVOICING_PROVIDER: 'mock',
+      });
+
+      expect(config.ELECTRONIC_INVOICING_PROVIDER).toBe(
+        ElectronicInvoicingProviderCode.Mock,
+      );
+    });
+
+    it('rechaza un proveedor no soportado', () => {
+      expect(() =>
+        validateEnv({
+          ...baseEnv,
+          ELECTRONIC_INVOICING_PROVIDER: 'sunat-directo',
+        }),
+      ).toThrow(/ELECTRONIC_INVOICING_PROVIDER/);
     });
   });
 });

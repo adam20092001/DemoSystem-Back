@@ -8,6 +8,7 @@ import { validateEnv } from './config/env.validation';
 import { ConfigurationModule } from './configuration/configuration.module';
 import { CustomersModule } from './customers/customers.module';
 import { DatabaseModule } from './database/database.module';
+import { ElectronicInvoicingModule } from './electronic-invoicing/electronic-invoicing.module';
 import { HealthModule } from './health/health.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -41,6 +42,7 @@ import { UsersModule } from './users/users.module';
     AccountingModule,
     ReportsModule,
     ConfigurationModule,
+    ElectronicInvoicingModule,
     HealthModule,
   ],
 })

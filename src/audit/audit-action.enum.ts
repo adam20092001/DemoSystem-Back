@@ -60,6 +60,16 @@
  * cambia: una solicitud de cambio al mismo rol ya activo es un no-op
  * explícito y no genera esta acción.
  */
+// ELECTRONIC_DOCUMENT_ se agregan en la Fase 11, Bloque C:
+// ElectronicDocumentsService es su único emisor. CREATED se registra dentro
+// de la MISMA transacción de creación del documento fiscal (número ya
+// asignado). ACCEPTED/REJECTED/SUBMISSION_FAILED se registran dentro de la
+// transacción corta que persiste cada resultado del proveedor. No existe
+// una acción SUBMITTED separada (decisión cerrada, Bloque 11C §32): a
+// diferencia de PAYMENT_/SALE_, el tránsito interno CREATED/SUBMISSION_FAILED
+// -> SUBMITTED es un detalle de orquestación, no un evento fiscal
+// externamente significativo — solo importan la creación del documento y su
+// resolución final (o el fallo técnico que la impide).
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
   LOGIN_FAILED = 'LOGIN_FAILED',
@@ -113,4 +123,8 @@ export enum AuditAction {
   CONFIGURATION_UPDATED = 'CONFIGURATION_UPDATED',
   SEQUENCE_UPDATED = 'SEQUENCE_UPDATED',
   ACTIVE_ROLE_SWITCHED = 'ACTIVE_ROLE_SWITCHED',
+  ELECTRONIC_DOCUMENT_CREATED = 'ELECTRONIC_DOCUMENT_CREATED',
+  ELECTRONIC_DOCUMENT_ACCEPTED = 'ELECTRONIC_DOCUMENT_ACCEPTED',
+  ELECTRONIC_DOCUMENT_REJECTED = 'ELECTRONIC_DOCUMENT_REJECTED',
+  ELECTRONIC_DOCUMENT_SUBMISSION_FAILED = 'ELECTRONIC_DOCUMENT_SUBMISSION_FAILED',
 }

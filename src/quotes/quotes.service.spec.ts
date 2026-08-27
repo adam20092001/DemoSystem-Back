@@ -85,6 +85,10 @@ function makeQuoteDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
     discountAmount: new Prisma.Decimal('0'),
     taxAmount: new Prisma.Decimal('0'),
     total: new Prisma.Decimal('10.00'),
+    // Fase 11, Bloque B: contexto de moneda/impuesto congelado con el snapshot comercial.
+    currencyCode: 'PEN',
+    taxEnabled: false,
+    taxRate: new Prisma.Decimal('18.00'),
     notes: null,
     items: [
       {
@@ -306,6 +310,26 @@ describe('QuotesService', () => {
       };
       expect(createArgs.data.customerDocumentType).toBe('DNI');
       expect(createArgs.data.customerDocumentNumber).toBe('12345678');
+    });
+
+    it('Fase 11, Bloque B: snapshotea currencyCode/taxEnabled/taxRate con el MISMO settings ya leído para taxAmount', async () => {
+      settingsReader.getCurrent.mockResolvedValue(
+        makeSettingsSnapshot({
+          currencyCode: 'USD',
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('20.00'),
+        }),
+      );
+      await service.create(validCreateInput);
+      const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(createArgs.data.currencyCode).toBe('USD');
+      expect(createArgs.data.taxEnabled).toBe(true);
+      expect(createArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
+      // Una sola lectura de SettingsReader para toda la operación (taxAmount
+      // + contexto de moneda/impuesto), nunca una segunda.
+      expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
     });
 
     it('sellerId = actorUserId (actor SELLER)', async () => {
@@ -1040,7 +1064,7 @@ describe('QuotesService', () => {
       expect(call.client).toBe(prisma.tx);
     });
 
-    it('updatedFields contiene solo nombres de campo (incluye taxAmount cuando el cambio es comercial)', async () => {
+    it('updatedFields contiene solo nombres de campo (incluye taxAmount y el contexto de moneda/impuesto cuando el cambio es comercial)', async () => {
       await service.update({
         ...baseUpdateInput,
         notes: 'x',
@@ -1050,10 +1074,54 @@ describe('QuotesService', () => {
         metadata: { updatedFields: string[] };
       };
       // discountAmount difiere del existente (0) -> cambio comercial ->
-      // taxAmount se recalcula y se agrega a updatedFields (Fase 10, Bloque C).
+      // taxAmount se recalcula y se agrega a updatedFields (Fase 10, Bloque
+      // C), junto con currencyCode/taxEnabled/taxRate (Fase 11, Bloque B:
+      // el contexto de moneda/impuesto se actualiza en el MISMO momento).
       expect(call.metadata.updatedFields.sort()).toEqual(
-        ['discountAmount', 'notes', 'taxAmount'].sort(),
+        [
+          'discountAmount',
+          'notes',
+          'taxAmount',
+          'currencyCode',
+          'taxEnabled',
+          'taxRate',
+        ].sort(),
       );
+    });
+
+    it('Fase 11, Bloque B: un cambio comercial escribe currencyCode/taxEnabled/taxRate con la configuración VIGENTE (nunca la histórica)', async () => {
+      // La cotización existente quedó snapshoteada con PEN/false/18.00
+      // (makeLockedQuoteRow no los declara explícitamente, así que no
+      // importan aquí: lo que se prueba es que el cambio comercial usa
+      // SIEMPRE el settings recién leído, nunca el histórico).
+      settingsReader.getCurrent.mockResolvedValue(
+        makeSettingsSnapshot({
+          currencyCode: 'USD',
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('20.00'),
+        }),
+      );
+      await service.update({
+        ...baseUpdateInput,
+        discountAmount: '1.00',
+      });
+      const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(updateArgs.data.currencyCode).toBe('USD');
+      expect(updateArgs.data.taxEnabled).toBe(true);
+      expect(updateArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
+    });
+
+    it('Fase 11, Bloque B: una edición NO comercial (solo notes) nunca toca currencyCode/taxEnabled/taxRate', async () => {
+      await service.update({ ...baseUpdateInput, notes: 'solo texto' });
+      const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(updateArgs.data).not.toHaveProperty('currencyCode');
+      expect(updateArgs.data).not.toHaveProperty('taxEnabled');
+      expect(updateArgs.data).not.toHaveProperty('taxRate');
+      expect(settingsReader.getCurrent).not.toHaveBeenCalled();
     });
 
     it('items reemplazados agrega "items" a updatedFields (nunca subtotal/total)', async () => {
