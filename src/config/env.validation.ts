@@ -24,6 +24,16 @@ export enum CookieSameSite {
   None = 'none',
 }
 
+/**
+ * Proveedores de facturación electrónica soportados (Fase 11, Bloque C).
+ * Único valor por ahora: "mock" (MockElectronicInvoicingProvider). Un
+ * proveedor real (PSE/SUNAT directo) se agregará como un nuevo miembro de
+ * este enum cuando exista, nunca como configuración específica de vendor.
+ */
+export enum ElectronicInvoicingProviderCode {
+  Mock = 'mock',
+}
+
 const JWT_SECRET_MIN_LENGTH = 32;
 
 /**
@@ -100,6 +110,11 @@ export class EnvironmentVariables {
     message: 'PRODUCT_IMAGE_MAX_SIZE_BYTES debe ser al menos 1024 bytes',
   })
   PRODUCT_IMAGE_MAX_SIZE_BYTES!: number;
+
+  @IsEnum(ElectronicInvoicingProviderCode, {
+    message: 'ELECTRONIC_INVOICING_PROVIDER debe ser: mock',
+  })
+  ELECTRONIC_INVOICING_PROVIDER!: ElectronicInvoicingProviderCode;
 }
 
 /**
@@ -156,6 +171,8 @@ export function validateEnv(
       raw.PRODUCT_IMAGE_MAX_SIZE_BYTES,
       5242880,
     ),
+    ELECTRONIC_INVOICING_PROVIDER:
+      raw.ELECTRONIC_INVOICING_PROVIDER ?? ElectronicInvoicingProviderCode.Mock,
   };
 
   const config = plainToInstance(EnvironmentVariables, normalized);
