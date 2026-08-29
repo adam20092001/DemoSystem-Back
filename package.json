@@ -28,6 +28,7 @@
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f db",
     "db:seed": "prisma db seed",
+    "db:seed:demo": "node scripts/run-with-env.js .env ts-node --project prisma/tsconfig.seed.json prisma/demo-seed.ts",
     "db:test:up": "docker compose up -d db_test",
     "db:test:down": "docker compose stop db_test",
     "db:test:down:clean": "node scripts/db-test-clean-volume.js",

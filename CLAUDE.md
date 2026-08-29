@@ -83,6 +83,7 @@ Reglas de capas:
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar.
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
+16. **Facturación electrónica (demostración)** — emisión de FACTURA/BOLETA sobre ventas confirmadas mediante una abstracción de proveedor (`ElectronicInvoicingProvider`), con `MockElectronicInvoicingProvider` como única implementación existente. Un documento `ACCEPTED` por el proveedor MOCK no tiene validez fiscal ante SUNAT (ver §7). Series fiscales (`FiscalSeries`) separadas de los correlativos comerciales (`DocumentSequence`).
 
 ---
 
@@ -134,7 +135,7 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 No implementar, ni preparar abstracciones anticipadas para:
 
 - Alquileres
-- Facturación electrónica SUNAT
+- Facturación electrónica SUNAT **real** (PSE, XML/UBL, CDR, firma digital, certificado, QR, notas de crédito/débito, conciliación con proveedor externo). La demostración con proveedor MOCK sí existe (ver §4, módulo 16) y no debe confundirse con esto.
 - Compras y proveedores completos
 - Kardex valorizado
 - Multi-almacén
@@ -212,25 +213,18 @@ docs/Documento_Maestro_POS_Gestion_Comercial_MVP.docx
 
 ## 11. Estado actual del repositorio
 
-A la fecha de creación de este archivo, el proyecto es un **scaffold base de NestJS 11** recién inicializado:
+Los 16 módulos de la sección 4 están implementados, incluida la autenticación
+multi-rol (KAN-18: un usuario puede tener varios roles asignados; la sesión
+elige uno activo) y la facturación electrónica de demostración (Fase 11,
+proveedor MOCK). Prisma, Swagger, Docker Compose, `.env.example` y el
+esquema completo existen y están en uso.
 
-- Existe: `src/app.module.ts`, `src/app.controller.ts`, `src/app.service.ts`, `src/main.ts`, `test/`.
-- **Aún no existen**: Prisma (`prisma/schema.prisma`), Swagger, autenticación JWT, Docker/Docker Compose, `.env.example`, ni ninguno de los 15 módulos del MVP.
-
-Orden de construcción sugerido (confirmar antes de ejecutar):
-
-1. Configuración base: variables de entorno, `ValidationPipe`, filtro de excepciones, Swagger, Docker Compose con PostgreSQL.
-2. Prisma + esquema inicial + migración.
-3. Autenticación y usuarios/roles (guards y decoradores de rol).
-4. Catálogo: categorías, unidades, productos.
-5. Inventario (movimientos y saldo).
-6. Clientes (incluido Público general).
-7. Cotizaciones.
-8. Ventas/POS + correlativos + auditoría.
-9. Pagos.
-10. Contabilidad básica.
-11. Reportes y dashboard.
-12. Configuración del sistema.
+El repositorio está en **Fase 12 (estabilización de demo)**: auditoría de
+todo lo anterior, mejoras de tooling de bajo riesgo (`lint:check`, reset
+seguro de la base de pruebas) y datos/documentación de demostración
+opcionales — sin nuevas reglas de negocio ni módulos nuevos. Ver
+[README.md](README.md) para la puesta en marcha y el flujo de demostración
+recomendado.
 
 ---
 
@@ -240,17 +234,32 @@ Orden de construcción sugerido (confirmar antes de ejecutar):
 npm run start:dev     # desarrollo con watch
 npm run build         # compilar
 npm run start:prod    # ejecutar build
-npm run lint          # ESLint con --fix
+npm run lint          # ESLint con --fix (modifica archivos)
+npm run lint:check    # ESLint de solo lectura (Fase 12B)
 npm run format        # Prettier
 npm test              # pruebas unitarias
 npm run test:cov      # cobertura
 npm run test:e2e      # pruebas e2e
 ```
 
-Comandos previstos al integrar Prisma:
+Prisma:
 
 ```bash
-npx prisma migrate dev --name <nombre>
-npx prisma generate
-npx prisma studio
+npx prisma migrate dev --name <nombre>   # nueva migración (desarrollo)
+npm run prisma:deploy                    # aplicar migraciones existentes
+npm run prisma:generate
+npm run prisma:studio
+npm run db:seed                          # seed de infraestructura
+npm run db:seed:demo                     # seed OPCIONAL de demostración (nunca en producción)
 ```
+
+Base de datos de pruebas (`pos_db_test`, Fase 12B):
+
+```bash
+npm run db:test:up
+npm run db:test:down:clean   # elimina contenedor + volumen de pos_db_test (solo pruebas)
+npm run db:test:reset        # down:clean + up + migrate deploy + seed
+```
+
+Ver [README.md](README.md) para la puesta en marcha completa y el detalle de
+cada variable de entorno.
