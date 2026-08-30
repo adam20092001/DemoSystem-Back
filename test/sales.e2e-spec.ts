@@ -944,12 +944,19 @@ describe('Sales (e2e)', () => {
           where: { id: { in: createdCustomerIds } },
         });
       }
-      await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
+      // asignar) haría que Prisma omita la condición y deleteMany({})
+      // borrara toda la tabla — mismo criterio que createdCustomerIds arriba.
+      if (genericCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      }
 
       // El usuario fkUser solo se elimina si ninguna Sale lo referencia ya
       // (las propias de este spec se limpiaron arriba); nunca se tocan los
       // usuarios admin/seller/management/warehouse compartidos.
-      await prisma.user.deleteMany({ where: { id: fkUserId } });
+      if (fkUserId) {
+        await prisma.user.deleteMany({ where: { id: fkUserId } });
+      }
     } finally {
       await app.close();
       await prisma.$disconnect();

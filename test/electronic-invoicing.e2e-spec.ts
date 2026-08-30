@@ -363,13 +363,25 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
         await prisma.sale.deleteMany({ where: { id: { in: createdSaleIds } } });
       }
 
-      await prisma.auditLog.deleteMany({
-        where: { entityType: 'Customer', entityId: rucCustomerId },
-      });
-      await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
-      await prisma.product.deleteMany({ where: { id: productId } });
-      await prisma.unit.deleteMany({ where: { id: unitId } });
-      await prisma.category.deleteMany({ where: { id: categoryId } });
+      // Guarda explícita: un `id`/`entityId: undefined` (si beforeAll lanzó
+      // antes de asignar) haría que Prisma omita la condición —
+      // deleteMany({}) borraría toda la tabla, o el auditLog perdería su
+      // filtro por entityId y borraría TODOS los audits de Customer.
+      if (rucCustomerId) {
+        await prisma.auditLog.deleteMany({
+          where: { entityType: 'Customer', entityId: rucCustomerId },
+        });
+        await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
+      }
+      if (productId) {
+        await prisma.product.deleteMany({ where: { id: productId } });
+      }
+      if (unitId) {
+        await prisma.unit.deleteMany({ where: { id: unitId } });
+      }
+      if (categoryId) {
+        await prisma.category.deleteMany({ where: { id: categoryId } });
+      }
 
       await prisma.companySettings.update({
         where: { id: companySettingsId },

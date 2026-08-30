@@ -339,8 +339,15 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         });
       }
 
-      await prisma.unit.deleteMany({ where: { id: unitId } });
-      await prisma.category.deleteMany({ where: { id: categoryId } });
+      // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
+      // asignar) haría que Prisma omita la condición y deleteMany({})
+      // borrara toda la tabla — mismo criterio que createdProductIds arriba.
+      if (unitId) {
+        await prisma.unit.deleteMany({ where: { id: unitId } });
+      }
+      if (categoryId) {
+        await prisma.category.deleteMany({ where: { id: categoryId } });
+      }
 
       if (createdCustomerIds.length > 0) {
         await prisma.auditLog.deleteMany({

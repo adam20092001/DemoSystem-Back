@@ -220,8 +220,18 @@ describe('Accounts Receivable (e2e)', () => {
           where: { id: { in: ownedCustomerIds } },
         });
       }
-      await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
-      await prisma.user.deleteMany({ where: { id: otherSellerId } });
+      // Guarda explícita (nunca `deleteMany({ where: { id: variable } })`
+      // desnudo): si `beforeAll` lanzó ANTES de asignar estas variables, un
+      // `id: undefined` haría que Prisma omita la condición por completo —
+      // deleteMany({}) borraría TODA la tabla, incluido el admin
+      // sembrado compartido. Mismo criterio que los bloques
+      // ownedSaleIds/ownedCustomerIds de arriba.
+      if (genericCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      }
+      if (otherSellerId) {
+        await prisma.user.deleteMany({ where: { id: otherSellerId } });
+      }
     } finally {
       await app.close();
       await prisma.$disconnect();

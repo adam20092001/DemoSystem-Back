@@ -340,6 +340,25 @@ describe('Quotes (e2e)', () => {
       },
     });
 
+    // Fase 12E: varias pruebas de este archivo (CHECK constraints §14-16,
+    // unicidad §58) usan deliberadamente documentType='SALE' como fila
+    // "ausente conocida" — para que un INSERT crudo falle por el CHECK o la
+    // UNIQUE que se está probando, nunca por chocar con una fila SALE ya
+    // existente. Este archivo nunca posee ni gestiona el ciclo de vida de
+    // la secuencia SALE (esa responsabilidad es de sales.e2e-spec.ts/
+    // accounting.e2e-spec.ts, que la crean y la eliminan en su propio
+    // afterAll), pero SÍ depende de que esté ausente al empezar. Contra una
+    // pos_db_test recién sembrada (Fase 12B en adelante), el seed de
+    // infraestructura crea la fila SALE igual que la QUOTE — así que este
+    // archivo debe establecer esa precondición él mismo, una sola vez al
+    // inicio, en vez de asumirla de qué haya dejado (o no) otra suite antes
+    // de esta ejecución. No se restaura en el afterAll: la fila SALE la
+    // recrea, defensivamente y en 0, quien la necesite después (mismo
+    // criterio documentado en sales.e2e-spec.ts/accounting.e2e-spec.ts).
+    await prisma.documentSequence.deleteMany({
+      where: { documentType: DocumentType.SALE },
+    });
+
     // ---------------------------------------------------------------
     // §6 Catálogo fixture (identidad fija vía upsert; código no sufijado por
     // RUN_ID porque se limpia por completo en el afterAll de este archivo).
@@ -625,7 +644,12 @@ describe('Quotes (e2e)', () => {
           where: { id: { in: createdCustomerIds } },
         });
       }
-      await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
+      // asignar) haría que Prisma omita la condición y deleteMany({})
+      // borrara toda la tabla — mismo criterio que createdCustomerIds arriba.
+      if (genericCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      }
     } finally {
       await app.close();
       await prisma.$disconnect();

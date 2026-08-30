@@ -261,6 +261,10 @@ npm run db:test:down:clean  # Elimina contenedor + volumen de pos_db_test
 npm run db:test:reset       # down:clean + up + migrate deploy + seed, listo para probar
 ```
 
+`db:test:reset` (y `prisma:test:deploy`/`prisma:test:seed` por separado) necesitan
+el archivo `.env.test` ya creado (copia `.env.test.example`) — no solo
+`test:e2e`. Sin él, fallan con un error claro en vez de tocar otra base.
+
 > ⚠️ **`db:test:down:clean` y `db:test:reset` son destructivos ÚNICAMENTE
 > para `pos_db_test`.** Resuelven el volumen a borrar por las etiquetas que
 > el propio Docker Compose le asigna (nunca por un nombre de volumen escrito
