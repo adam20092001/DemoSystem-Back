@@ -1,6 +1,10 @@
 import { PrismaClient, RoleName, User, UserStatus } from '@prisma/client';
 import { hashPassword } from '../../src/common/security/password.service';
-import { E2E_ADMIN_ACTIVE_PASSWORD, E2E_ADMIN_USERNAME } from './constants';
+import {
+  E2E_ADMIN_ACTIVE_PASSWORD,
+  E2E_ADMIN_EMAIL,
+  E2E_ADMIN_USERNAME,
+} from './constants';
 
 export interface FixtureUserInput {
   username: string;
@@ -65,9 +69,29 @@ export async function upsertFixtureUser(
 }
 
 /**
- * Garantiza que el admin de prueba esté en estado "activo" (ya completó el
- * cambio obligatorio de contraseña), sin importar qué haya dejado otra
- * ejecución o archivo previo. Idempotente.
+ * Garantiza que el admin de prueba compartido (E2E_ADMIN_USERNAME) exista y
+ * esté en estado "activo" (ya completó el cambio obligatorio de
+ * contraseña), sin importar qué haya dejado otra ejecución o archivo
+ * previo. Idempotente y, a partir de la Fase 12E, también AUTO-REPARABLE:
+ *
+ *  - Si la fila ya existe (caso normal): la actualiza (status ACTIVE,
+ *    mustChangePassword=false, contraseña "activa", contador de intentos y
+ *    bloqueo limpios) — comportamiento idéntico al de antes de esta ronda.
+ *  - Si la fila NO existe (fue borrada por algún efecto colateral de otro
+ *    archivo — ver Fase 12D/12E): la RECREA con la misma identidad
+ *    determinística que usaría `prisma/seed.ts` para el admin inicial, en
+ *    vez de lanzar `PrismaClientKnownRequestError` (P2025) como hacía la
+ *    versión anterior basada en `update()`. Esto es lo que permite que esta
+ *    función se invoque de forma segura al inicio de CUALQUIER archivo e2e
+ *    (ver jest-e2e.bootstrap.ts), sin depender de que otro archivo haya
+ *    corrido antes para "sembrar" el estado esperado.
+ *
+ * Nunca relaja la política de contraseñas real (usa hashPassword() con la
+ * MISMA función que produción) ni el contrato mustChangePassword=true en el
+ * seed real: esta función solo existe para que las suites e2e puedan partir
+ * de un estado "ya pasó el primer cambio de contraseña" determinístico,
+ * igual que si un operador real hubiera iniciado sesión y cambiado su
+ * contraseña una vez.
  */
 export async function ensureActiveTestAdmin(
   prisma: PrismaClient,
@@ -77,9 +101,20 @@ export async function ensureActiveTestAdmin(
   });
   const passwordHash = await hashPassword(E2E_ADMIN_ACTIVE_PASSWORD);
 
-  const user = await prisma.user.update({
+  const user = await prisma.user.upsert({
     where: { username: E2E_ADMIN_USERNAME },
-    data: {
+    update: {
+      passwordHash,
+      status: UserStatus.ACTIVE,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      blockedAt: null,
+    },
+    create: {
+      username: E2E_ADMIN_USERNAME,
+      email: E2E_ADMIN_EMAIL,
+      firstName: 'Administrador',
+      lastName: 'E2E',
       passwordHash,
       status: UserStatus.ACTIVE,
       mustChangePassword: false,

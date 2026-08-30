@@ -5,6 +5,8 @@
  */
 export const E2E_ADMIN_USERNAME =
   process.env.INITIAL_ADMIN_USERNAME ?? 'e2e_admin';
+export const E2E_ADMIN_EMAIL =
+  process.env.INITIAL_ADMIN_EMAIL ?? 'e2e_admin@demosystem.test';
 export const E2E_ADMIN_SEED_PASSWORD =
   process.env.INITIAL_ADMIN_PASSWORD ?? 'E2eAdminTest2026';
 

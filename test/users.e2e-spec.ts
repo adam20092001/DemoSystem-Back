@@ -62,6 +62,15 @@ describe('Users (e2e)', () => {
   });
 
   afterAll(async () => {
+    // Fase 12E: limpia exactamente el usuario propio creado por el test de
+    // POST /users (createdUserId), nunca visto antes de esta ronda — era
+    // exactamente el leak "e2e_created_${Date.now()}" identificado en la
+    // Fase 12A. Guarda explícita (nunca un deleteMany sin condición): si el
+    // test que lo crea no llegó a ejecutarse, createdUserId permanece
+    // undefined y no se toca la tabla.
+    if (createdUserId) {
+      await prisma.user.deleteMany({ where: { id: createdUserId } });
+    }
     await app.close();
     await prisma.$disconnect();
   });

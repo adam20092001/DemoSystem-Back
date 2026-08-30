@@ -382,13 +382,22 @@ describe('Payments (e2e)', () => {
           where: { id: { in: ownedCustomerIds } },
         });
       }
-      await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
+      // asignar) haría que Prisma omita la condición y deleteMany({})
+      // borrara toda la tabla — mismo criterio que ownedCustomerIds arriba.
+      if (genericCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: genericCustomerId } });
+      }
 
       // Los actores efímeros de FK (§71) solo se eliminan tras retirar toda
       // Payment que los referencia (ya ocurrió arriba); nunca se tocan
       // admin/seller/management/warehouse compartidos.
-      await prisma.user.deleteMany({ where: { id: fkCreatorId } });
-      await prisma.user.deleteMany({ where: { id: fkCancellerId } });
+      if (fkCreatorId) {
+        await prisma.user.deleteMany({ where: { id: fkCreatorId } });
+      }
+      if (fkCancellerId) {
+        await prisma.user.deleteMany({ where: { id: fkCancellerId } });
+      }
     } finally {
       await app.close();
       await prisma.$disconnect();

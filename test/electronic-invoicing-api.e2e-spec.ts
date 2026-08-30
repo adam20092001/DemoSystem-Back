@@ -596,11 +596,24 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         await prisma.sale.deleteMany({ where: { id: { in: createdSaleIds } } });
       }
 
-      await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
-      await prisma.customer.deleteMany({ where: { id: xssCustomerId } });
-      await prisma.product.deleteMany({ where: { id: productId } });
-      await prisma.unit.deleteMany({ where: { id: unitId } });
-      await prisma.category.deleteMany({ where: { id: categoryId } });
+      // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
+      // asignar) haría que Prisma omita la condición y deleteMany({})
+      // borrara toda la tabla — mismo criterio que createdSaleIds arriba.
+      if (rucCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
+      }
+      if (xssCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: xssCustomerId } });
+      }
+      if (productId) {
+        await prisma.product.deleteMany({ where: { id: productId } });
+      }
+      if (unitId) {
+        await prisma.unit.deleteMany({ where: { id: unitId } });
+      }
+      if (categoryId) {
+        await prisma.category.deleteMany({ where: { id: categoryId } });
+      }
 
       await prisma.companySettings.update({
         where: { id: companySettingsId },
