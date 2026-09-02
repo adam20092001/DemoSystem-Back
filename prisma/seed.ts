@@ -5,6 +5,7 @@ import {
   CustomerStatus,
   DocumentType,
   FiscalDocumentType,
+  PaymentMethodAccountingDestination,
   Prisma,
   PrismaClient,
   RoleName,
@@ -101,6 +102,114 @@ const SEED_ACCOUNTS: ReadonlyArray<{
     code: 'DISCOUNTS',
     name: 'Descuentos',
     type: AccountType.CONTRA_REVENUE,
+  },
+];
+
+/**
+ * Métodos de pago dinámicos baseline (Ticket C post-MVP, Bloque C1 —
+ * EXPAND). Mismas 9 filas que ya inserta migration.sql de
+ * `20260902213416_expand_payment_methods` (5 activas + 4 legacy inactivas,
+ * mapeo 1:1 no destructivo con el enum PaymentMethod existente) — este
+ * arreglo es la fuente de verdad de esos valores DENTRO de la aplicación
+ * (nunca se leen de la migración), y `code` es la única clave de upsert:
+ * nunca el UUID fijo que usa la migración. A diferencia de SEED_ACCOUNTS
+ * (cuentas de sistema, sin CRUD posible), estos valores SÍ son
+ * configuración editable por ADMIN a partir del Bloque C2 — por eso
+ * seedPaymentMethods() usa `update: {}` (ver función abajo), nunca
+ * `update: { name, active, ... }` como seedAccounts().
+ */
+const SEED_PAYMENT_METHODS: ReadonlyArray<{
+  code: string;
+  name: string;
+  active: boolean;
+  requiresReference: boolean;
+  affectsCashDrawer: boolean;
+  accountingDestination: PaymentMethodAccountingDestination;
+  sortOrder: number;
+}> = [
+  {
+    code: 'CASH',
+    name: 'Efectivo',
+    active: true,
+    requiresReference: false,
+    affectsCashDrawer: true,
+    accountingDestination: PaymentMethodAccountingDestination.CASH,
+    sortOrder: 10,
+  },
+  {
+    code: 'CARD',
+    name: 'Tarjeta',
+    active: true,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 20,
+  },
+  {
+    code: 'TRANSFER',
+    name: 'Transferencia',
+    active: true,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 30,
+  },
+  {
+    code: 'YAPE',
+    name: 'Yape',
+    active: true,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 40,
+  },
+  {
+    code: 'PLIN',
+    name: 'Plin',
+    active: true,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 50,
+  },
+  // Legacy inactivas: mapeo 1:1 no destructivo con los 4 valores del enum
+  // PaymentMethod que no se conservan como método activo hoy mismo (nunca
+  // consolidados entre sí ni renombrados a TRANSFER/YAPE/PLIN).
+  {
+    code: 'BANK_TRANSFER',
+    name: 'Transferencia bancaria (legacy)',
+    active: false,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 900,
+  },
+  {
+    code: 'BANK_DEPOSIT',
+    name: 'Depósito bancario (legacy)',
+    active: false,
+    requiresReference: true,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 901,
+  },
+  {
+    code: 'DIGITAL_WALLET',
+    name: 'Billetera digital (legacy)',
+    active: false,
+    requiresReference: false,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 902,
+  },
+  {
+    code: 'OTHER',
+    name: 'Otro (legacy)',
+    active: false,
+    requiresReference: false,
+    affectsCashDrawer: false,
+    accountingDestination: PaymentMethodAccountingDestination.BANK,
+    sortOrder: 903,
   },
 ];
 
@@ -372,6 +481,49 @@ async function seedAccounts(): Promise<void> {
 }
 
 /**
+ * Métodos de pago dinámicos baseline (Ticket C post-MVP, Bloque C1). A
+ * diferencia de seedAccounts()/seedGenericCustomer() (invariantes de
+ * dominio, `update` restaura los valores canónicos en cada reejecución),
+ * estos SÍ son configuración operativa editable por ADMIN desde el Bloque
+ * C2 (nombre, activo/inactivo, requiresReference, affectsCashDrawer,
+ * accountingDestination, sortOrder) — mismo criterio que
+ * seedCompanySettings(): `update: {}` a propósito, NUNCA los campos
+ * canónicos, para que reejecutar el seed después de que un administrador
+ * haya personalizado un método jamás reactive uno desactivado, le cambie
+ * el nombre, ni le resetee ninguna de sus 4 propiedades de configuración.
+ * `code` es la única clave de upsert — nunca el UUID fijo que usa
+ * migration.sql de `20260902213416_expand_payment_methods` (que ya insertó
+ * estas mismas 9 filas para poder hacer backfill de Payment histórico
+ * antes de que este seed exista o se ejecute); por eso este seed es, en la
+ * práctica, un no-op en cualquier entorno donde esa migración ya corrió —
+ * existe para que una base de datos de desarrollo reseteada por completo
+ * (`prisma migrate reset`) reciba las mismas 9 filas sin depender de
+ * reproducir el historial completo de migraciones a mano, y como fuente de
+ * verdad legible de "cuáles son los valores baseline" sin tener que leer
+ * SQL crudo.
+ */
+async function seedPaymentMethods(): Promise<void> {
+  for (const method of SEED_PAYMENT_METHODS) {
+    await prisma.paymentMethodDefinition.upsert({
+      where: { code: method.code },
+      update: {},
+      create: {
+        code: method.code,
+        name: method.name,
+        active: method.active,
+        requiresReference: method.requiresReference,
+        affectsCashDrawer: method.affectsCashDrawer,
+        accountingDestination: method.accountingDestination,
+        sortOrder: method.sortOrder,
+      },
+    });
+  }
+  console.log(
+    `Métodos de pago verificados: ${SEED_PAYMENT_METHODS.length}`,
+  );
+}
+
+/**
  * Configuración de la empresa (Fase 10, Bloque A): fila singleton única.
  * Mismo criterio de idempotencia que seedDocumentSequences() — `update: {}`
  * a propósito: businessName/tradeName/taxId/address/phone/email/
@@ -415,6 +567,7 @@ async function main(): Promise<void> {
   await seedGenericCustomer();
   await seedDocumentSequences();
   await seedAccounts();
+  await seedPaymentMethods();
   await seedCompanySettings();
   await seedFiscalSeries();
 }
