@@ -70,6 +70,20 @@
 // -> SUBMITTED es un detalle de orquestación, no un evento fiscal
 // externamente significativo — solo importan la creación del documento y su
 // resolución final (o el fallo técnico que la impide).
+// PAYMENT_METHOD_ se agregan en el Ticket C post-MVP, Bloque C2:
+// PaymentMethodsService es su único emisor. CREATED al crear un método
+// dinámico (nace `active: true`). UPDATED cubre cualquier PATCH que NO
+// cambie `active` (name/requiresReference/affectsCashDrawer/
+// accountingDestination/sortOrder, individualmente o combinados) — un PATCH
+// que no modifica ningún valor efectivo no genera auditoría (mismo criterio
+// que CONFIGURATION_UPDATED). ACTIVATED/DEACTIVATED cubren un PATCH cuyo
+// `active` sí transiciona (false->true / true->false): esa es SIEMPRE la
+// única acción emitida para esa petición, incluso si otros campos cambiaron
+// en el mismo PATCH (sus cambios viajan en `changedFields`/`oldValues`/
+// `newValues` de esa misma fila) — nunca una fila ACTIVATED/DEACTIVATED más
+// una fila UPDATED redundante para la misma petición. Sin
+// PAYMENT_METHOD_REORDERED: reordenar es sortOrder cambiando por PATCH,
+// cubierto por UPDATED, igual que cualquier otro campo simple.
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
   LOGIN_FAILED = 'LOGIN_FAILED',
@@ -127,4 +141,8 @@ export enum AuditAction {
   ELECTRONIC_DOCUMENT_ACCEPTED = 'ELECTRONIC_DOCUMENT_ACCEPTED',
   ELECTRONIC_DOCUMENT_REJECTED = 'ELECTRONIC_DOCUMENT_REJECTED',
   ELECTRONIC_DOCUMENT_SUBMISSION_FAILED = 'ELECTRONIC_DOCUMENT_SUBMISSION_FAILED',
+  PAYMENT_METHOD_CREATED = 'PAYMENT_METHOD_CREATED',
+  PAYMENT_METHOD_UPDATED = 'PAYMENT_METHOD_UPDATED',
+  PAYMENT_METHOD_ACTIVATED = 'PAYMENT_METHOD_ACTIVATED',
+  PAYMENT_METHOD_DEACTIVATED = 'PAYMENT_METHOD_DEACTIVATED',
 }
