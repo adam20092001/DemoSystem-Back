@@ -134,6 +134,83 @@ describe('ConfigurationService', () => {
     });
   });
 
+  describe('getPosConfiguration — Ticket A post-MVP, defensa de rol a nivel de servicio', () => {
+    it('ADMIN: devuelve exactamente los 9 campos aprobados, sin datos administrativos', async () => {
+      prisma.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      const result = await service.getPosConfiguration(RoleName.ADMIN);
+
+      expect(result).toEqual({
+        businessName: 'Empresa Comercial Demo S.A.C.',
+        tradeName: 'Comercial Demo',
+        taxId: null,
+        address: null,
+        currencyCode: 'PEN',
+        currencySymbol: 'S/',
+        taxEnabled: false,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      expect(result).not.toHaveProperty('id');
+      expect(result).not.toHaveProperty('phone');
+      expect(result).not.toHaveProperty('email');
+      expect(result).not.toHaveProperty('quoteValidityDays');
+      expect(result).not.toHaveProperty('createdAt');
+      expect(result).not.toHaveProperty('updatedAt');
+      expect(result).not.toHaveProperty('singleton');
+    });
+
+    it('MANAGEMENT: también puede leer', async () => {
+      prisma.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.getPosConfiguration(RoleName.MANAGEMENT),
+      ).resolves.toBeDefined();
+    });
+
+    it('SELLER: también puede leer (a diferencia de getConfiguration)', async () => {
+      prisma.companySettings.findUnique.mockResolvedValue(makeSettingsRow());
+
+      await expect(
+        service.getPosConfiguration(RoleName.SELLER),
+      ).resolves.toBeDefined();
+    });
+
+    it('WAREHOUSE: ForbiddenException sin ejecutar ninguna consulta a Prisma', async () => {
+      await expect(
+        service.getPosConfiguration(RoleName.WAREHOUSE),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.companySettings.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('rol desconocido: falla cerrado sin ejecutar ninguna consulta a Prisma', async () => {
+      await expect(
+        service.getPosConfiguration('GUEST' as RoleName),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.companySettings.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('lanza InternalServerErrorException si la fila singleton no existe', async () => {
+      prisma.companySettings.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.getPosConfiguration(RoleName.ADMIN),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+
+    it('nullea tradeName/taxId/address cuando la fila los tiene en null', async () => {
+      prisma.companySettings.findUnique.mockResolvedValue(
+        makeSettingsRow({ tradeName: null, taxId: null, address: null }),
+      );
+
+      const result = await service.getPosConfiguration(RoleName.SELLER);
+
+      expect(result.tradeName).toBeNull();
+      expect(result.taxId).toBeNull();
+      expect(result.address).toBeNull();
+    });
+  });
+
   describe('updateConfiguration — defensa de rol a nivel de servicio', () => {
     it('MANAGEMENT: ForbiddenException sin abrir transacción ni consultar Prisma', async () => {
       await expect(

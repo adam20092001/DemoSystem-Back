@@ -9,10 +9,13 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditMetadataScalar, AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
 import {
+  COMPANY_SETTINGS_POS_SAFE_SELECT,
   COMPANY_SETTINGS_SAFE_SELECT,
   toSafeCompanySettings,
+  toSafePosCompanySettings,
 } from './mappers/company-settings.mapper';
 import { SafeCompanySettings } from './types/safe-company-settings';
+import { SafePosCompanySettings } from './types/safe-pos-company-settings';
 import { UpdateConfigurationInput } from './types/update-configuration.input';
 
 /** ISO 4217: exactamente 3 letras mayúsculas. */
@@ -56,6 +59,28 @@ function assertCanUpdateConfiguration(requesterRole: RoleName): void {
   }
 }
 
+/**
+ * Ticket A post-MVP: surface de solo lectura para POS. Roles distintos de
+ * assertCanReadConfiguration() a propósito — SELLER puede leer el recorte
+ * POS pero sigue sin poder leer (ni mucho menos escribir) la configuración
+ * administrativa completa. Mismo criterio de "cero consultas para un rol
+ * sin acceso" y "falla cerrado ante cualquier rol no contemplado
+ * explícitamente" que el resto de este archivo.
+ */
+const POS_READ_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.SELLER,
+]);
+
+function assertCanReadPosConfiguration(requesterRole: RoleName): void {
+  if (!POS_READ_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para consultar la configuración comercial del punto de venta',
+    );
+  }
+}
+
 @Injectable()
 export class ConfigurationService {
   constructor(
@@ -78,6 +103,30 @@ export class ConfigurationService {
       );
     }
     return toSafeCompanySettings(row);
+  }
+
+  /**
+   * Ticket A post-MVP: configuración comercial de solo lectura para POS.
+   * Consulta con un `select` propio (COMPANY_SETTINGS_POS_SAFE_SELECT) que
+   * pide exactamente los 9 campos aprobados — nunca el registro completo
+   * seguido de un recorte en memoria, así un campo administrativo agregado
+   * en el futuro a CompanySettings no llega ni siquiera a esta consulta.
+   */
+  async getPosConfiguration(
+    requesterRole: RoleName,
+  ): Promise<SafePosCompanySettings> {
+    assertCanReadPosConfiguration(requesterRole);
+
+    const row = await this.prisma.companySettings.findUnique({
+      where: { singleton: true },
+      select: COMPANY_SETTINGS_POS_SAFE_SELECT,
+    });
+    if (row === null) {
+      throw new InternalServerErrorException(
+        'Configuración de la empresa no inicializada: falta la fila singleton de company_settings',
+      );
+    }
+    return toSafePosCompanySettings(row);
   }
 
   /**

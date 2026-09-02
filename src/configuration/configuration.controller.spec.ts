@@ -21,6 +21,7 @@ const ACTOR: AuthenticatedUser = {
 function createServiceMock() {
   return {
     getConfiguration: jest.fn<Promise<unknown>, [RoleName]>(),
+    getPosConfiguration: jest.fn<Promise<unknown>, [RoleName]>(),
     updateConfiguration: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
   };
 }
@@ -40,6 +41,20 @@ describe('ConfigurationController', () => {
     await controller.get(ACTOR);
 
     expect(service.getConfiguration).toHaveBeenCalledWith(RoleName.ADMIN);
+  });
+
+  it('getPos() delega en configurationService.getPosConfiguration() con el rol del actor', async () => {
+    await controller.getPos(ACTOR);
+
+    expect(service.getPosConfiguration).toHaveBeenCalledWith(RoleName.ADMIN);
+  });
+
+  it('getPos() propaga el rol activo de un actor SELLER', async () => {
+    const sellerActor: AuthenticatedUser = { ...ACTOR, role: RoleName.SELLER };
+
+    await controller.getPos(sellerActor);
+
+    expect(service.getPosConfiguration).toHaveBeenCalledWith(RoleName.SELLER);
   });
 
   it('update() toma actorUserId de @CurrentUser() e ipAddress de la request', async () => {

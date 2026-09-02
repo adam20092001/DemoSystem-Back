@@ -157,6 +157,27 @@ async function getConfiguration(
     .set('Cookie', cookie);
 }
 
+/** Ticket A post-MVP: surface de solo lectura para POS (ADMIN/MANAGEMENT/SELLER). */
+async function getPosConfiguration(
+  app: INestApplication<App>,
+  cookie: string,
+): Promise<request.Response> {
+  return request(app.getHttpServer())
+    .get('/api/v1/configuration/pos')
+    .set('Cookie', cookie);
+}
+
+async function patchConfiguration(
+  app: INestApplication<App>,
+  cookie: string,
+  body: Record<string, unknown>,
+): Promise<request.Response> {
+  return request(app.getHttpServer())
+    .patch('/api/v1/configuration')
+    .set('Cookie', cookie)
+    .send(body);
+}
+
 /**
  * Resuelve el id EXACTO de la fila LOGIN_SUCCESS más reciente para un
  * usuario COMPARTIDO (no propiedad exclusiva de esta suite) — usado
@@ -370,6 +391,70 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
 
       const configResponse = await getConfiguration(app, sellerCookie);
       expect(configResponse.status).toBe(403);
+    });
+  });
+
+  describe('§34.1 — GET /configuration/pos respeta el ROL ACTIVO (Ticket A post-MVP)', () => {
+    it('activeRole SELLER: POS 200, administrativo GET/PATCH 403; switch a ADMIN: administrativo PATCH 200', async () => {
+      const loginResult = await login(
+        app.getHttpServer(),
+        MULTI_ROLE_USERNAME,
+        MULTI_ROLE_PASSWORD,
+      );
+      // resolveDefaultActiveRole() (KAN-18, Bloque A: SELLER > WAREHOUSE >
+      // MANAGEMENT > ADMIN) ya deja a este usuario [SELLER, ADMIN] con
+      // activeRole=SELLER apenas hace login — un switch-role explícito a
+      // SELLER aquí sería el no-op documentado (mismo rol ya activo, sin
+      // token/cookie nuevos, ver AuthService.switchRole()), así que se
+      // reutiliza directamente la cookie de sesión recién obtenida.
+      const sellerCookie = loginResult.cookie;
+
+      // activeRole SELLER: el recorte POS es accesible...
+      const posAsSeller = await getPosConfiguration(app, sellerCookie);
+      expect(posAsSeller.status).toBe(200);
+      const posBody = posAsSeller.body as Record<string, unknown>;
+      expect(Object.keys(posBody).sort()).toEqual(
+        [
+          'businessName',
+          'tradeName',
+          'taxId',
+          'address',
+          'currencyCode',
+          'currencySymbol',
+          'taxEnabled',
+          'taxRate',
+          'maxDiscountPercent',
+        ].sort(),
+      );
+
+      // ...pero la configuración administrativa completa NO, ni siquiera de lectura.
+      const configAsSeller = await getConfiguration(app, sellerCookie);
+      expect(configAsSeller.status).toBe(403);
+
+      // Ni de escritura: mismo usuario, mismo rol activo, PATCH sigue prohibido.
+      const patchAsSeller = await patchConfiguration(app, sellerCookie, {
+        businessName: 'Intento no autorizado desde SELLER',
+      });
+      expect(patchAsSeller.status).toBe(403);
+
+      // Cambiar el rol activo a ADMIN (mismo usuario, mismo assigned roles)
+      // habilita PATCH — se envía un no-op (mismo businessName ya vigente)
+      // para no dejar ninguna fila CONFIGURATION_UPDATED que limpiar, mismo
+      // criterio de residuo-cero que el resto de esta suite.
+      const toAdmin = await switchRole(app, sellerCookie, RoleName.ADMIN);
+      expect(toAdmin.status).toBe(200);
+      const adminCookie = extractCookie(toAdmin);
+
+      const currentConfig = await getConfiguration(app, adminCookie);
+      expect(currentConfig.status).toBe(200);
+      const currentBusinessName = (
+        currentConfig.body as { businessName: string }
+      ).businessName;
+
+      const patchAsAdmin = await patchConfiguration(app, adminCookie, {
+        businessName: currentBusinessName,
+      });
+      expect(patchAsAdmin.status).toBe(200);
     });
   });
 
