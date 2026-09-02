@@ -16,10 +16,22 @@ import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import { ConfigurationService } from './configuration.service';
 import { ConfigurationResponseDto } from './dto/configuration-response.dto';
+import { PosConfigurationResponseDto } from './dto/pos-configuration-response.dto';
 import { UpdateConfigurationDto } from './dto/update-configuration.dto';
 import { SafeCompanySettings } from './types/safe-company-settings';
+import { SafePosCompanySettings } from './types/safe-pos-company-settings';
 
 const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+/**
+ * Ticket A post-MVP: surface de solo lectura para POS. SELLER se agrega
+ * únicamente aquí — READ_ROLES (configuración administrativa completa) no
+ * cambia, y PATCH sigue siendo exclusivo de ADMIN.
+ */
+const POS_READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.SELLER,
+] as const;
 
 @ApiTags('Configuration')
 @ApiCookieAuth(COOKIE_AUTH_NAME)
@@ -35,6 +47,21 @@ export class ConfigurationController {
   @Get()
   get(@CurrentUser() actor: AuthenticatedUser): Promise<SafeCompanySettings> {
     return this.configurationService.getConfiguration(actor.role);
+  }
+
+  @ApiOperation({
+    summary:
+      'Configuración comercial de solo lectura para el punto de venta (POS)',
+    description:
+      'Ticket A post-MVP. Recorte de solo lectura de CompanySettings pensado para que SELLER pueda operar el POS: businessName, tradeName, taxId, address, currencyCode, currencySymbol, taxEnabled, taxRate, maxDiscountPercent. NUNCA expone el registro administrativo completo (sin id/phone/email/quoteValidityDays/createdAt/updatedAt) ni admite mutación — para eso sigue existiendo exclusivamente GET/PATCH /configuration, con su autorización sin cambios.',
+  })
+  @ApiOkResponse({ type: PosConfigurationResponseDto })
+  @Roles(...POS_READ_ROLES)
+  @Get('pos')
+  getPos(
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<SafePosCompanySettings> {
+    return this.configurationService.getPosConfiguration(actor.role);
   }
 
   @ApiOperation({
