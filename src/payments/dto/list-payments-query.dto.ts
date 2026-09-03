@@ -1,7 +1,16 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { PaymentMethod, PaymentStatus } from '@prisma/client';
+import { PaymentStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { IsDateOnly } from './is-date-only.decorator';
 
 /** Sin search/sort/orderBy/direction/amount range/reference/customerId/sellerId: el orden es fijo (paidAt desc, id desc) en el servicio. */
@@ -21,10 +30,16 @@ export class ListPaymentsQueryDto {
   @Max(100)
   limit?: number;
 
-  @ApiPropertyOptional({ enum: PaymentMethod })
+  @ApiPropertyOptional({
+    type: String,
+    example: 'CASH',
+    description:
+      'Código de método de pago dinámico. Filtra por el snapshot histórico (Payment.paymentMethodCode), nunca por el PaymentMethod actual.',
+  })
   @IsOptional()
-  @IsEnum(PaymentMethod)
-  method?: PaymentMethod;
+  @IsString()
+  @MaxLength(30)
+  method?: string;
 
   @ApiPropertyOptional({ enum: PaymentStatus })
   @IsOptional()

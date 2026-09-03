@@ -1,11 +1,6 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
-import {
-  CustomerType,
-  PaymentMethod,
-  PaymentStatus,
-  QuoteStatus,
-} from '@prisma/client';
+import { CustomerType, PaymentStatus, QuoteStatus } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { createValidationPipe } from '../../common/pipes/validation.pipe';
@@ -257,7 +252,7 @@ describe('PaymentsByMethodQueryDto (R9)', () => {
 
   it('method/status/createdByUserId válidos: sin errores', async () => {
     const instance = plainToInstance(PaymentsByMethodQueryDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       status: PaymentStatus.ACTIVE,
       createdByUserId: VALID_UUID,
     });
@@ -265,9 +260,17 @@ describe('PaymentsByMethodQueryDto (R9)', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('method inválido reporta error', async () => {
+  it('method con formato de código dinámico arbitrario: sin errores (filtra el snapshot histórico, no valida existencia aquí)', async () => {
     const instance = plainToInstance(PaymentsByMethodQueryDto, {
       method: 'NOT_A_METHOD',
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('method de más de 30 caracteres reporta error', async () => {
+    const instance = plainToInstance(PaymentsByMethodQueryDto, {
+      method: 'A'.repeat(31),
     });
     const errors = await validate(instance);
     expect(errors.some((e) => e.property === 'method')).toBe(true);

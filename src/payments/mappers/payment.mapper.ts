@@ -15,7 +15,12 @@ const PAYMENT_USER_SUMMARY_SELECT = {
 export const PAYMENT_SAFE_SELECT = {
   id: true,
   saleId: true,
-  method: true,
+  // Snapshot histórico (Ticket C, Bloque C3): jamás el PaymentMethod
+  // dinámico actual (no se incluye ninguna relación/join aquí).
+  // paymentMethodAffectsCashDrawer deliberadamente NO se selecciona: nada
+  // en este mapper/DTO lo expone todavía (uso interno futuro de Ticket B).
+  paymentMethodCode: true,
+  paymentMethodName: true,
   amount: true,
   reference: true,
   status: true,
@@ -38,7 +43,8 @@ export function toSafePayment(row: PaymentSafeRow): SafePayment {
   return {
     id: row.id,
     saleId: row.saleId,
-    method: row.method,
+    method: row.paymentMethodCode,
+    methodName: row.paymentMethodName,
     amount: row.amount.toFixed(2),
     reference: row.reference,
     status: row.status,

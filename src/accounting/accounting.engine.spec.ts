@@ -7,7 +7,7 @@ import {
   AccountingEventType,
   AccountingSourceType,
   AccountingSystemKey,
-  PaymentMethod,
+  PaymentMethodAccountingDestination,
   Prisma,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -111,7 +111,7 @@ function makePaymentCommand(
   return {
     paymentId: PAYMENT_ID,
     saleNumber: SALE_NUMBER,
-    method: PaymentMethod.CASH,
+    accountingDestination: PaymentMethodAccountingDestination.CASH,
     amount: d('40.00'),
     postedAt: POSTED_AT,
     actorUserId: ACTOR_ID,
@@ -353,7 +353,10 @@ describe('AccountingEngine', () => {
     it('crea ORIGINAL con exactamente dos líneas (cobro/AR) por el monto del pago', async () => {
       await engine.postPaymentCollection(
         tx as unknown as Prisma.TransactionClient,
-        makePaymentCommand({ method: PaymentMethod.CASH, amount: d('40.00') }),
+        makePaymentCommand({
+          accountingDestination: PaymentMethodAccountingDestination.CASH,
+          amount: d('40.00'),
+        }),
       );
       const call = tx.accountingEntry.create.mock.calls[0][0] as {
         data: {
@@ -380,31 +383,25 @@ describe('AccountingEngine', () => {
       expect(byAccount.get('acc-ar')?.creditAmount.toFixed(2)).toBe('40.00');
     });
 
-    it('BANK_TRANSFER/BANK_DEPOSIT/CARD/DIGITAL_WALLET/OTHER cobran en la cuenta Bancos', async () => {
-      for (const method of [
-        PaymentMethod.BANK_TRANSFER,
-        PaymentMethod.BANK_DEPOSIT,
-        PaymentMethod.CARD,
-        PaymentMethod.DIGITAL_WALLET,
-        PaymentMethod.OTHER,
-      ]) {
-        tx.accountingEntry.create.mockClear();
-        await engine.postPaymentCollection(
-          tx as unknown as Prisma.TransactionClient,
-          makePaymentCommand({ method }),
-        );
-        const call = tx.accountingEntry.create.mock.calls[0][0] as {
-          data: {
-            lines: {
-              create: { accountId: string; debitAmount: Prisma.Decimal }[];
-            };
+    it('accountingDestination=BANK cobra en la cuenta Bancos (Ticket C, Bloque C3: cualquier método dinámico resuelto a BANK, no una lista fija de enum)', async () => {
+      tx.accountingEntry.create.mockClear();
+      await engine.postPaymentCollection(
+        tx as unknown as Prisma.TransactionClient,
+        makePaymentCommand({
+          accountingDestination: PaymentMethodAccountingDestination.BANK,
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          lines: {
+            create: { accountId: string; debitAmount: Prisma.Decimal }[];
           };
         };
-        const debitLine = call.data.lines.create.find((l) =>
-          l.debitAmount.greaterThan(0),
-        );
-        expect(debitLine?.accountId).toBe('acc-bank');
-      }
+      };
+      const debitLine = call.data.lines.create.find((l) =>
+        l.debitAmount.greaterThan(0),
+      );
+      expect(debitLine?.accountId).toBe('acc-bank');
     });
 
     it('duplicado ORIGINAL para el mismo Payment -> ConflictException', async () => {

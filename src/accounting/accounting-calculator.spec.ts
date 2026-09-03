@@ -1,5 +1,9 @@
 import { InternalServerErrorException } from '@nestjs/common';
-import { AccountingSystemKey, PaymentMethod, Prisma } from '@prisma/client';
+import {
+  AccountingSystemKey,
+  PaymentMethodAccountingDestination,
+  Prisma,
+} from '@prisma/client';
 import {
   assertLinesBalanced,
   assertValidAccountingDescription,
@@ -155,18 +159,17 @@ describe('buildSaleRecognitionLines', () => {
   });
 });
 
-describe('buildPaymentCollectionLines', () => {
+describe('buildPaymentCollectionLines (Ticket C, Bloque C3: accountingDestination YA resuelto, no PaymentMethod)', () => {
   it.each([
-    [PaymentMethod.CASH, AccountingSystemKey.CASH],
-    [PaymentMethod.BANK_TRANSFER, AccountingSystemKey.BANK],
-    [PaymentMethod.BANK_DEPOSIT, AccountingSystemKey.BANK],
-    [PaymentMethod.CARD, AccountingSystemKey.BANK],
-    [PaymentMethod.DIGITAL_WALLET, AccountingSystemKey.BANK],
-    [PaymentMethod.OTHER, AccountingSystemKey.BANK],
+    [PaymentMethodAccountingDestination.CASH, AccountingSystemKey.CASH],
+    [PaymentMethodAccountingDestination.BANK, AccountingSystemKey.BANK],
   ])(
     '%s -> cuenta de cobro %s; DEBIT cobro / CREDIT AR por el mismo monto',
-    (method, expectedKey) => {
-      const lines = buildPaymentCollectionLines(method, d('40.00'));
+    (accountingDestination, expectedKey) => {
+      const lines = buildPaymentCollectionLines(
+        accountingDestination,
+        d('40.00'),
+      );
       expect(lines).toHaveLength(2);
       expect(lines[0]).toEqual({
         systemKey: expectedKey,
@@ -181,9 +184,11 @@ describe('buildPaymentCollectionLines', () => {
     },
   );
 
-  it('el mapeo cubre exhaustivamente los 6 PaymentMethod (ningún valor produce systemKey undefined)', () => {
-    for (const method of Object.values(PaymentMethod)) {
-      const lines = buildPaymentCollectionLines(method, d('1.00'));
+  it('el mapeo cubre exhaustivamente los 2 valores de PaymentMethodAccountingDestination (ningún valor produce systemKey undefined)', () => {
+    for (const destination of Object.values(
+      PaymentMethodAccountingDestination,
+    )) {
+      const lines = buildPaymentCollectionLines(destination, d('1.00'));
       expect(lines[0].systemKey).toBeDefined();
     }
   });

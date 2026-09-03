@@ -56,7 +56,7 @@ describe('PaymentsController', () => {
 
       const result = await controller.register(
         'sale-1',
-        { method: 'CASH', amount: '40.00', reference: undefined } as never,
+        { method: 'CASH', amount: '40.00', reference: undefined },
         ACTOR,
         request,
       );
@@ -82,7 +82,7 @@ describe('PaymentsController', () => {
           method: 'BANK_TRANSFER',
           amount: '40.00',
           reference: 'OP-000123',
-        } as never,
+        },
         ACTOR,
         request,
       );
@@ -98,7 +98,7 @@ describe('PaymentsController', () => {
 
       await controller.register(
         'sale-1',
-        { method: 'CASH', amount: '40.00' } as never,
+        { method: 'CASH', amount: '40.00' },
         ACTOR,
         request,
       );
@@ -114,7 +114,7 @@ describe('PaymentsController', () => {
 
       await controller.register(
         'sale-1',
-        { method: 'CASH', amount: '40.00' } as never,
+        { method: 'CASH', amount: '40.00' },
         ACTOR,
         request,
       );
@@ -196,7 +196,7 @@ describe('PaymentsController', () => {
       service.list.mockResolvedValue(expected);
       const query = { method: 'CASH' };
 
-      const result = await controller.list(query as never, ACTOR);
+      const result = await controller.list(query, ACTOR);
 
       expect(service.list).toHaveBeenCalledWith(query, RoleName.ADMIN);
       expect(result).toBe(expected);

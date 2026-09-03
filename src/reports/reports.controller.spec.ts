@@ -138,7 +138,7 @@ describe('ReportsController', () => {
       service.paymentsByMethod.mockResolvedValue(expected);
       const query = { method: 'CASH' };
 
-      const result = await controller.paymentsByMethod(query as never, ACTOR);
+      const result = await controller.paymentsByMethod(query, ACTOR);
 
       expect(service.paymentsByMethod).toHaveBeenCalledWith(
         query,

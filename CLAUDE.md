@@ -78,7 +78,7 @@ Reglas de capas:
 8. **Clientes** — incluye el cliente especial **Público general**.
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock.
 10. **Ventas / POS** — registro y confirmación de ventas.
-11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente.
+11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código.
 12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar.
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
@@ -225,6 +225,13 @@ seguro de la base de pruebas) y datos/documentación de demostración
 opcionales — sin nuevas reglas de negocio ni módulos nuevos. Ver
 [README.md](README.md) para la puesta en marcha y el flujo de demostración
 recomendado.
+
+Sobre esa base estabilizada, el Ticket C post-MVP (rama `feat/payment-methods`)
+convirtió el método de pago de un enum fijo a administración dinámica por
+ADMIN (`PaymentMethodsModule` + `PaymentEngine`, ver §4 punto 11): migración
+EXPAND, API de administración y migración CONTRACT que retira el enum y la
+columna antiguos. Los 9 métodos baseline y el comportamiento de cobro/anulación
+existente se preservan sin cambios funcionales para el resto del dominio.
 
 ---
 

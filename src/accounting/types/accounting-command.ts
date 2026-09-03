@@ -1,4 +1,8 @@
-import { AccountingSourceType, PaymentMethod, Prisma } from '@prisma/client';
+import {
+  AccountingSourceType,
+  PaymentMethodAccountingDestination,
+  Prisma,
+} from '@prisma/client';
 
 /**
  * Comando interno de AccountingEngine.postSaleRecognition() (Fase 8,
@@ -27,11 +31,17 @@ export interface PostSaleRecognitionCommand {
  * abre transacción ni inyecta PrismaService) únicamente para construir la
  * descripción del asiento. `postedAt` es Payment.paidAt, el mismo instante
  * ya persistido para el pago — nunca un instante independiente.
+ *
+ * `accountingDestination` (Ticket C, Bloque C3) reemplaza al antiguo
+ * `method: PaymentMethod`: el llamador (PaymentEngine) ya resolvió el
+ * PaymentMethod dinámico y le pasa aquí ÚNICAMENTE su
+ * accountingDestination (CASH|BANK) — AccountingEngine nunca conoce el
+ * concepto de "método de pago" ni consulta `payment_methods` por sí mismo.
  */
 export interface PostPaymentCollectionCommand {
   paymentId: string;
   saleNumber: string;
-  method: PaymentMethod;
+  accountingDestination: PaymentMethodAccountingDestination;
   amount: Prisma.Decimal;
   postedAt: Date;
   actorUserId: string;

@@ -178,6 +178,39 @@ async function patchConfiguration(
     .send(body);
 }
 
+/** Ticket C post-MVP, Bloque C2: lista de métodos de pago (activos por defecto). */
+async function getPaymentMethods(
+  app: INestApplication<App>,
+  cookie: string,
+): Promise<request.Response> {
+  return request(app.getHttpServer())
+    .get('/api/v1/payment-methods')
+    .set('Cookie', cookie);
+}
+
+async function postPaymentMethod(
+  app: INestApplication<App>,
+  cookie: string,
+  body: Record<string, unknown>,
+): Promise<request.Response> {
+  return request(app.getHttpServer())
+    .post('/api/v1/payment-methods')
+    .set('Cookie', cookie)
+    .send(body);
+}
+
+async function patchPaymentMethod(
+  app: INestApplication<App>,
+  cookie: string,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<request.Response> {
+  return request(app.getHttpServer())
+    .patch(`/api/v1/payment-methods/${id}`)
+    .set('Cookie', cookie)
+    .send(body);
+}
+
 /**
  * Resuelve el id EXACTO de la fila LOGIN_SUCCESS más reciente para un
  * usuario COMPARTIDO (no propiedad exclusiva de esta suite) — usado
@@ -203,6 +236,13 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
   let multiRoleUserId: string;
   let revokeUserId: string;
   let pendingPasswordUserId: string;
+  /**
+   * Ticket C post-MVP, Bloque C2: id propio del ÚNICO PaymentMethod
+   * personalizado que la regresión de rol activo crea (nunca uno de los 9
+   * baseline). Eliminado por su ID exacto en afterAll, nunca
+   * deleteMany({}) sobre payment_methods.
+   */
+  let paymentMethodOwnedId: string | undefined;
   /**
    * Conteos GLOBALES (todas las entidades/usuarios, incluido historial ajeno
    * a esta suite) al arrancar. La única aserción de aislamiento final es que
@@ -284,6 +324,19 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
     });
     ownedAuditLogIds.push(...ownedFixtureAuditRows.map((row) => row.id));
 
+    // Ticket C, Bloque C2: auditoría PAYMENT_METHOD_* del único método
+    // personalizado propio de esta suite (entityId distinto de cualquier
+    // userId, así que el barrido de arriba no lo cubre).
+    if (paymentMethodOwnedId !== undefined) {
+      const ownedPaymentMethodAuditRows = await prisma.auditLog.findMany({
+        where: { entityId: paymentMethodOwnedId },
+        select: { id: true },
+      });
+      ownedAuditLogIds.push(
+        ...ownedPaymentMethodAuditRows.map((row) => row.id),
+      );
+    }
+
     // Deduplicado defensivo: los dos ids capturados en §42 (login compartido
     // de ADMIN/MANAGEMENT) nunca deberían coincidir con los de arriba (son
     // usuarios distintos), pero un Set evita cualquier doble-conteo si algo
@@ -324,6 +377,15 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
     await prisma.user.deleteMany({
       where: { id: { in: ownedFixtureUserIds } },
     });
+
+    // Ticket C, Bloque C2: eliminación física del único PaymentMethod
+    // personalizado propio de esta suite, por su ID exacto — nunca uno de
+    // los 9 baseline, nunca deleteMany({}) sobre payment_methods.
+    if (paymentMethodOwnedId !== undefined) {
+      await prisma.paymentMethod.delete({
+        where: { id: paymentMethodOwnedId },
+      });
+    }
 
     await app.close();
     await prisma.$disconnect();
@@ -454,6 +516,54 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
       const patchAsAdmin = await patchConfiguration(app, adminCookie, {
         businessName: currentBusinessName,
       });
+      expect(patchAsAdmin.status).toBe(200);
+    });
+  });
+
+  describe('§34.2 — /payment-methods respeta el ROL ACTIVO (Ticket C post-MVP, Bloque C2)', () => {
+    it('activeRole SELLER: GET permitido, POST/PATCH prohibidos; switch a ADMIN: POST permitido', async () => {
+      const loginResult = await login(
+        app.getHttpServer(),
+        MULTI_ROLE_USERNAME,
+        MULTI_ROLE_PASSWORD,
+      );
+      // Mismo criterio que §34.1: activeRole ya es SELLER apenas hace
+      // login (resolveDefaultActiveRole), sin necesidad de un switch-role
+      // explícito.
+      const sellerCookie = loginResult.cookie;
+
+      const listAsSeller = await getPaymentMethods(app, sellerCookie);
+      expect(listAsSeller.status).toBe(200);
+
+      const postAsSeller = await postPaymentMethod(app, sellerCookie, {
+        code: 'MULTIROLE_NOPE',
+        name: 'No debería crearse',
+        requiresReference: false,
+        affectsCashDrawer: false,
+        accountingDestination: 'BANK',
+      });
+      expect(postAsSeller.status).toBe(403);
+
+      const toAdmin = await switchRole(app, sellerCookie, RoleName.ADMIN);
+      expect(toAdmin.status).toBe(200);
+      const adminCookie = extractCookie(toAdmin);
+
+      const postAsAdmin = await postPaymentMethod(app, adminCookie, {
+        code: 'E2E_MULTIROLE_PM',
+        name: 'Método multi-rol E2E',
+        requiresReference: false,
+        affectsCashDrawer: false,
+        accountingDestination: 'BANK',
+      });
+      expect(postAsAdmin.status).toBe(201);
+      paymentMethodOwnedId = (postAsAdmin.body as { id: string }).id;
+
+      const patchAsAdmin = await patchPaymentMethod(
+        app,
+        adminCookie,
+        paymentMethodOwnedId,
+        { active: false },
+      );
       expect(patchAsAdmin.status).toBe(200);
     });
   });

@@ -1,15 +1,16 @@
-import { PaymentMethod } from '@prisma/client';
-
 /**
  * Input público de PaymentsService.register() (pago posterior, Bloque B).
  * No es un DTO HTTP: sin decoradores, no se construye en ningún controller
  * todavía (Bloque C). amount llega como texto sin convertir (lo parsea el
  * propio servicio antes de abrir la transacción); status/paidAt/createdBy/
  * campos de anulación nunca se aceptan aquí: son valores de sistema.
+ * `method` es el código dinámico crudo tal como llegó del DTO HTTP (Ticket
+ * C, Bloque C3): PaymentsService no lo normaliza ni lo resuelve, solo lo
+ * propaga — la resolución real ocurre dentro de PaymentEngine.register().
  */
 export interface RegisterPaymentInput {
   saleId: string;
-  method: PaymentMethod;
+  method: string;
   amount: string;
   reference?: string;
   actorUserId: string;
@@ -34,10 +35,11 @@ export interface CancelPaymentInput {
  * Pago inicial opcional embebido en la confirmación de una venta (directa o
  * desde cotización, Bloque B). Sin paidAt/status/actor propios: el actor ya
  * es el actorUserId de la venta que lo contiene (D no hay un segundo actor
- * anidado).
+ * anidado). `method` es el código dinámico crudo, mismo criterio que
+ * RegisterPaymentInput (Ticket C, Bloque C3).
  */
 export interface InitialPaymentInput {
-  method: PaymentMethod;
+  method: string;
   amount: string;
   reference?: string;
 }

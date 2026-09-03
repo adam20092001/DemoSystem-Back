@@ -1,8 +1,4 @@
-import {
-  PaymentCancellationSource,
-  PaymentMethod,
-  PaymentStatus,
-} from '@prisma/client';
+import { PaymentCancellationSource, PaymentStatus } from '@prisma/client';
 
 /** Identidad mínima segura de un usuario: nunca role/passwordHash/campos de seguridad. */
 export interface SafePaymentUser {
@@ -22,7 +18,16 @@ export interface SafePaymentUser {
 export interface SafePayment {
   id: string;
   saleId: string;
-  method: PaymentMethod;
+  /**
+   * Snapshot histórico Payment.paymentMethodCode (Ticket C, Bloque C3), NO
+   * el code actual del PaymentMethod dinámico (que puede haber cambiado de
+   * nombre o desactivarse desde entonces). Nombre de propiedad preservado
+   * a propósito (contrato HTTP retro-compatible: el cliente ya conocía
+   * `method` como el código del método usado).
+   */
+  method: string;
+  /** Snapshot histórico Payment.paymentMethodName — campo aditivo (Ticket C, Bloque C3), nunca el name actual del método dinámico. */
+  methodName: string;
   amount: string;
   reference: string | null;
   status: PaymentStatus;

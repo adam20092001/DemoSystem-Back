@@ -308,6 +308,43 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'providerCode',
     'providerStatus',
   ],
+  // Ticket C post-MVP, Bloque C2. PaymentMethodsService es el único emisor
+  // de las 4. CREATED audita los valores de creación planos (el método
+  // nace `active: true`, así que `active` nunca aparece aquí). UPDATED/
+  // ACTIVATED/DEACTIVATED comparten el MISMO contrato que
+  // CONFIGURATION_UPDATED (changedFields + oldValues/newValues acotados a
+  // los campos realmente cambiados), más `code` como campo plano — permite
+  // identificar el método sin depender de entityId. Un PATCH cuyo `active`
+  // transiciona emite SOLO ACTIVATED/DEACTIVATED aunque otros campos hayan
+  // cambiado en la misma petición (viajan dentro de changedFields/
+  // oldValues/newValues de esa misma fila): nunca una fila UPDATED
+  // adicional para la misma petición.
+  [AuditAction.PAYMENT_METHOD_CREATED]: [
+    'code',
+    'name',
+    'requiresReference',
+    'affectsCashDrawer',
+    'accountingDestination',
+    'sortOrder',
+  ],
+  [AuditAction.PAYMENT_METHOD_UPDATED]: [
+    'code',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
+  [AuditAction.PAYMENT_METHOD_ACTIVATED]: [
+    'code',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
+  [AuditAction.PAYMENT_METHOD_DEACTIVATED]: [
+    'code',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
 };
 
 function isPlainObject(

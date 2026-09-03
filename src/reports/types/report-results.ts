@@ -1,9 +1,4 @@
-import {
-  CustomerType,
-  PaymentMethod,
-  PaymentStatus,
-  QuoteStatus,
-} from '@prisma/client';
+import { CustomerType, PaymentStatus, QuoteStatus } from '@prisma/client';
 
 /** Identidad mínima segura de un usuario: nunca email/rol/campos de seguridad. */
 export interface ReportSafeUser {
@@ -101,7 +96,10 @@ export interface PaymentsByMethodRow {
   saleId: string;
   saleNumber: string;
   customerName: string;
-  method: PaymentMethod;
+  /** Snapshot histórico Payment.paymentMethodCode (Ticket C, Bloque C3), nunca el code actual del PaymentMethod dinámico. */
+  method: string;
+  /** Snapshot histórico Payment.paymentMethodName — campo aditivo, nunca el name actual. */
+  methodName: string;
   reference: string | null;
   amount: string;
   status: PaymentStatus;

@@ -1,8 +1,12 @@
 import { InternalServerErrorException } from '@nestjs/common';
-import { AccountingSystemKey, PaymentMethod, Prisma } from '@prisma/client';
+import {
+  AccountingSystemKey,
+  PaymentMethodAccountingDestination,
+  Prisma,
+} from '@prisma/client';
 import {
   ACCOUNTING_DESCRIPTION_MAX_LENGTH,
-  PAYMENT_METHOD_TO_ACCOUNTING_SYSTEM_KEY,
+  ACCOUNTING_DESTINATION_TO_SYSTEM_KEY,
 } from './constants/accounting.constants';
 import {
   AccountingLineInput,
@@ -88,18 +92,23 @@ export function buildSaleRecognitionLines(
 
 /**
  * Construye las dos líneas del asiento de cobro de pago (plan final
- * aprobado, §4/§13): Debe la cuenta de cobro según el método (Caja/Bancos —
- * mapeo fijo, nunca configurable), Haber Cuentas por cobrar, ambas por
- * exactamente Payment.amount. Ningún pago con monto 0 puede existir (Fase 7
- * ya lo garantiza), así que estas dos líneas siempre son positivas.
+ * aprobado, §4/§13; recableado en Ticket C, Bloque C3): Debe la cuenta de
+ * cobro según `accountingDestination` (Caja/Bancos — mapeo fijo de solo 2
+ * valores, nunca configurable por ADMIN), Haber Cuentas por cobrar, ambas
+ * por exactamente Payment.amount. `accountingDestination` ya viene
+ * RESUELTO por el llamador (PaymentEngine, desde el PaymentMethod dinámico
+ * — ver su propio docblock): esta función nunca consulta PaymentMethod ni
+ * conoce el concepto de "método de pago", solo el destino contable de 2
+ * valores. Ningún pago con monto 0 puede existir (Fase 7 ya lo garantiza),
+ * así que estas dos líneas siempre son positivas.
  */
 export function buildPaymentCollectionLines(
-  method: PaymentMethod,
+  accountingDestination: PaymentMethodAccountingDestination,
   amount: Prisma.Decimal,
 ): AccountingLineInput[] {
   return [
     {
-      systemKey: PAYMENT_METHOD_TO_ACCOUNTING_SYSTEM_KEY[method],
+      systemKey: ACCOUNTING_DESTINATION_TO_SYSTEM_KEY[accountingDestination],
       debitAmount: amount,
       creditAmount: ZERO,
     },

@@ -1,10 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-  CustomerType,
-  PaymentMethod,
-  PaymentStatus,
-  QuoteStatus,
-} from '@prisma/client';
+import { CustomerType, PaymentStatus, QuoteStatus } from '@prisma/client';
 
 /** Identidad mínima segura de un usuario: nunca email/rol/campos de seguridad. */
 export class ReportSafeUserResponseDto {
@@ -268,8 +263,21 @@ export class PaymentsByMethodRowResponseDto {
   @ApiProperty()
   customerName!: string;
 
-  @ApiProperty({ enum: PaymentMethod })
-  method!: PaymentMethod;
+  @ApiProperty({
+    type: String,
+    example: 'CASH',
+    description:
+      'Código del método de pago dinámico snapshoteado en el instante del cobro (Payment.paymentMethodCode) — nunca el code actual si el método cambió/se desactivó después.',
+  })
+  method!: string;
+
+  @ApiProperty({
+    type: String,
+    example: 'Efectivo',
+    description:
+      'Nombre visible del método de pago snapshoteado en el instante del cobro (Payment.paymentMethodName). Campo aditivo (Ticket C, Bloque C3).',
+  })
+  methodName!: string;
 
   @ApiProperty({ type: String, nullable: true })
   reference!: string | null;

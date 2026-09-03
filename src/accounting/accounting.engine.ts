@@ -109,7 +109,10 @@ export class AccountingEngine {
     tx: Prisma.TransactionClient,
     command: PostPaymentCollectionCommand,
   ): Promise<PostedAccountingEntry> {
-    const lines = buildPaymentCollectionLines(command.method, command.amount);
+    const lines = buildPaymentCollectionLines(
+      command.accountingDestination,
+      command.amount,
+    );
 
     return this.postOriginal(tx, {
       sourceType: AccountingSourceType.PAYMENT,
