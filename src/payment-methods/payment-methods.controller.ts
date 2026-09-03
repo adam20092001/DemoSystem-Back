@@ -81,7 +81,7 @@ export class PaymentMethodsController {
   @ApiOperation({
     summary: 'Crear un método de pago personalizado (ADMIN)',
     description:
-      'Nace `active: true`. `code` es la identidad estable e inmutable (formato ^[A-Z][A-Z0-9_]{1,29}$ tras normalizar a mayúsculas) — nunca editable después de creado. `accountingDestination` decide la cuenta contable de cobro (CASH -> Caja, BANK -> Bancos, Fase 8 sin cuentas nuevas); `affectsCashDrawer` decide si el monto cuenta como efectivo físico para el futuro arqueo de caja (Ticket B); ambos son conceptos independientes entre sí y de `requiresReference`. Bloque C2: crear un método aquí todavía NO lo habilita para registrar cobros — Payment.method sigue usando el enum antiguo hasta el Bloque C3.',
+      'Nace `active: true` y queda utilizable de inmediato para registrar cobros nuevos (POST /sales/:saleId/payments y el pago inicial embebido de Sales), sin redeploy: PaymentEngine resuelve el método dinámicamente en cada cobro. `code` es la identidad estable e inmutable (formato ^[A-Z][A-Z0-9_]{1,29}$ tras normalizar a mayúsculas) — nunca editable después de creado. `accountingDestination` decide la cuenta contable de cobro (CASH -> Caja, BANK -> Bancos, Fase 8 sin cuentas nuevas); `affectsCashDrawer` decide si el monto cuenta como efectivo físico para el futuro arqueo de caja (Ticket B); ambos son conceptos independientes entre sí y de `requiresReference`.',
   })
   @ApiCreatedResponse({ type: PaymentMethodResponseDto })
   @ApiBadRequestResponse({
@@ -115,7 +115,7 @@ export class PaymentMethodsController {
     summary:
       'Actualizar un método de pago, incluida activación/desactivación (ADMIN)',
     description:
-      '`code` nunca es editable (ausente de este DTO; el ValidationPipe global tiene forbidNonWhitelisted, así que enviarlo en el body responde 400 en vez de ignorarse en silencio). `active: false` desactiva sin borrar físicamente: el método permanece visible en pagos históricos y con `includeInactive=true`, y deja de ofrecerse para cobros nuevos a partir del Bloque C3. Un PATCH cuyos valores ya coinciden con los vigentes no escribe nada ni genera auditoría (200 con el recurso sin modificar). Activar/desactivar los 4 métodos legacy migrados en el Bloque C1 es técnicamente posible por ADMIN; el Bloque C1 los deja inactivos por defecto.',
+      '`code` nunca es editable (ausente de este DTO; el ValidationPipe global tiene forbidNonWhitelisted, así que enviarlo en el body responde 400 en vez de ignorarse en silencio). `active: false` desactiva sin borrar físicamente: el método permanece visible en pagos históricos y con `includeInactive=true`, y PaymentEngine rechaza (409) cualquier intento de usarlo en un cobro nuevo hasta que se reactive. `requiresReference`/`affectsCashDrawer`/`accountingDestination` cambian el comportamiento de cobros nuevos de inmediato, sin afectar Payments ya registrados (snapshot histórico). Un PATCH cuyos valores ya coinciden con los vigentes no escribe nada ni genera auditoría (200 con el recurso sin modificar). Activar/desactivar los 4 métodos legacy migrados en el Bloque C1 es técnicamente posible por ADMIN; el Bloque C1 los deja inactivos por defecto.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: PaymentMethodResponseDto })

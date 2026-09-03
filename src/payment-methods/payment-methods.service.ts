@@ -108,11 +108,15 @@ function normalizeName(value: string): string {
 
 /**
  * Administración de métodos de pago dinámicos (Ticket C post-MVP, Bloque
- * C2). Puramente de administración: nada de esto influye todavía en
- * PaymentEngine/PaymentsService/SalesService/AccountingEngine/Reports —
- * ese cableado llega en el Bloque C3, junto con la migración de CONTRACT.
- * Crear/activar/desactivar/editar un método dinámico aquí no tiene ningún
- * efecto observable sobre la creación de Payment mientras tanto.
+ * C2). Desde el Bloque C3 (CONTRACT), cada mutación aquí tiene efecto
+ * observable inmediato y sin redeploy sobre PaymentEngine: crear un método
+ * `active: true` lo habilita de inmediato para cobros nuevos; desactivarlo
+ * lo bloquea (409) para cobros nuevos sin afectar Payments ya registrados;
+ * cambiar `requiresReference`/`affectsCashDrawer`/`accountingDestination`
+ * cambia el comportamiento de cobros nuevos sin alterar el snapshot de
+ * pagos históricos. Esta clase nunca resuelve ni valida un Payment
+ * directamente — esa responsabilidad es exclusiva de PaymentEngine
+ * (`PaymentMethodReader`, dentro de la misma transacción del cobro).
  */
 @Injectable()
 export class PaymentMethodsService {

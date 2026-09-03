@@ -12,9 +12,9 @@ El contexto de trabajo y las reglas de negocio del proyecto están en
 Autenticación multi-rol (JWT en cookie HttpOnly) · Usuarios y roles ·
 Catálogo (categorías, unidades, productos) · Inventario (movimientos y
 saldo) · Clientes (incluye "Público general") · Cotizaciones · Ventas / POS ·
-Pagos y cuentas por cobrar · Contabilidad básica · Reportes y dashboard ·
-Configuración y correlativos · Auditoría · **Facturación electrónica
-(demostración)**.
+Pagos (métodos de pago administrables por ADMIN) y cuentas por cobrar ·
+Contabilidad básica · Reportes y dashboard · Configuración y correlativos ·
+Auditoría · **Facturación electrónica (demostración)**.
 
 > ⚠️ **Facturación electrónica = demostración, no SUNAT real.** El único
 > proveedor implementado es `MockElectronicInvoicingProvider`
@@ -238,6 +238,36 @@ aquí en detalle.)
 - Un documento `ACCEPTED` por el proveedor MOCK **no tiene validez fiscal**.
   La representación imprimible lo indica explícitamente.
 
+## Métodos de pago
+
+Los métodos de pago son **dinámicos y administrables por ADMIN**, no un enum
+fijo del backend:
+
+- El frontend debe obtener la lista de métodos seleccionables mediante
+  `GET /api/v1/payment-methods` — solo los métodos con `active: true` deben
+  ofrecerse para un cobro nuevo (un método inactivo existe únicamente por
+  historial y el backend rechaza usarlo en un pago nuevo).
+- ADMIN administra el catálogo completo con
+  `POST /api/v1/payment-methods` (crear) y
+  `PATCH /api/v1/payment-methods/:id` (renombrar, activar/desactivar, cambiar
+  `requiresReference`/`affectsCashDrawer`/`accountingDestination`/`sortOrder`).
+  El `code` es inmutable una vez creado.
+- Las requests de pago (`POST /api/v1/sales/:saleId/payments`, o el pago
+  inicial embebido en `POST /api/v1/sales` /
+  `POST /api/v1/sales/from-quote/:quoteId`) siguen enviando `method` como
+  texto — ahora el *código* de un método dinámico (p. ej. `"CASH"`), nunca un
+  `id`. La respuesta de un pago incluye `method` (código) y `methodName`
+  (nombre visible), ambos **snapshots** del método en el instante del cobro:
+  si ADMIN renombra o desactiva el método después, los pagos ya registrados
+  no cambian.
+- Baseline sembrado (`npm run db:seed`): **activos** `CASH`, `CARD`,
+  `TRANSFER`, `YAPE`, `PLIN`; **inactivos** (históricos, preservados solo
+  para no perder trazabilidad) `BANK_TRANSFER`, `BANK_DEPOSIT`,
+  `DIGITAL_WALLET`, `OTHER`.
+- Si un método exige referencia (`requiresReference`) es configuración por
+  método, no una regla fija por código — el backend la valida al momento del
+  cobro contra la configuración vigente de ese método.
+
 ## Base de datos
 
 ```bash
@@ -295,9 +325,9 @@ arriesgar otra base.
 
 Monolito modular en NestJS: un solo despliegue, un módulo por dominio bajo
 `src/` (`auth`, `users`, `categories`, `units`, `products`, `inventory`,
-`customers`, `quotes`, `sales`, `payments`, `accounting`, `reports`,
-`configuration`, `audit`, `electronic-invoicing`, más soporte interno como
-`document-sequences`). Cada módulo separa controller (HTTP/roles/Swagger),
+`customers`, `quotes`, `sales`, `payments`, `payment-methods`, `accounting`,
+`reports`, `configuration`, `audit`, `electronic-invoicing`, más soporte
+interno como `document-sequences`). Cada módulo separa controller (HTTP/roles/Swagger),
 service (reglas de negocio y transacciones) y DTOs (validación de entrada);
 Prisma solo se usa desde la capa de servicios, nunca desde los controllers.
 

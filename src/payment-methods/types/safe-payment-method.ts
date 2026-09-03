@@ -11,9 +11,11 @@ import { PaymentMethodAccountingDestination } from '@prisma/client';
  * entidad "maestro editable por ADMIN" que esas, así que se sigue el mismo
  * contrato en vez de inventar una excepción para esta sola entidad.
  *
- * Bloque C2: este DTO/tipo es exclusivamente de administración. Nada de
- * Payment/PaymentEngine lo consume todavía (ver payment-method-reader.ts
- * para el lector angosto pensado para el Bloque C3).
+ * Nacido en el Bloque C2 como tipo exclusivamente de administración; desde
+ * el Bloque C3, PaymentEngine también lo consume internamente (vía
+ * PaymentMethodReader, ver payment-method-reader.service.ts) para resolver
+ * el método dinámico de cada cobro — nunca se le agregó ningún campo solo
+ * para ese consumo interno, el mismo shape sirve para ambos casos de uso.
  */
 export interface SafePaymentMethod {
   id: string;

@@ -8,25 +8,26 @@ import {
 import { SafePaymentMethod } from './types/safe-payment-method';
 
 /**
- * Lector angosto de solo lectura, pensado explícitamente para el Bloque C3
- * (PaymentEngine dinámico) — NO se inyecta en ningún otro módulo todavía en
- * el Bloque C2. Existe como un servicio SEPARADO de PaymentMethodsService a
- * propósito: PaymentMethodsService.listPaymentMethods() está diseñado para
- * el caso de uso HTTP administrativo (recibe `requesterRole` y aplica
- * autorización basada en rol); una futura consulta interna de dominio desde
- * PaymentEngine ("¿este code existe y está activo?", para resolver un
- * cobro) no tiene ningún rol de solicitante que evaluar — es una regla de
- * negocio, no una petición HTTP. Reutilizar PaymentMethodsService para eso
- * forzaría a PaymentEngine a inventar un rol falso solo para pasar la
- * autorización, mezclando dos preocupaciones distintas. Este lector, en
- * cambio, no aplica ninguna autorización: cualquier módulo que lo inyecte
- * ya pasó su propia autorización HTTP antes de necesitar esta consulta
- * interna, igual que SettingsReader (ConfigurationModule) hoy.
+ * Lector angosto de solo lectura, diseñado en el Bloque C2 para el uso que
+ * el Bloque C3 le da hoy: PaymentEngine.register() lo inyecta (vía
+ * PaymentMethodsModule) para resolver `code -> PaymentMethod` dentro de su
+ * propia transacción de cobro (`findByCode(code, tx)`). Existe como un
+ * servicio SEPARADO de PaymentMethodsService a propósito:
+ * PaymentMethodsService.listPaymentMethods() está diseñado para el caso de
+ * uso HTTP administrativo (recibe `requesterRole` y aplica autorización
+ * basada en rol); la consulta interna de dominio que hace PaymentEngine
+ * ("¿este code existe y está activo?", para resolver un cobro) no tiene
+ * ningún rol de solicitante que evaluar — es una regla de negocio, no una
+ * petición HTTP. Reutilizar PaymentMethodsService para eso forzaría a
+ * PaymentEngine a inventar un rol falso solo para pasar la autorización,
+ * mezclando dos preocupaciones distintas. Este lector, en cambio, no aplica
+ * ninguna autorización: cualquier módulo que lo inyecte ya pasó su propia
+ * autorización HTTP antes de necesitar esta consulta interna, igual que
+ * SettingsReader (ConfigurationModule).
  *
- * Ningún método de este archivo se invoca todavía desde ningún otro módulo
- * — se exporta desde PaymentMethodsModule para que el Bloque C3 pueda
- * inyectarlo sin reestructurar este módulo, exactamente el mismo
- * precedente que SettingsReader (Fase 10, Bloque A) siguió para
+ * Se exporta desde PaymentMethodsModule; PaymentsModule lo importa (ver
+ * payments.module.ts) sin reestructurar ninguno de los dos módulos —
+ * mismo precedente que SettingsReader (Fase 10, Bloque A) siguió para
  * QuotesModule/SalesModule.
  */
 @Injectable()
