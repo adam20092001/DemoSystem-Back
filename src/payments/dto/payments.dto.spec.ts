@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
-import { PaymentMethod, PaymentStatus } from '@prisma/client';
+import { PaymentStatus } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { createValidationPipe } from '../../common/pipes/validation.pipe';
@@ -49,8 +49,8 @@ async function expectRejectedQueryProperty(
 }
 
 describe('CreatePaymentDto', () => {
-  it.each(Object.values(PaymentMethod))(
-    'método %s con monto válido: sin errores (reference solo obligatoria en el dominio)',
+  it.each(['CASH', 'CARD', 'TRANSFER', 'YAPE', 'PLIN', 'CUSTOM_METHOD'])(
+    'método dinámico %s con monto válido: sin errores (formato/existencia/actividad se validan en el dominio, no aquí)',
     async (method) => {
       const instance = plainToInstance(CreatePaymentDto, {
         method,
@@ -61,9 +61,27 @@ describe('CreatePaymentDto', () => {
     },
   );
 
-  it('method inválido reporta error', async () => {
+  it('method en minúsculas pasa la validación del DTO: la normalización (trim+mayúsculas) y el formato canónico se validan en el dominio (Ticket C, Bloque C3)', async () => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: 'NOT_A_METHOD',
+      method: 'cash',
+      amount: '10.00',
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('method vacío reporta error', async () => {
+    const instance = plainToInstance(CreatePaymentDto, {
+      method: '',
+      amount: '10.00',
+    });
+    const errors = await validate(instance);
+    expect(errors.some((e) => e.property === 'method')).toBe(true);
+  });
+
+  it('method de más de 30 caracteres reporta error', async () => {
+    const instance = plainToInstance(CreatePaymentDto, {
+      method: 'A'.repeat(31),
       amount: '10.00',
     });
     const errors = await validate(instance);
@@ -82,7 +100,7 @@ describe('CreatePaymentDto', () => {
     ['dos decimales', '10.99'],
   ])('amount con forma válida (%s): sin errores', async (_label, amount) => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount,
     });
     const errors = await validate(instance);
@@ -99,7 +117,7 @@ describe('CreatePaymentDto', () => {
     ['signo positivo explícito', '+10.00'],
   ])('amount malformado (%s) reporta error', async (_label, amount) => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount,
     });
     const errors = await validate(instance);
@@ -108,7 +126,7 @@ describe('CreatePaymentDto', () => {
 
   it('reference ausente es válida (la forma HTTP no exige referencia por método; eso lo valida el dominio)', async () => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.BANK_TRANSFER,
+      method: 'TRANSFER',
       amount: '10.00',
     });
     const errors = await validate(instance);
@@ -117,7 +135,7 @@ describe('CreatePaymentDto', () => {
 
   it('reference presente y válida', async () => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10.00',
       reference: 'OP-000123',
     });
@@ -127,7 +145,7 @@ describe('CreatePaymentDto', () => {
 
   it('reference de longitud exactamente 100 es válida', async () => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10.00',
       reference: 'a'.repeat(100),
     });
@@ -137,7 +155,7 @@ describe('CreatePaymentDto', () => {
 
   it('reference de longitud 101 reporta error', async () => {
     const instance = plainToInstance(CreatePaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10.00',
       reference: 'a'.repeat(101),
     });
@@ -160,7 +178,7 @@ describe('CreatePaymentDto', () => {
     ])('"%s" -> 400 por whitelist', async (field) => {
       await expectRejectedProperty(
         CreatePaymentDto,
-        { method: PaymentMethod.CASH, amount: '10.00', [field]: 'x' },
+        { method: 'CASH', amount: '10.00', [field]: 'x' },
         field,
       );
     });
@@ -170,7 +188,7 @@ describe('CreatePaymentDto', () => {
 describe('InitialPaymentDto', () => {
   it('mismo contrato que CreatePaymentDto: válido con method/amount', async () => {
     const instance = plainToInstance(InitialPaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10.00',
     });
     const errors = await validate(instance);
@@ -179,7 +197,7 @@ describe('InitialPaymentDto', () => {
 
   it('amount malformado reporta error (misma validación heredada)', async () => {
     const instance = plainToInstance(InitialPaymentDto, {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10,00',
     });
     const errors = await validate(instance);
@@ -269,16 +287,24 @@ describe('ListPaymentsQueryDto', () => {
 
   it('method/status válidos', async () => {
     const instance = plainToInstance(ListPaymentsQueryDto, {
-      method: PaymentMethod.CARD,
+      method: 'CARD',
       status: PaymentStatus.CANCELLED,
     });
     const errors = await validate(instance);
     expect(errors).toHaveLength(0);
   });
 
-  it('method inválido reporta error', async () => {
+  it('method con formato de código dinámico arbitrario: sin errores (el filtro se resuelve contra el snapshot, no se valida existencia aquí)', async () => {
     const instance = plainToInstance(ListPaymentsQueryDto, {
       method: 'NOT_A_METHOD',
+    });
+    const errors = await validate(instance);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('method de más de 30 caracteres reporta error', async () => {
+    const instance = plainToInstance(ListPaymentsQueryDto, {
+      method: 'A'.repeat(31),
     });
     const errors = await validate(instance);
     expect(errors.some((e) => e.property === 'method')).toBe(true);

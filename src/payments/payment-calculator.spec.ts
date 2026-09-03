@@ -1,9 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
-import { PaymentMethod, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import {
   assertReferenceRequiredForMethod,
   assertValidPaymentAmountShape,
   normalizePaymentCancellationReason,
+  normalizePaymentMethodCode,
   normalizePaymentReference,
   parsePaymentAmount,
 } from './payment-calculator';
@@ -83,115 +84,105 @@ describe('assertValidPaymentAmountShape', () => {
   });
 });
 
-describe('normalizePaymentReference', () => {
-  it('undefined -> null (método que no la exige)', () => {
-    expect(normalizePaymentReference(PaymentMethod.CASH, undefined)).toBeNull();
+describe('normalizePaymentMethodCode (Ticket C, Bloque C3)', () => {
+  it('trim + mayúsculas', () => {
+    expect(normalizePaymentMethodCode('  cash  ')).toBe('CASH');
   });
 
-  it('null -> null (método que no la exige)', () => {
-    expect(normalizePaymentReference(PaymentMethod.CASH, null)).toBeNull();
+  it('ya en mayúsculas: idempotente', () => {
+    expect(normalizePaymentMethodCode('YAPE')).toBe('YAPE');
   });
 
-  it('recorta espacios perimetrales', () => {
-    expect(normalizePaymentReference(PaymentMethod.CASH, '  OP-123  ')).toBe(
-      'OP-123',
+  it('acepta guion bajo y dígitos tras la letra inicial', () => {
+    expect(normalizePaymentMethodCode('custom_bank_2')).toBe('CUSTOM_BANK_2');
+  });
+
+  it.each([
+    ['un solo carácter', 'x'],
+    ['inicia con dígito', '1CASH'],
+    ['inicia con guion bajo', '_CASH'],
+    ['contiene espacio interno', 'CA SH'],
+    ['contiene un carácter no permitido', 'CASH!'],
+    ['cadena vacía', ''],
+    ['más de 30 caracteres', 'A'.repeat(31)],
+  ])('rechaza forma inválida (%s): %s', (_label, value) => {
+    expect(() => normalizePaymentMethodCode(value)).toThrow(
+      BadRequestException,
     );
   });
 
+  it('exactamente 30 caracteres: acepta', () => {
+    const code = 'A' + 'B'.repeat(29);
+    expect(normalizePaymentMethodCode(code)).toBe(code);
+  });
+
+  it('valor no string: lanza', () => {
+    expect(() =>
+      normalizePaymentMethodCode(undefined as unknown as string),
+    ).toThrow(BadRequestException);
+  });
+});
+
+describe('normalizePaymentReference (Ticket C, Bloque C3: ya no depende del método)', () => {
+  it('undefined -> null', () => {
+    expect(normalizePaymentReference(undefined)).toBeNull();
+  });
+
+  it('null -> null', () => {
+    expect(normalizePaymentReference(null)).toBeNull();
+  });
+
+  it('recorta espacios perimetrales', () => {
+    expect(normalizePaymentReference('  OP-123  ')).toBe('OP-123');
+  });
+
   it('cadena vacía tras recortar -> null', () => {
-    expect(normalizePaymentReference(PaymentMethod.CASH, '   ')).toBeNull();
+    expect(normalizePaymentReference('   ')).toBeNull();
   });
 
   it('longitud exactamente 100: acepta', () => {
     const reference = 'a'.repeat(100);
-    expect(normalizePaymentReference(PaymentMethod.CASH, reference)).toBe(
-      reference,
-    );
+    expect(normalizePaymentReference(reference)).toBe(reference);
   });
 
   it('longitud 101: rechaza', () => {
-    expect(() =>
-      normalizePaymentReference(PaymentMethod.CASH, 'a'.repeat(101)),
-    ).toThrow(BadRequestException);
+    expect(() => normalizePaymentReference('a'.repeat(101))).toThrow(
+      BadRequestException,
+    );
   });
 
-  describe('métodos que exigen referencia (Documento Maestro §16)', () => {
-    it.each([
-      PaymentMethod.BANK_TRANSFER,
-      PaymentMethod.BANK_DEPOSIT,
-      PaymentMethod.CARD,
-    ])('%s sin referencia -> 400', (method) => {
-      expect(() => normalizePaymentReference(method, undefined)).toThrow(
-        BadRequestException,
-      );
-      expect(() => normalizePaymentReference(method, '   ')).toThrow(
-        BadRequestException,
-      );
-    });
-
-    it.each([
-      PaymentMethod.BANK_TRANSFER,
-      PaymentMethod.BANK_DEPOSIT,
-      PaymentMethod.CARD,
-    ])('%s con referencia no vacía: acepta', (method) => {
-      expect(normalizePaymentReference(method, 'OP-000123')).toBe('OP-000123');
-    });
+  it('valor no string (ni undefined/null): rechaza', () => {
+    expect(() => normalizePaymentReference(123 as unknown as string)).toThrow(
+      BadRequestException,
+    );
   });
 
-  describe('métodos que admiten referencia opcional', () => {
-    it.each([
-      PaymentMethod.CASH,
-      PaymentMethod.DIGITAL_WALLET,
-      PaymentMethod.OTHER,
-    ])('%s sin referencia: acepta (null)', (method) => {
-      expect(normalizePaymentReference(method, undefined)).toBeNull();
-    });
-
-    it.each([
-      PaymentMethod.CASH,
-      PaymentMethod.DIGITAL_WALLET,
-      PaymentMethod.OTHER,
-    ])('%s con referencia: acepta el valor', (method) => {
-      expect(normalizePaymentReference(method, 'REF-1')).toBe('REF-1');
-    });
+  it('nunca exige la referencia por sí sola, sin importar el valor recortado', () => {
+    // A diferencia del Bloque B, esta función ya no conoce ningún método: la
+    // exigencia se evalúa por separado con assertReferenceRequiredForMethod(),
+    // una vez resuelto el PaymentMethod dinámico dentro de PaymentEngine.
+    expect(() => normalizePaymentReference(undefined)).not.toThrow();
+    expect(() => normalizePaymentReference(null)).not.toThrow();
   });
 });
 
-describe('assertReferenceRequiredForMethod', () => {
-  it('BANK_TRANSFER con referencia null: lanza', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.BANK_TRANSFER, null),
-    ).toThrow(BadRequestException);
+describe('assertReferenceRequiredForMethod (Ticket C, Bloque C3: booleano dinámico, no membresía de enum)', () => {
+  it('requiresReference=true con referencia null: lanza', () => {
+    expect(() => assertReferenceRequiredForMethod(true, null)).toThrow(
+      BadRequestException,
+    );
   });
 
-  it('BANK_DEPOSIT con referencia presente: no lanza', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.BANK_DEPOSIT, 'X'),
-    ).not.toThrow();
+  it('requiresReference=true con referencia presente: no lanza', () => {
+    expect(() => assertReferenceRequiredForMethod(true, 'X')).not.toThrow();
   });
 
-  it('CARD con referencia null: lanza', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.CARD, null),
-    ).toThrow(BadRequestException);
+  it('requiresReference=false con referencia null: no lanza', () => {
+    expect(() => assertReferenceRequiredForMethod(false, null)).not.toThrow();
   });
 
-  it('CASH con referencia null: no lanza', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.CASH, null),
-    ).not.toThrow();
-  });
-
-  it('DIGITAL_WALLET con referencia null: no lanza (nunca se inventa una exigencia adicional)', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.DIGITAL_WALLET, null),
-    ).not.toThrow();
-  });
-
-  it('OTHER con referencia null: no lanza', () => {
-    expect(() =>
-      assertReferenceRequiredForMethod(PaymentMethod.OTHER, null),
-    ).not.toThrow();
+  it('requiresReference=false con referencia presente: no lanza (nunca rechaza una referencia opcional ya provista)', () => {
+    expect(() => assertReferenceRequiredForMethod(false, 'X')).not.toThrow();
   });
 });
 

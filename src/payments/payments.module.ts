@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module';
+import { PaymentMethodsModule } from '../payment-methods/payment-methods.module';
 import { AccountsReceivableController } from './accounts-receivable.controller';
 import { AccountsReceivableService } from './accounts-receivable.service';
 import { PaymentEngine } from './payment.engine';
@@ -25,9 +26,17 @@ import { PaymentsService } from './payments.service';
  * PaymentsModule ni SalesModule), así que no hay ciclo. AccountingEngine
  * NUNCA se registra manualmente aquí en `providers`: AccountingModule es su
  * único propietario.
+ *
+ * Ticket C, Bloque C3: importa PaymentMethodsModule para que PaymentEngine
+ * pueda inyectar PaymentMethodReader y resolver el método dinámico dentro
+ * de su propia transacción (register()). PaymentMethodsModule también es
+ * hoja (no importa PaymentsModule ni SalesModule) — mismo criterio que
+ * AccountingModule, sin ciclo. PaymentMethodReader NUNCA se registra
+ * manualmente aquí en `providers`: PaymentMethodsModule es su único
+ * propietario, solo se reutiliza vía `exports`.
  */
 @Module({
-  imports: [AccountingModule],
+  imports: [AccountingModule, PaymentMethodsModule],
   controllers: [PaymentsController, AccountsReceivableController],
   providers: [PaymentEngine, PaymentsService, AccountsReceivableService],
   exports: [PaymentEngine],

@@ -65,18 +65,21 @@ export class PaymentsController {
   @ApiOperation({
     summary: 'Registrar un pago posterior sobre una venta existente',
     description:
-      'Pago completo o parcial (Documento Maestro §16). El saldo pendiente se calcula en vivo bajo bloqueo de la venta: el monto nunca puede superar el saldo disponible en ese instante. La elegibilidad depende únicamente de que la venta esté ACTIVE — el estado actual del cliente (incluso INACTIVE o BLOCKED) nunca impide cobrar una deuda existente. El resumen de pago de la venta (paidAmount/balanceDue/paymentStatus) se recalcula desde la suma de todos los pagos ACTIVE, nunca con aritmética incremental.',
+      'Pago completo o parcial (Documento Maestro §16). El saldo pendiente se calcula en vivo bajo bloqueo de la venta: el monto nunca puede superar el saldo disponible en ese instante. La elegibilidad depende únicamente de que la venta esté ACTIVE — el estado actual del cliente (incluso INACTIVE o BLOCKED) nunca impide cobrar una deuda existente. El resumen de pago de la venta (paidAmount/balanceDue/paymentStatus) se recalcula desde la suma de todos los pagos ACTIVE, nunca con aritmética incremental. `method` (Ticket C, Bloque C3) es un código de método de pago dinámico (ver GET /payment-methods), resuelto dentro de la misma transacción que crea el pago: debe existir y estar activo.',
   })
   @ApiParam({ name: 'saleId', format: 'uuid' })
   @ApiCreatedResponse({ type: PaymentMutationResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Monto no positivo o mal formado, o falta la referencia obligatoria para BANK_TRANSFER/BANK_DEPOSIT/CARD.',
+      'Monto no positivo o mal formado, method con formato inválido, o falta la referencia obligatoria para el método resuelto (requiresReference=true, ver GET /payment-methods).',
   })
-  @ApiNotFoundResponse({ description: 'La venta no existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'La venta no existe, o method no corresponde a ningún método de pago existente.',
+  })
   @ApiConflictResponse({
     description:
-      'La venta está anulada, o el monto supera el saldo pendiente vigente (incluido el caso de saldo ya en 0).',
+      'La venta está anulada, el monto supera el saldo pendiente vigente (incluido el caso de saldo ya en 0), o method corresponde a un método de pago actualmente inactivo.',
   })
   @Roles(...REGISTER_ROLES)
   @Post('sales/:saleId/payments')

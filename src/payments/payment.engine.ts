@@ -12,6 +12,7 @@ import {
 import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { PaymentMethodReader } from '../payment-methods/payment-method-reader.service';
 import {
   deriveSalePaymentSummary,
   SalePaymentSummary,
@@ -20,6 +21,7 @@ import { PAYMENT_SAFE_SELECT, toSafePayment } from './mappers/payment.mapper';
 import {
   assertReferenceRequiredForMethod,
   assertValidPaymentAmountShape,
+  normalizePaymentMethodCode,
 } from './payment-calculator';
 import {
   CancelAllActivePaymentsCommand,
@@ -49,12 +51,32 @@ interface LockedPaymentRow {
  * reconocimiento/reversión contable de cada cobro — AccountingEngine sigue
  * siendo el único escritor de AccountingEntry/AccountingEntryLine y de su
  * auditoría ACCOUNTING_ENTRY_*; PaymentEngine nunca las escribe él mismo.
+ *
+ * Ticket C, Bloque C3 (CONTRACT): register() es el ÚNICO punto del dominio
+ * que resuelve un método de pago dinámico — SIEMPRE contra `tx` (la misma
+ * transacción que crea el Payment), nunca contra una conexión Prisma
+ * global independiente (PaymentMethodReader recibe `tx` explícitamente en
+ * cada llamada). Esto es lo que hace posible que "resolver -> validar ->
+ * crear Payment -> postear contabilidad -> auditar" ocurra como una única
+ * unidad atómica: si el método se desactivara entre la resolución y el
+ * commit, no hay ventana — todo corre bajo el mismo snapshot transaccional
+ * de PostgreSQL (READ COMMITTED, el nivel por defecto de Prisma: la fila
+ * ya se lee tal cual está en el instante de la consulta dentro de la
+ * transacción en curso, sin necesitar un lock de fila explícito ni mucho
+ * menos un lock de tabla completa — no existe otro código en todo el
+ * dominio que escriba `payment_methods` fuera de PaymentMethodsService,
+ * que corre sus propias mutaciones en su propia transacción corta; una
+ * carrera real entre "ADMIN desactiva" y "operador cobra" se resuelve
+ * simplemente por cuál transacción confirma primero, mismo criterio de
+ * tolerancia que el resto del dominio ya aplica a Product/Category
+ * mientras se confirma una Venta).
  */
 @Injectable()
 export class PaymentEngine {
   constructor(
     private readonly auditService: AuditService,
     private readonly accountingEngine: AccountingEngine,
+    private readonly paymentMethodReader: PaymentMethodReader,
   ) {}
 
   /**
@@ -66,25 +88,59 @@ export class PaymentEngine {
    * Payment.paidAt como para AccountingEntry.postedAt del asiento de cobro
    * (plan final aprobado, §23/§28): nunca dos instantes independientes
    * para el mismo hecho financiero.
+   *
+   * Resolución de método (Ticket C, Bloque C3): `command.method` es el
+   * código crudo tal como llegó del llamador (ya sea el `method` HTTP del
+   * DTO, o el mismo valor propagado desde SalesService). Se normaliza
+   * (trim+mayúsculas) y se resuelve contra `payment_methods` DENTRO de
+   * esta misma transacción — código inexistente -> 404; código existente
+   * pero inactivo -> 409; nunca se especial-casa un código legacy por
+   * existir en el antiguo enum: la única regla es `active`.
    */
   async register(
     tx: Prisma.TransactionClient,
     command: RegisterPaymentCommand,
   ): Promise<SafePayment> {
     assertValidPaymentAmountShape(command.amount);
-    assertReferenceRequiredForMethod(command.method, command.reference);
+
+    const normalizedCode = normalizePaymentMethodCode(command.method);
+    const method = await this.paymentMethodReader.findByCode(
+      normalizedCode,
+      tx,
+    );
+    if (method === null) {
+      throw new NotFoundException(
+        `No existe un método de pago con code "${normalizedCode}"`,
+      );
+    }
+    if (!method.active) {
+      throw new ConflictException(
+        `El método de pago "${normalizedCode}" está inactivo`,
+      );
+    }
+    assertReferenceRequiredForMethod(
+      method.requiresReference,
+      command.reference,
+    );
 
     const paidAt = new Date();
 
     const created = await tx.payment.create({
       data: {
         saleId: command.saleId,
-        method: command.method,
         amount: command.amount,
         reference: command.reference,
         status: PaymentStatus.ACTIVE,
         paidAt,
         createdByUserId: command.actorUserId,
+        // Snapshot histórico (Ticket C, Bloque C3): congelado en el
+        // instante de creación, nunca vuelto a leer/recalcular después.
+        // Un ADMIN editando name/affectsCashDrawer del método dinámico
+        // más tarde jamás reescribe estas cuatro columnas.
+        paymentMethodId: method.id,
+        paymentMethodCode: method.code,
+        paymentMethodName: method.name,
+        paymentMethodAffectsCashDrawer: method.affectsCashDrawer,
       },
       select: PAYMENT_SAFE_SELECT,
     });
@@ -92,7 +148,11 @@ export class PaymentEngine {
     await this.accountingEngine.postPaymentCollection(tx, {
       paymentId: created.id,
       saleNumber: command.saleNumber,
-      method: command.method,
+      // accountingDestination YA resuelto aquí (Bloque C3): AccountingEngine
+      // nunca vuelve a consultar PaymentMethod por sí mismo. Nunca se
+      // snapshotea en Payment (§15 del plan aprobado): ese hecho contable
+      // ya queda inmutable, por separado, en AccountingEntryLine.
+      accountingDestination: method.accountingDestination,
       amount: command.amount,
       postedAt: paidAt,
       actorUserId: command.actorUserId,
@@ -109,7 +169,7 @@ export class PaymentEngine {
       metadata: {
         saleId: command.saleId,
         saleNumber: command.saleNumber,
-        method: command.method,
+        method: method.code,
       },
       ipAddress: command.ipAddress,
       client: tx,
@@ -168,6 +228,12 @@ export class PaymentEngine {
    * único instante `cancelledAt` se genera y se reutiliza tanto para
    * Payment.cancelledAt como para AccountingEntry.postedAt del asiento de
    * reversión (plan final aprobado, §22/§29).
+   *
+   * Ticket C, Bloque C3: la anulación NUNCA vuelve a resolver el
+   * PaymentMethod actual ni evalúa su estado `active` — revierte el asiento
+   * contable ORIGINAL ya posteado en su momento (resuelto entonces, nunca
+   * releído), exactamente igual que antes del Bloque C3. Un método
+   * desactivado después de cobrar sigue permitiendo anular ese cobro.
    */
   async cancel(
     tx: Prisma.TransactionClient,
@@ -242,7 +308,8 @@ export class PaymentEngine {
    * el instante ÚNICO de la operación de anulación de venta completa (plan
    * final aprobado, §30/§37): se reutiliza para Payment.cancelledAt Y para
    * el postedAt de cada reversión contable de pago — nunca un instante
-   * independiente por pago.
+   * independiente por pago. Mismo criterio del Bloque C3 que cancel(): no
+   * vuelve a resolver el PaymentMethod actual.
    */
   async cancelAllActiveForSale(
     tx: Prisma.TransactionClient,

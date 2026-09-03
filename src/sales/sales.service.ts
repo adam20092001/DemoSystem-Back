@@ -1169,10 +1169,10 @@ export class SalesService {
       return undefined;
     }
     const amount = parsePaymentAmount(payment.amount);
-    const reference = normalizePaymentReference(
-      payment.method,
-      payment.reference,
-    );
+    // La exigencia de referencia ya no se evalúa aquí (Ticket C, Bloque
+    // C3): depende del PaymentMethod dinámico, resuelto dentro de
+    // PaymentEngine.register() en la misma transacción que crea el pago.
+    const reference = normalizePaymentReference(payment.reference);
     return { method: payment.method, amount, reference };
   }
 

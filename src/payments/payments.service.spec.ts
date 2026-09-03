@@ -3,13 +3,7 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  PaymentMethod,
-  PaymentStatus,
-  Prisma,
-  RoleName,
-  SaleStatus,
-} from '@prisma/client';
+import { PaymentStatus, Prisma, RoleName, SaleStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { PaymentEngine } from './payment.engine';
 import { PaymentsService } from './payments.service';
@@ -37,7 +31,8 @@ function makePaymentRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: PAYMENT_ID,
     saleId: SALE_ID,
-    method: PaymentMethod.CASH,
+    paymentMethodCode: 'CASH',
+    paymentMethodName: 'Efectivo',
     amount: new Prisma.Decimal('40.00'),
     reference: null,
     status: PaymentStatus.ACTIVE,
@@ -122,7 +117,7 @@ describe('PaymentsService', () => {
 
   const validRegisterInput: RegisterPaymentInput = {
     saleId: SALE_ID,
-    method: PaymentMethod.CASH,
+    method: 'CASH',
     amount: '40.00',
     actorUserId: ACTOR_ID,
     ipAddress: '10.0.0.1',
@@ -218,7 +213,7 @@ describe('PaymentsService', () => {
         expect.objectContaining({
           saleId: SALE_ID,
           saleNumber: 'NV-000001',
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           actorUserId: ACTOR_ID,
         }),
       );
@@ -368,10 +363,10 @@ describe('PaymentsService', () => {
       expect(prisma.payment.findMany).not.toHaveBeenCalled();
     });
 
-    it('filtros method/status/createdByUserId se incluyen en el where', async () => {
+    it('filtros method/status/createdByUserId se incluyen en el where (method filtra el snapshot paymentMethodCode)', async () => {
       await service.list(
         {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           status: PaymentStatus.ACTIVE,
           createdByUserId: ACTOR_ID,
         },
@@ -382,10 +377,20 @@ describe('PaymentsService', () => {
       };
       expect(call.where.AND).toEqual(
         expect.arrayContaining([
-          { method: PaymentMethod.CASH },
+          { paymentMethodCode: 'CASH' },
           { status: PaymentStatus.ACTIVE },
           { createdByUserId: ACTOR_ID },
         ]),
+      );
+    });
+
+    it('method se normaliza a mayúsculas antes de filtrar', async () => {
+      await service.list({ method: 'cash' }, RoleName.ADMIN);
+      const call = prisma.payment.findMany.mock.calls[0][0] as {
+        where: { AND: Record<string, unknown>[] };
+      };
+      expect(call.where.AND).toEqual(
+        expect.arrayContaining([{ paymentMethodCode: 'CASH' }]),
       );
     });
 
@@ -421,7 +426,7 @@ describe('PaymentsService', () => {
     });
 
     it('findMany y count usan el mismo where', async () => {
-      await service.list({ method: PaymentMethod.CARD }, RoleName.ADMIN);
+      await service.list({ method: 'CARD' }, RoleName.ADMIN);
       const findManyWhere = (
         prisma.payment.findMany.mock.calls[0][0] as { where: unknown }
       ).where;

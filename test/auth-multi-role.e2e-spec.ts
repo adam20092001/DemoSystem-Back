@@ -382,7 +382,7 @@ describe('Auth multi-rol — switch-role (KAN-18, Bloque B)', () => {
     // personalizado propio de esta suite, por su ID exacto — nunca uno de
     // los 9 baseline, nunca deleteMany({}) sobre payment_methods.
     if (paymentMethodOwnedId !== undefined) {
-      await prisma.paymentMethodDefinition.delete({
+      await prisma.paymentMethod.delete({
         where: { id: paymentMethodOwnedId },
       });
     }

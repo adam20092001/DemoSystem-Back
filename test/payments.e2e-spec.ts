@@ -7,7 +7,7 @@ import {
   CustomerStatus,
   CustomerType,
   PaymentCancellationSource,
-  PaymentMethod,
+  PaymentMethodAccountingDestination,
   PaymentStatus,
   Prisma,
   PrismaClient,
@@ -57,6 +57,7 @@ const SAFE_PAYMENT_KEYS = [
   'id',
   'saleId',
   'method',
+  'methodName',
   'amount',
   'reference',
   'status',
@@ -82,7 +83,8 @@ interface SafePaymentUserBody {
 interface SafePaymentBody {
   id: string;
   saleId: string;
-  method: PaymentMethod;
+  method: string;
+  methodName: string;
   amount: string;
   reference: string | null;
   status: PaymentStatus;
@@ -161,6 +163,10 @@ describe('Payments (e2e)', () => {
 
   const ownedSaleIds: string[] = [];
   const ownedCustomerIds: string[] = [];
+  // Ticket C, Bloque C3: custom PaymentMethod creados por este spec para
+  // probar el cutover dinámico — eliminados por su ID exacto en afterAll,
+  // nunca se toca ninguno de los 9 baseline.
+  const ownedPaymentMethodIds: string[] = [];
 
   const RUN_ID = Date.now();
   let counter = 0;
@@ -374,6 +380,21 @@ describe('Payments (e2e)', () => {
         await prisma.sale.deleteMany({ where: { id: { in: ownedSaleIds } } });
       }
 
+      // Ticket C, Bloque C3: custom PaymentMethod propios de este spec.
+      // Toda Payment que los referenciaba ya se eliminó arriba
+      // (PaymentMethod.id <- Payment.paymentMethodId es onDelete: Restrict).
+      if (ownedPaymentMethodIds.length > 0) {
+        await prisma.auditLog.deleteMany({
+          where: {
+            entityType: 'PaymentMethod',
+            entityId: { in: ownedPaymentMethodIds },
+          },
+        });
+        await prisma.paymentMethod.deleteMany({
+          where: { id: { in: ownedPaymentMethodIds } },
+        });
+      }
+
       if (ownedCustomerIds.length > 0) {
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Customer', entityId: { in: ownedCustomerIds } },
@@ -505,7 +526,8 @@ describe('Payments (e2e)', () => {
 
   interface InsertPaymentOverrides {
     saleId: string;
-    method?: PaymentMethod;
+    /** Código de un método de pago dinámico ya existente (Ticket C, Bloque C3). Default 'CASH'. */
+    method?: string;
     amount: string;
     reference?: string | null;
     status?: PaymentStatus;
@@ -517,12 +539,38 @@ describe('Payments (e2e)', () => {
     cancellationSource?: PaymentCancellationSource | null;
   }
 
+  /**
+   * Resuelve un método de pago dinámico por code (Ticket C, Bloque C3) para
+   * construir el snapshot histórico requerido por Payment. Nunca inventa un
+   * método: si `code` no existe entre los 9 baseline (o uno creado por otra
+   * suite), falla ruidosamente — mismo criterio que el resto del dominio.
+   */
+  async function resolvePaymentMethodSnapshot(code: string): Promise<{
+    paymentMethodId: string;
+    paymentMethodCode: string;
+    paymentMethodName: string;
+    paymentMethodAffectsCashDrawer: boolean;
+  }> {
+    const method = await prisma.paymentMethod.findUniqueOrThrow({
+      where: { code },
+    });
+    return {
+      paymentMethodId: method.id,
+      paymentMethodCode: method.code,
+      paymentMethodName: method.name,
+      paymentMethodAffectsCashDrawer: method.affectsCashDrawer,
+    };
+  }
+
   /** Inserción directa de un Payment ya en el estado deseado, para fixtures que el flujo HTTP no puede producir por sí solo (p. ej. un pago perteneciente a OTRA venta). */
   async function insertPayment(overrides: InsertPaymentOverrides) {
+    const snapshot = await resolvePaymentMethodSnapshot(
+      overrides.method ?? 'CASH',
+    );
     return prisma.payment.create({
       data: {
         saleId: overrides.saleId,
-        method: overrides.method ?? PaymentMethod.CASH,
+        ...snapshot,
         amount: new Prisma.Decimal(overrides.amount),
         reference: overrides.reference ?? null,
         status: overrides.status ?? PaymentStatus.ACTIVE,
@@ -609,7 +657,8 @@ describe('Payments (e2e)', () => {
 
   interface RawPaymentOverrides {
     saleId: string;
-    method?: PaymentMethod;
+    /** Código de un método de pago dinámico ya existente (Ticket C, Bloque C3). Default 'CASH'. */
+    method?: string;
     amount?: string;
     reference?: string | null;
     status?: PaymentStatus;
@@ -619,12 +668,18 @@ describe('Payments (e2e)', () => {
     cancellationSource?: PaymentCancellationSource | null;
   }
 
-  /** INSERT crudo (bypass total de PaymentEngine) para verificar que PostgreSQL rechaza la fila mediante el CHECK indicado. */
+  /**
+   * INSERT crudo (bypass total de PaymentEngine) para verificar que
+   * PostgreSQL rechaza la fila mediante el CHECK indicado. Puebla las 4
+   * columnas de snapshot/FK de método (Ticket C, Bloque C3: NOT NULL desde
+   * la migración de CONTRACT) resolviendo `method` contra `payment_methods`
+   * — nunca inserta un id/code/name inventado.
+   */
   async function rawInsertPayment(
     overrides: RawPaymentOverrides,
   ): Promise<string> {
     const o = {
-      method: PaymentMethod.CASH,
+      method: 'CASH',
       amount: '10.00',
       reference: null as string | null,
       status: PaymentStatus.ACTIVE,
@@ -634,13 +689,18 @@ describe('Payments (e2e)', () => {
       cancellationSource: null as PaymentCancellationSource | null,
       ...overrides,
     };
+    const snapshot = await resolvePaymentMethodSnapshot(o.method);
     const rows = await prisma.$queryRaw<{ id: string }[]>`
       INSERT INTO payments
-        (id, sale_id, method, amount, reference, status, paid_at,
-         created_by_user_id, cancelled_at, cancellation_reason,
-         cancelled_by_user_id, cancellation_source, created_at, updated_at)
+        (id, sale_id, payment_method_id, payment_method_code,
+         payment_method_name, payment_method_affects_cash_drawer, amount,
+         reference, status, paid_at, created_by_user_id, cancelled_at,
+         cancellation_reason, cancelled_by_user_id, cancellation_source,
+         created_at, updated_at)
       VALUES
-        (gen_random_uuid(), ${o.saleId}::uuid, ${o.method}::"PaymentMethod",
+        (gen_random_uuid(), ${o.saleId}::uuid,
+         ${snapshot.paymentMethodId}::uuid, ${snapshot.paymentMethodCode},
+         ${snapshot.paymentMethodName}, ${snapshot.paymentMethodAffectsCashDrawer},
          ${o.amount}::numeric, ${o.reference}, ${o.status}::"PaymentStatus",
          now(), ${adminId}::uuid, ${o.cancelledAt}::timestamp,
          ${o.cancellationReason}, ${o.cancelledByUserId}::uuid,
@@ -936,58 +996,57 @@ describe('Payments (e2e)', () => {
   // Método de pago y referencia
   // ==================================================================
   describe('método de pago y referencia', () => {
-    it.each([
-      PaymentMethod.BANK_TRANSFER,
-      PaymentMethod.BANK_DEPOSIT,
-      PaymentMethod.CARD,
-    ])('%s sin referencia (ausente) → 400', async (method) => {
-      const sale = await createFixtureSale({ total: '100.00' });
-      const response = await registerPayment(adminCookie, sale.id, {
-        method,
-        amount: '10.00',
-      });
-      expect(response.status).toBe(400);
-    });
+    // CARD/TRANSFER/YAPE/PLIN: baseline dinámico activo con
+    // requiresReference=true (Ticket C, Bloque C1 seed). BANK_TRANSFER y
+    // BANK_DEPOSIT ya no sirven para este propósito: son baseline legacy
+    // INACTIVO desde C1/C2 (solo existen para preservar historial), así que
+    // registrar un Payment NUEVO contra ellos ahora es 409, no 400/201 — ver
+    // el describe "resolución dinámica de método" para esa aserción.
+    it.each(['CARD', 'TRANSFER', 'YAPE', 'PLIN'])(
+      '%s sin referencia (ausente) → 400',
+      async (method) => {
+        const sale = await createFixtureSale({ total: '100.00' });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method,
+          amount: '10.00',
+        });
+        expect(response.status).toBe(400);
+      },
+    );
 
-    it.each([
-      PaymentMethod.BANK_TRANSFER,
-      PaymentMethod.BANK_DEPOSIT,
-      PaymentMethod.CARD,
-    ])('%s con referencia solo espacios → 400', async (method) => {
-      const sale = await createFixtureSale({ total: '100.00' });
-      const response = await registerPayment(adminCookie, sale.id, {
-        method,
-        amount: '10.00',
-        reference: '    ',
-      });
-      expect(response.status).toBe(400);
-    });
+    it.each(['CARD', 'TRANSFER', 'YAPE', 'PLIN'])(
+      '%s con referencia solo espacios → 400',
+      async (method) => {
+        const sale = await createFixtureSale({ total: '100.00' });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method,
+          amount: '10.00',
+          reference: '    ',
+        });
+        expect(response.status).toBe(400);
+      },
+    );
 
-    it.each([
-      PaymentMethod.BANK_TRANSFER,
-      PaymentMethod.BANK_DEPOSIT,
-      PaymentMethod.CARD,
-    ])('%s con referencia real → 201', async (method) => {
-      const sale = await createFixtureSale({ total: '100.00' });
-      const response = await registerPayment(adminCookie, sale.id, {
-        method,
-        amount: '10.00',
-        reference: 'OP-000123',
-      });
-      expect(response.status).toBe(201);
-      expect((response.body as PaymentMutationBody).payment.reference).toBe(
-        'OP-000123',
-      );
-    });
+    it.each(['CARD', 'TRANSFER', 'YAPE', 'PLIN'])(
+      '%s con referencia real → 201',
+      async (method) => {
+        const sale = await createFixtureSale({ total: '100.00' });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method,
+          amount: '10.00',
+          reference: 'OP-000123',
+        });
+        expect(response.status).toBe(201);
+        expect((response.body as PaymentMutationBody).payment.reference).toBe(
+          'OP-000123',
+        );
+      },
+    );
 
-    it.each([
-      PaymentMethod.CASH,
-      PaymentMethod.DIGITAL_WALLET,
-      PaymentMethod.OTHER,
-    ])('%s sin referencia → 201, reference persiste null', async (method) => {
+    it('CASH sin referencia → 201, reference persiste null (requiresReference=false)', async () => {
       const sale = await createFixtureSale({ total: '100.00' });
       const response = await registerPayment(adminCookie, sale.id, {
-        method,
+        method: 'CASH',
         amount: '10.00',
       });
       expect(response.status).toBe(201);
@@ -1041,6 +1100,409 @@ describe('Payments (e2e)', () => {
         reference: ref101,
       });
       expect(bad.status).toBe(400);
+    });
+  });
+
+  // ==================================================================
+  // Ticket C, Bloque C3 — cutover a métodos de pago dinámicos
+  // ==================================================================
+  describe('Ticket C, Bloque C3 — cutover a métodos de pago dinámicos', () => {
+    async function createCustomMethod(overrides: {
+      code: string;
+      name: string;
+      requiresReference: boolean;
+      affectsCashDrawer: boolean;
+      accountingDestination: PaymentMethodAccountingDestination;
+    }): Promise<{
+      id: string;
+      code: string;
+      name: string;
+      active: boolean;
+    }> {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/payment-methods')
+        .set('Cookie', adminCookie)
+        .send(overrides);
+      if (response.status !== 201) {
+        throw new Error(
+          `No se pudo crear el PaymentMethod fixture: ${JSON.stringify(response.body)}`,
+        );
+      }
+      const body = response.body as {
+        id: string;
+        code: string;
+        name: string;
+        active: boolean;
+      };
+      ownedPaymentMethodIds.push(body.id);
+      return body;
+    }
+
+    async function patchMethod(
+      id: string,
+      body: Record<string, unknown>,
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .patch(`/api/v1/payment-methods/${id}`)
+        .set('Cookie', adminCookie)
+        .send(body);
+    }
+
+    async function fetchOriginalPaymentEntry(paymentId: string) {
+      return prisma.accountingEntry.findFirstOrThrow({
+        where: {
+          sourceType: AccountingSourceType.PAYMENT,
+          sourceId: paymentId,
+          eventType: AccountingEventType.ORIGINAL,
+        },
+        include: { lines: { include: { account: true } } },
+      });
+    }
+
+    // ----------------------------------------------------------------
+    // A — resolución dinámica de método (código inexistente / inactivo)
+    // ----------------------------------------------------------------
+    describe('resolución dinámica de método', () => {
+      it('code inexistente -> 404, sin crear Payment', async () => {
+        const sale = await createFixtureSale({ total: '50.00' });
+        const before = await prisma.payment.count({
+          where: { saleId: sale.id },
+        });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method: 'NO_EXISTE_ESTE_CODE',
+          amount: '10.00',
+        });
+        expect(response.status).toBe(404);
+        const after = await prisma.payment.count({
+          where: { saleId: sale.id },
+        });
+        expect(after).toBe(before);
+      });
+
+      it('code existente pero INACTIVO (baseline legacy BANK_TRANSFER) -> 409, sin crear Payment', async () => {
+        const sale = await createFixtureSale({ total: '50.00' });
+        const before = await prisma.payment.count({
+          where: { saleId: sale.id },
+        });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method: 'BANK_TRANSFER',
+          amount: '10.00',
+          reference: 'OP-INACTIVE-1',
+        });
+        expect(response.status).toBe(409);
+        const after = await prisma.payment.count({
+          where: { saleId: sale.id },
+        });
+        expect(after).toBe(before);
+      });
+
+      it('code normalizado (minúsculas + espacios) resuelve igual que el code canónico', async () => {
+        const sale = await createFixtureSale({ total: '50.00' });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method: '  cash  ',
+          amount: '10.00',
+        });
+        expect(response.status).toBe(201);
+        expect((response.body as PaymentMutationBody).payment.method).toBe(
+          'CASH',
+        );
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // B — custom methods usables de inmediato
+    // ----------------------------------------------------------------
+    describe('custom methods creados por ADMIN son usables de inmediato', () => {
+      it('CUSTOM_CASH (accountingDestination=CASH, requiresReference=false) recién creado -> 201 de inmediato', async () => {
+        const custom = await createCustomMethod({
+          code: `CUSTOM_CASH_${nextSuffix()}`,
+          name: 'Efectivo personalizado',
+          requiresReference: false,
+          affectsCashDrawer: true,
+          accountingDestination: PaymentMethodAccountingDestination.CASH,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const response = await registerPayment(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        expect(response.status).toBe(201);
+        const body = response.body as PaymentMutationBody;
+        expect(body.payment.method).toBe(custom.code);
+        expect(body.payment.methodName).toBe('Efectivo personalizado');
+      });
+
+      it('CUSTOM_BANK (accountingDestination=BANK, requiresReference=true) recién creado -> 201 de inmediato (con referencia)', async () => {
+        const custom = await createCustomMethod({
+          code: `CUSTOM_BANK_${nextSuffix()}`,
+          name: 'Banco personalizado',
+          requiresReference: true,
+          affectsCashDrawer: false,
+          accountingDestination: PaymentMethodAccountingDestination.BANK,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const withoutRef = await registerPayment(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        expect(withoutRef.status).toBe(400);
+
+        const withRef = await registerPayment(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+          reference: 'OP-CUSTOM-BANK-1',
+        });
+        expect(withRef.status).toBe(201);
+        expect((withRef.body as PaymentMutationBody).payment.method).toBe(
+          custom.code,
+        );
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // C — requiresReference dinámico: cambia en caliente, sin redeploy
+    // ----------------------------------------------------------------
+    describe('requiresReference dinámico cambia el comportamiento en caliente', () => {
+      it('true -> false: pagos ANTERIORES sin cambios; pagos NUEVOS ya no exigen referencia', async () => {
+        const custom = await createCustomMethod({
+          code: `DYNREF_${nextSuffix()}`,
+          name: 'Método referencia dinámica',
+          requiresReference: true,
+          affectsCashDrawer: false,
+          accountingDestination: PaymentMethodAccountingDestination.BANK,
+        });
+
+        const saleA = await createFixtureSale({ total: '50.00' });
+        const rejected = await registerPayment(adminCookie, saleA.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        expect(rejected.status).toBe(400);
+
+        const accepted = await registerPaymentOrThrow(adminCookie, saleA.id, {
+          method: custom.code,
+          amount: '10.00',
+          reference: 'OP-DYNREF-1',
+        });
+        expect(accepted.payment.reference).toBe('OP-DYNREF-1');
+        const historicalPaymentId = accepted.payment.id;
+
+        // ADMIN relaja la exigencia de referencia.
+        const patchResponse = await patchMethod(custom.id, {
+          requiresReference: false,
+        });
+        expect(patchResponse.status).toBe(200);
+
+        const saleB = await createFixtureSale({ total: '50.00' });
+        const nowAccepted = await registerPayment(adminCookie, saleB.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        expect(nowAccepted.status).toBe(201);
+        expect(
+          (nowAccepted.body as PaymentMutationBody).payment.reference,
+        ).toBeNull();
+
+        // El Payment histórico (creado cuando requiresReference=true) no
+        // se recalcula ni se altera por el cambio posterior de la regla.
+        const historical = await prisma.payment.findUniqueOrThrow({
+          where: { id: historicalPaymentId },
+        });
+        expect(historical.reference).toBe('OP-DYNREF-1');
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // D — snapshot histórico de nombre sobrevive a un rename posterior
+    // ----------------------------------------------------------------
+    describe('snapshot histórico sobrevive a cambios posteriores del PaymentMethod', () => {
+      it('renombrar el método NO cambia el methodName ya persistido en Payments anteriores', async () => {
+        const custom = await createCustomMethod({
+          code: `TESTMETHOD_${nextSuffix()}`,
+          name: 'Nombre Original',
+          requiresReference: false,
+          affectsCashDrawer: false,
+          accountingDestination: PaymentMethodAccountingDestination.BANK,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const result = await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        expect(result.payment.methodName).toBe('Nombre Original');
+
+        const renamed = await patchMethod(custom.id, {
+          name: 'Nombre Renombrado',
+        });
+        expect(renamed.status).toBe(200);
+        expect((renamed.body as { name: string }).name).toBe(
+          'Nombre Renombrado',
+        );
+
+        // GET histórico: sigue mostrando method=code snapshot,
+        // methodName=nombre ORIGINAL, nunca el vigente.
+        const listResponse = await request(app.getHttpServer())
+          .get('/api/v1/payments')
+          .query({ method: custom.code, limit: 100 })
+          .set('Cookie', adminCookie);
+        const row = (
+          listResponse.body as { data: SafePaymentBody[] }
+        ).data.find((r) => r.id === result.payment.id);
+        expect(row).toBeDefined();
+        expect(row?.method).toBe(custom.code);
+        expect(row?.methodName).toBe('Nombre Original');
+      });
+
+      it('affectsCashDrawer snapshoteado sobrevive a un cambio posterior del PaymentMethod (nivel BD)', async () => {
+        const custom = await createCustomMethod({
+          code: `CASHDRW_${nextSuffix()}`,
+          name: 'Método con caja',
+          requiresReference: false,
+          affectsCashDrawer: true,
+          accountingDestination: PaymentMethodAccountingDestination.CASH,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const result = await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+
+        const beforeChange = await prisma.payment.findUniqueOrThrow({
+          where: { id: result.payment.id },
+        });
+        expect(beforeChange.paymentMethodAffectsCashDrawer).toBe(true);
+
+        const patchResponse = await patchMethod(custom.id, {
+          affectsCashDrawer: false,
+        });
+        expect(patchResponse.status).toBe(200);
+
+        const afterChange = await prisma.payment.findUniqueOrThrow({
+          where: { id: result.payment.id },
+        });
+        expect(afterChange.paymentMethodAffectsCashDrawer).toBe(true);
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // F — accountingDestination independiente de affectsCashDrawer
+    // ----------------------------------------------------------------
+    describe('accountingDestination gobierna la cuenta contable, independiente de affectsCashDrawer', () => {
+      it('affectsCashDrawer=false + accountingDestination=CASH -> DEBIT Caja de todos modos (no se infiere de affectsCashDrawer)', async () => {
+        const custom = await createCustomMethod({
+          code: `INDEP_${nextSuffix()}`,
+          name: 'Independiente caja/contabilidad',
+          requiresReference: false,
+          affectsCashDrawer: false,
+          accountingDestination: PaymentMethodAccountingDestination.CASH,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const result = await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+
+        const entry = await fetchOriginalPaymentEntry(result.payment.id);
+        const cashLine = entry.lines.find(
+          (l) => l.account.systemKey === AccountingSystemKey.CASH,
+        );
+        const bankLine = entry.lines.find(
+          (l) => l.account.systemKey === AccountingSystemKey.BANK,
+        );
+        expect(cashLine).toBeDefined();
+        expect(cashLine?.debitAmount.toFixed(2)).toBe('10.00');
+        expect(bankLine).toBeUndefined();
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // I — pago mixto: varios métodos distintos sobre la misma venta
+    // ----------------------------------------------------------------
+    describe('pago mixto: múltiples métodos distintos sobre la misma venta', () => {
+      it('venta 500: CASH 200 + CARD 300 -> PAID, balanceDue 0.00, dos Payment ACTIVE', async () => {
+        const sale = await createFixtureSale({ total: '500.00' });
+        await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: 'CASH',
+          amount: '200.00',
+        });
+        const second = await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: 'CARD',
+          amount: '300.00',
+          reference: 'OP-MIXED-CARD',
+        });
+        expect(second.sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(second.sale.paidAmount).toBe('500.00');
+        expect(second.sale.balanceDue).toBe('0.00');
+
+        const activePayments = await prisma.payment.findMany({
+          where: { saleId: sale.id, status: PaymentStatus.ACTIVE },
+        });
+        expect(activePayments).toHaveLength(2);
+        expect(activePayments.map((p) => p.paymentMethodCode).sort()).toEqual([
+          'CARD',
+          'CASH',
+        ]);
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // K — anulación de pago no depende del estado ACTUAL del método
+    // ----------------------------------------------------------------
+    describe('anulación no re-resuelve ni depende del PaymentMethod vigente', () => {
+      it('desactivar el método DESPUÉS de cobrar no impide anular el Payment; REVERSAL correcto', async () => {
+        const custom = await createCustomMethod({
+          code: `CANCELINDEP_${nextSuffix()}`,
+          name: 'Método a desactivar',
+          requiresReference: false,
+          affectsCashDrawer: false,
+          accountingDestination: PaymentMethodAccountingDestination.BANK,
+        });
+        const sale = await createFixtureSale({ total: '50.00' });
+        const result = await registerPaymentOrThrow(adminCookie, sale.id, {
+          method: custom.code,
+          amount: '10.00',
+        });
+        const originalEntry = await fetchOriginalPaymentEntry(
+          result.payment.id,
+        );
+
+        const deactivate = await patchMethod(custom.id, { active: false });
+        expect(deactivate.status).toBe(200);
+
+        const cancelResponse = await cancelPayment(
+          adminCookie,
+          sale.id,
+          result.payment.id,
+          { reason: 'Anulación con método ya inactivo' },
+        );
+        expect(cancelResponse.status).toBe(200);
+        const cancelled = await prisma.payment.findUniqueOrThrow({
+          where: { id: result.payment.id },
+        });
+        expect(cancelled.status).toBe(PaymentStatus.CANCELLED);
+
+        const reversal = await prisma.accountingEntry.findFirstOrThrow({
+          where: {
+            sourceType: AccountingSourceType.PAYMENT,
+            sourceId: result.payment.id,
+            eventType: AccountingEventType.REVERSAL,
+          },
+          include: { lines: true },
+        });
+        expect(reversal.reversesEntryId).toBe(originalEntry.id);
+        // El REVERSAL invierte exactamente las líneas del ORIGINAL.
+        for (const originalLine of originalEntry.lines) {
+          const mirrored = reversal.lines.find(
+            (l) => l.accountId === originalLine.accountId,
+          );
+          expect(mirrored?.debitAmount.toFixed(2)).toBe(
+            originalLine.creditAmount.toFixed(2),
+          );
+          expect(mirrored?.creditAmount.toFixed(2)).toBe(
+            originalLine.debitAmount.toFixed(2),
+          );
+        }
+      });
     });
   });
 
@@ -1209,7 +1671,7 @@ describe('Payments (e2e)', () => {
     it('exactamente 1 auditoría, module PAYMENTS, entityType Payment; whitelist exacta {saleId, saleNumber, method}', async () => {
       const sale = await createFixtureSale({ total: '25.00' });
       const result = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: 'BANK_TRANSFER',
+        method: 'TRANSFER',
         amount: '25.00',
         reference: 'OP-AUD-1',
       });
@@ -1229,7 +1691,7 @@ describe('Payments (e2e)', () => {
       );
       expect(metadata.saleId).toBe(sale.id);
       expect(metadata.saleNumber).toBe(sale.number);
-      expect(metadata.method).toBe('BANK_TRANSFER');
+      expect(metadata.method).toBe('TRANSFER');
       expect(metadata).not.toHaveProperty('amount');
       expect(metadata).not.toHaveProperty('reference');
       expect(metadata).not.toHaveProperty('customerName');
@@ -1820,7 +2282,7 @@ describe('Payments (e2e)', () => {
         reference: 'OP-CARD-1',
       });
       const transfer = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: 'BANK_TRANSFER',
+        method: 'TRANSFER',
         amount: '10.00',
         reference: 'OP-BT-1',
       });
@@ -1828,11 +2290,7 @@ describe('Payments (e2e)', () => {
       for (const [method, expectedId, unexpectedIds] of [
         ['CASH', cash.payment.id, [card.payment.id, transfer.payment.id]],
         ['CARD', card.payment.id, [cash.payment.id, transfer.payment.id]],
-        [
-          'BANK_TRANSFER',
-          transfer.payment.id,
-          [cash.payment.id, card.payment.id],
-        ],
+        ['TRANSFER', transfer.payment.id, [cash.payment.id, card.payment.id]],
       ] as const) {
         const response = await request(app.getHttpServer())
           .get('/api/v1/payments')
@@ -2044,33 +2502,26 @@ describe('Payments (e2e)', () => {
         () =>
           rawInsertPayment({
             saleId: checkSale.id,
-            method: PaymentMethod.CASH,
+            method: 'CASH',
             reference: '   ',
           }),
         '23514',
       );
     });
 
-    it('payments_reference_required_by_method: BANK_TRANSFER/BANK_DEPOSIT/CARD sin referencia → 23514', async () => {
-      for (const method of [
-        PaymentMethod.BANK_TRANSFER,
-        PaymentMethod.BANK_DEPOSIT,
-        PaymentMethod.CARD,
-      ]) {
-        await expectPgRejection(
-          () =>
-            rawInsertPayment({ saleId: checkSale.id, method, reference: null }),
-          '23514',
-        );
+    it('payments_reference_required_by_method YA NO EXISTE (Ticket C, Bloque C3): un INSERT crudo sin referencia es válido para CUALQUIER método, incluidos los legacy que antes lo exigían — la regla es ahora dinámica (PaymentMethod.requiresReference) y se aplica exclusivamente en PaymentEngine, nunca como CHECK de una sola tabla', async () => {
+      for (const method of ['BANK_TRANSFER', 'BANK_DEPOSIT', 'CARD']) {
+        const id = await rawInsertPayment({
+          saleId: checkSale.id,
+          method,
+          reference: null,
+        });
+        await prisma.payment.delete({ where: { id } });
       }
     });
 
-    it('payments_reference_required_by_method: CASH/DIGITAL_WALLET/OTHER sin referencia → válido', async () => {
-      for (const method of [
-        PaymentMethod.CASH,
-        PaymentMethod.DIGITAL_WALLET,
-        PaymentMethod.OTHER,
-      ]) {
+    it('CASH/DIGITAL_WALLET/OTHER sin referencia: sigue siendo válido (comportamiento sin cambios)', async () => {
+      for (const method of ['CASH', 'DIGITAL_WALLET', 'OTHER']) {
         const id = await rawInsertPayment({
           saleId: checkSale.id,
           method,
@@ -2255,6 +2706,7 @@ describe('Payments (e2e)', () => {
   describe('limitación documentada: sin CHECK cruzado contra sumas de Payment', () => {
     it('un INSERT directo puede producir SUM(payments) > Sale.total sin que la BD lo rechace (documentado, no un defecto): se revierte a propósito', async () => {
       const sale = await createFixtureSale({ total: '10.00' });
+      const snapshot = await resolvePaymentMethodSnapshot('CASH');
       await prisma
         .$transaction(async (tx) => {
           // No existe ningún CHECK/trigger que sume Payment.amount contra
@@ -2266,7 +2718,7 @@ describe('Payments (e2e)', () => {
           await tx.payment.create({
             data: {
               saleId: sale.id,
-              method: PaymentMethod.CASH,
+              ...snapshot,
               amount: new Prisma.Decimal('999.00'),
               status: PaymentStatus.ACTIVE,
               paidAt: new Date(),

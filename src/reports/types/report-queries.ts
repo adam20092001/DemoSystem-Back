@@ -1,9 +1,4 @@
-import {
-  CustomerType,
-  PaymentMethod,
-  PaymentStatus,
-  QuoteStatus,
-} from '@prisma/client';
+import { CustomerType, PaymentStatus, QuoteStatus } from '@prisma/client';
 
 /**
  * Datos ya transformados y listos para ReportsService. Sin decoradores, sin
@@ -54,12 +49,13 @@ export interface QuotesByStatusQuery {
   customerId?: string;
 }
 
+/** `method` (Ticket C, Bloque C3): código dinámico, filtrado contra el snapshot Payment.paymentMethodCode. */
 export interface PaymentsByMethodQuery {
   page?: number;
   limit?: number;
   from?: string;
   to?: string;
-  method?: PaymentMethod;
+  method?: string;
   status?: PaymentStatus;
   createdByUserId?: string;
 }

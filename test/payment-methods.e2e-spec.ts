@@ -130,7 +130,7 @@ describe('Payment Methods (e2e) — Ticket C, Bloque C2', () => {
       // por su ID exacto — nunca deleteMany({}) sobre payment_methods,
       // nunca se toca ninguno de los 9 baseline.
       if (customMethodId !== undefined) {
-        await prisma.paymentMethodDefinition.delete({
+        await prisma.paymentMethod.delete({
           where: { id: customMethodId },
         });
       }
@@ -402,7 +402,7 @@ describe('Payment Methods (e2e) — Ticket C, Bloque C2', () => {
 
       expect(response.status).toBe(400);
 
-      const current = await prisma.paymentMethodDefinition.findUniqueOrThrow({
+      const current = await prisma.paymentMethod.findUniqueOrThrow({
         where: { id: customMethodId },
       });
       expect(current.code).toBe(CUSTOM_CODE);

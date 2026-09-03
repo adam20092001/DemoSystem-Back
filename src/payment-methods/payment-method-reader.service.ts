@@ -39,7 +39,7 @@ export class PaymentMethodReader {
     client?: Prisma.TransactionClient,
   ): Promise<SafePaymentMethod | null> {
     const db = client ?? this.prisma;
-    const row = await db.paymentMethodDefinition.findUnique({
+    const row = await db.paymentMethod.findUnique({
       where: { code },
       select: PAYMENT_METHOD_SAFE_SELECT,
     });
@@ -60,7 +60,7 @@ export class PaymentMethodReader {
     client?: Prisma.TransactionClient,
   ): Promise<SafePaymentMethod[]> {
     const db = client ?? this.prisma;
-    const rows = await db.paymentMethodDefinition.findMany({
+    const rows = await db.paymentMethod.findMany({
       where: { active: true },
       select: PAYMENT_METHOD_SAFE_SELECT,
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { code: 'asc' }],

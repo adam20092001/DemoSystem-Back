@@ -236,10 +236,19 @@ describe('CreateSaleDto', () => {
       expect(errors).toHaveLength(0);
     });
 
-    it('payment.method inválido reporta error anidado', async () => {
+    it('payment.method con formato de código dinámico arbitrario: sin error anidado (existencia/actividad se validan en el dominio, Ticket C, Bloque C3)', async () => {
       const instance = plainToInstance(CreateSaleDto, {
         ...baseValid,
         payment: { method: 'NOT_A_METHOD', amount: '10.00' },
+      });
+      const errors = await validate(instance);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('payment.method de más de 30 caracteres reporta error anidado', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payment: { method: 'A'.repeat(31), amount: '10.00' },
       });
       const errors = await validate(instance);
       expect(errors.some((e) => e.property === 'payment')).toBe(true);

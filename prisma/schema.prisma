@@ -766,16 +766,6 @@ model SaleItem {
   @@map("sale_items")
 }
 
-// Métodos de cobro (Fase 7, §16 del Documento Maestro, texto verbatim).
-enum PaymentMethod {
-  CASH
-  BANK_TRANSFER
-  BANK_DEPOSIT
-  CARD
-  DIGITAL_WALLET
-  OTHER
-}
-
 // Ciclo de vida de un pago individual. Concepto deliberadamente distinto de
 // SalePaymentStatus (resumen agregado de la venta): un Payment ACTIVE/
 // CANCELLED es un hecho financiero atómico; SalePaymentStatus es un
@@ -806,15 +796,16 @@ model Payment {
   saleId String @map("sale_id") @db.Uuid
   sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Restrict)
 
-  method PaymentMethod
-
   amount Decimal @db.Decimal(14, 2)
 
   // Referencia operativa genérica (número de operación/depósito/voucher).
-  // Obligatoria a nivel de base de datos solo para BANK_TRANSFER/
-  // BANK_DEPOSIT/CARD (CHECK payments_reference_required_by_method,
-  // migration.sql); opcional para CASH/DIGITAL_WALLET/OTHER. Nunca PAN/CVV/
-  // credenciales bancarias.
+  // Obligatoria a nivel de base de datos SOLO hasta la Fase 7 clásica (CHECK
+  // payments_reference_required_by_method, eliminado en la migración de
+  // CONTRACT del Ticket C, Bloque C3): la regla es ahora dinámica
+  // (PaymentMethod.requiresReference, resuelto en PaymentEngine dentro de
+  // la misma transacción que crea este Payment) y no puede expresarse
+  // verazmente como CHECK de una sola tabla. Nunca PAN/CVV/credenciales
+  // bancarias.
   reference String? @db.VarChar(100)
 
   status PaymentStatus @default(ACTIVE)
@@ -843,70 +834,91 @@ model Payment {
   // Payment sí muta legítimamente una vez: ACTIVE -> CANCELLED.
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  // --- Ticket C, Bloque C1 (EXPAND) --------------------------------------
-  // Columnas de compatibilidad hacia el futuro método de pago dinámico
-  // (PaymentMethodDefinition, más abajo). NULLABLE a propósito durante toda
-  // la ventana EXPAND: la aplicación actualmente publicada solo conoce
-  // `method` (el enum de arriba) y jamás escribe estas columnas nuevas —
-  // exigir NOT NULL aquí rompería la compatibilidad con esa aplicación. El
-  // futuro Bloque de CONTRACT las volverá obligatorias una vez que
-  // PaymentEngine escriba dinámicamente en cada creación (Bloque de
-  // implementación) y se haya verificado que ninguna fila quedó sin
-  // backfill (ver migration.sql de este bloque).
+  // --- Ticket C, Bloque C3 (CONTRACT) ------------------------------------
+  // FK viva + snapshot histórico hacia el método de pago dinámico
+  // (PaymentMethod, más abajo). Obligatorios desde la migración de CONTRACT
+  // (`..._contract_dynamic_payment_methods`): todo Payment, sin excepción,
+  // tiene un método dinámico resuelto — el antiguo enum `method` y su
+  // columna ya no existen. PaymentEngine resuelve y persiste estos cuatro
+  // campos dentro de la MISMA transacción que crea el Payment (nunca en un
+  // paso separado).
   //
   // paymentMethodCode/paymentMethodName/paymentMethodAffectsCashDrawer son
   // el snapshot histórico (mismo criterio que QuoteItem/SaleItem frente a
-  // Product): un pago ya registrado nunca debe cambiar de significado
-  // porque ADMIN edite después el método dinámico. paymentMethodId es la
-  // FK viva hacia PaymentMethodDefinition, útil para reportes/administración
-  // futuros; nunca la única fuente de verdad histórica (esa es el snapshot).
-  paymentMethodId                String?                  @map("payment_method_id") @db.Uuid
-  paymentMethodDefinition        PaymentMethodDefinition? @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
-  paymentMethodCode              String?                  @map("payment_method_code") @db.VarChar(30)
-  paymentMethodName              String?                  @map("payment_method_name") @db.VarChar(60)
-  paymentMethodAffectsCashDrawer Boolean?                 @map("payment_method_affects_cash_drawer")
+  // Product): un pago ya registrado nunca cambia de significado porque
+  // ADMIN edite después el método dinámico (nombre, affectsCashDrawer, o lo
+  // que sea) — ver Ticket C, Bloque C3, prueba de snapshot. paymentMethodId
+  // es la FK viva hacia PaymentMethod, útil para reportes/administración
+  // (join opcional); NUNCA la fuente de verdad histórica por sí sola — esa
+  // es siempre el snapshot. accountingDestination deliberadamente NO se
+  // snapshotea aquí: ese hecho contable ya queda congelado, por separado,
+  // en AccountingEntry/AccountingEntryLine (Fase 8) en el mismo instante.
+  paymentMethodId                String        @map("payment_method_id") @db.Uuid
+  paymentMethod                  PaymentMethod @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+  paymentMethodCode              String        @map("payment_method_code") @db.VarChar(30)
+  paymentMethodName              String        @map("payment_method_name") @db.VarChar(60)
+  paymentMethodAffectsCashDrawer Boolean       @map("payment_method_affects_cash_drawer")
 
-  // Las 4 CHECK (monto positivo, referencia no vacía, referencia obligatoria
-  // por método, consistencia de anulación) se agregan a mano en
-  // migration.sql, mismo criterio que Sale/Quote/InventoryMovement. Se
-  // mantienen sin cambios en el Bloque C1 (EXPAND): la aplicación publicada
-  // sigue dependiendo de ellas tal cual.
+  // Las 3 CHECK vigentes (monto positivo, referencia no vacía, consistencia
+  // de anulación) se agregan a mano en migration.sql, mismo criterio que
+  // Sale/Quote/InventoryMovement. El cuarto CHECK histórico
+  // (payments_reference_required_by_method, basado en el enum) se eliminó
+  // en la migración de CONTRACT del Bloque C3: la regla ya es dinámica y
+  // cross-table, y no puede expresarse de forma veraz como CHECK de una
+  // sola tabla — se valida en PaymentEngine, dentro de la misma transacción
+  // de creación.
+  //
+  // (paymentMethodCode, paidAt, id): mismo criterio que (status, paidAt) y
+  // (createdByUserId, paidAt) — dos sitios de consulta reales y ya
+  // existentes filtran por este campo combinado con orden por paidAt
+  // (PaymentsService.list, ReportsService.paymentsByMethod/R9), y a
+  // diferencia del antiguo enum de 6 valores, el código dinámico tiene
+  // cardinalidad suficiente (9 baseline + los que ADMIN cree) para que el
+  // índice aporte selectividad real. Sin índice adicional sobre
+  // paymentMethodId: ningún código de negocio filtra por esa FK viva
+  // directamente (el filtrado histórico siempre usa el snapshot
+  // paymentMethodCode, nunca un join en vivo — ver Ticket C, Bloque C3
+  // §22/§24 del plan aprobado).
   @@index([saleId, paidAt])
   @@index([paidAt, id])
   @@index([status, paidAt])
   @@index([createdByUserId, paidAt])
+  @@index([paymentMethodCode, paidAt, id])
   @@map("payments")
 }
 
-// --- Métodos de pago dinámicos (Ticket C post-MVP, Bloque C1 — EXPAND) -----
+// --- Métodos de pago dinámicos (Ticket C post-MVP) --------------------------
 //
-// Colisión de nombres deliberada y temporal: Prisma ya tiene `enum
-// PaymentMethod` (arriba), consumido por la aplicación publicada. Prisma no
-// admite un modelo y un enum con el mismo nombre en el mismo esquema, y este
-// bloque tiene prohibido tocar el enum existente (EXPAND puro, sin romper la
-// aplicación publicada). El modelo dinámico se llama por ahora
-// `PaymentMethodDefinition` — nombre temporal exclusivo de la fase EXPAND.
-// La tabla física ya es la definitiva (`payment_methods`); el futuro Bloque
-// de CONTRACT (cuando el enum `PaymentMethod` y `Payment.method` se
-// eliminen) renombrará el modelo Prisma a `PaymentMethod` sin tocar la
-// tabla ni sus datos — un rename puramente de la capa Prisma.
+// Nombre final desde el Bloque C3 (CONTRACT): el antiguo `enum PaymentMethod`
+// que colisionaba con este nombre ya no existe (eliminado en la migración de
+// CONTRACT), así que el modelo dinámico — temporalmente `
+// PaymentMethodDefinition` durante los Bloques C1/C2 (EXPAND) — recupera el
+// nombre de dominio definitivo `PaymentMethod`. Rename puramente de la capa
+// Prisma: la tabla física siempre fue, y sigue siendo, `payment_methods`
+// (@@map sin cambios); ningún dato se movió ni se recreó por este rename.
 enum PaymentMethodAccountingDestination {
   CASH
   BANK
 }
 
 /**
- * Configuración administrable de métodos de pago (Ticket C, Bloque C1: solo
- * modelo + migración + fila baseline; sin CRUD/administración todavía, eso
- * es el Bloque C2). `code` es la identidad estable e inmutable (nunca se
- * deriva de `name`, que sí es editable en C2); `active` nunca implica
- * borrado físico (histórico siempre visible vía el snapshot en Payment).
+ * Configuración administrable de métodos de pago (Ticket C). Fuente de
+ * verdad VIVA/administrable — nunca la fuente de verdad histórica de un
+ * Payment ya registrado, que siempre es su propio snapshot
+ * (Payment.paymentMethodCode/Name/AffectsCashDrawer). `code` es la
+ * identidad estable e inmutable (nunca se deriva de `name`, que sí es
+ * editable vía PaymentMethodsService); `active` nunca implica borrado
+ * físico (histórico siempre visible vía el snapshot en Payment, incluso si
+ * el método se desactiva o — en el caso legacy — nunca se reactiva).
  * `accountingDestination` es un concepto deliberadamente distinto de
  * `affectsCashDrawer`: el primero decide la cuenta contable de cobro
- * (Caja/Bancos, Fase 8 sin cambios); el segundo decide si el monto cuenta
- * para el efectivo físico de una futura CashSession — nunca se solapan.
+ * (Caja/Bancos, Fase 8 sin cambios, resuelto por PaymentEngine y pasado a
+ * AccountingEngine.postPaymentCollection() ya resuelto — nunca snapshoteado
+ * en Payment, esa historia ya queda inmutable en AccountingEntryLine); el
+ * segundo decide si el monto cuenta como efectivo físico para el futuro
+ * arqueo de caja (Ticket B) — nunca se solapan ni se infiere uno del otro.
  */
-model PaymentMethodDefinition {
+model PaymentMethod {
   id   String @id @default(uuid()) @db.Uuid
   code String @unique @db.VarChar(30)
   name String @db.VarChar(60)
@@ -924,10 +936,12 @@ model PaymentMethodDefinition {
 
   // Los 3 CHECK (code con formato ^[A-Z][A-Z0-9_]{1,29}$, name no en blanco,
   // sort_order >= 0) se agregan a mano en migration.sql, mismo criterio que
-  // el resto del dominio. Sin índices adicionales en C1: ningún código de
-  // este bloque consulta todavía por active/sortOrder (eso llega con
-  // PaymentMethodsService en C2) — @@unique(code) ya cubre la única
-  // búsqueda que sí existe hoy (el backfill de este mismo migration.sql).
+  // el resto del dominio. Sin índices adicionales sobre active/sortOrder:
+  // PaymentMethodsService lista como máximo un puñado de filas (sin
+  // paginación, ver su propio módulo) — un índice ahí no tiene ningún
+  // beneficio evidenciado. @@unique(code) ya cubre la única búsqueda por
+  // igualdad real (resolución de método en PaymentEngine, backfill de
+  // migration.sql).
   @@map("payment_methods")
 }
 

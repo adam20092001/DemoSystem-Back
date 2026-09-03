@@ -5539,7 +5539,7 @@ describe('Sales (e2e)', () => {
       const sale = await createDirectSale(adminCookie, {
         items: [{ productId: productA.id, quantity: '1.000' }],
         payment: {
-          method: 'BANK_TRANSFER',
+          method: 'TRANSFER',
           amount: '5.00',
           reference: 'OP-PRINT-1',
         },

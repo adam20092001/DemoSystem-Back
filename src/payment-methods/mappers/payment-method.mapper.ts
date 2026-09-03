@@ -13,9 +13,9 @@ export const PAYMENT_METHOD_SAFE_SELECT = {
   sortOrder: true,
   createdAt: true,
   updatedAt: true,
-} satisfies Prisma.PaymentMethodDefinitionSelect;
+} satisfies Prisma.PaymentMethodSelect;
 
-export type PaymentMethodSafeRow = Prisma.PaymentMethodDefinitionGetPayload<{
+export type PaymentMethodSafeRow = Prisma.PaymentMethodGetPayload<{
   select: typeof PAYMENT_METHOD_SAFE_SELECT;
 }>;
 

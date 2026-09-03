@@ -785,7 +785,8 @@ describe('ReportsService', () => {
           id: 'payment-1',
           paidAt: new Date('2026-08-10T10:00:00.000Z'),
           saleId: 'sale-1',
-          method: 'BANK_TRANSFER',
+          paymentMethodCode: 'BANK_TRANSFER',
+          paymentMethodName: 'Transferencia bancaria (legacy)',
           reference: 'OP-123456',
           amount: new Prisma.Decimal('500'),
           status: 'ACTIVE',
@@ -809,6 +810,7 @@ describe('ReportsService', () => {
         saleNumber: 'NV-000001',
         customerName: 'Cliente Uno',
         method: 'BANK_TRANSFER',
+        methodName: 'Transferencia bancaria (legacy)',
         reference: 'OP-123456',
         amount: '500.00',
         status: 'ACTIVE',
@@ -833,7 +835,7 @@ describe('ReportsService', () => {
       expect(args.where).toEqual({});
     });
 
-    it('method/status/createdByUserId se agregan como condiciones exactas', async () => {
+    it('method/status/createdByUserId se agregan como condiciones exactas (method filtra el snapshot paymentMethodCode)', async () => {
       prisma.payment.findMany.mockResolvedValue([]);
       prisma.payment.count.mockResolvedValue(0);
 
@@ -851,7 +853,7 @@ describe('ReportsService', () => {
       };
       expect(args.where.AND).toEqual(
         expect.arrayContaining([
-          { method: 'CASH' },
+          { paymentMethodCode: 'CASH' },
           { status: 'CANCELLED' },
           { createdByUserId: 'user-1' },
         ]),

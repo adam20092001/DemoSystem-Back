@@ -84,7 +84,11 @@ export class PaymentsService {
    */
   async register(input: RegisterPaymentInput): Promise<PaymentMutationResult> {
     const amount = parsePaymentAmount(input.amount);
-    const reference = normalizePaymentReference(input.method, input.reference);
+    // La normalización de TEXTO (trim/longitud) ya no decide si la
+    // referencia es obligatoria (Ticket C, Bloque C3): eso depende del
+    // PaymentMethod dinámico, resuelto dentro de PaymentEngine.register()
+    // en la misma transacción — ver assertReferenceRequiredForMethod() ahí.
+    const reference = normalizePaymentReference(input.reference);
 
     return this.prisma.$transaction(async (tx) => {
       const sale = await this.lockSale(tx, input.saleId);
@@ -197,7 +201,13 @@ export class PaymentsService {
 
     const conditions: Prisma.PaymentWhereInput[] = [];
     if (query.method !== undefined) {
-      conditions.push({ method: query.method });
+      // Filtra por el snapshot histórico (Ticket C, Bloque C3), nunca por
+      // un join en vivo contra el PaymentMethod actual — normalizado igual
+      // que en la creación (trim + mayúsculas) para que "cash"/"CASH"
+      // encuentren los mismos resultados.
+      conditions.push({
+        paymentMethodCode: query.method.trim().toUpperCase(),
+      });
     }
     if (query.status !== undefined) {
       conditions.push({ status: query.status });

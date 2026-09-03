@@ -3,13 +3,15 @@ import {
   AccountingEventType,
   AccountingSourceType,
   PaymentCancellationSource,
-  PaymentMethod,
+  PaymentMethodAccountingDestination,
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
 import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { PaymentMethodReader } from '../payment-methods/payment-method-reader.service';
+import { SafePaymentMethod } from '../payment-methods/types/safe-payment-method';
 import { PAYMENT_SAFE_SELECT } from './mappers/payment.mapper';
 import { PaymentEngine } from './payment.engine';
 import {
@@ -21,14 +23,35 @@ import {
 const SALE_ID = '11111111-1111-4111-8111-111111111111';
 const ACTOR_ID = '22222222-2222-4222-8222-222222222222';
 const PAYMENT_ID = '33333333-3333-4333-8333-333333333333';
+const METHOD_ID = '44444444-4444-4444-8444-444444444444';
 const SALE_NUMBER = 'NV-000001';
 const CANCELLED_AT = new Date('2026-04-01T09:30:00.000Z');
+
+/** Método dinámico resuelto por defecto: equivalente al baseline CASH (Ticket C, Bloque C1). */
+function makeResolvedMethod(
+  overrides: Partial<SafePaymentMethod> = {},
+): SafePaymentMethod {
+  return {
+    id: METHOD_ID,
+    code: 'CASH',
+    name: 'Efectivo',
+    active: true,
+    requiresReference: false,
+    affectsCashDrawer: true,
+    accountingDestination: PaymentMethodAccountingDestination.CASH,
+    sortOrder: 10,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
 
 function makePaymentRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: PAYMENT_ID,
     saleId: SALE_ID,
-    method: PaymentMethod.CASH,
+    paymentMethodCode: 'CASH',
+    paymentMethodName: 'Efectivo',
     amount: new Prisma.Decimal('40.00'),
     reference: null,
     status: PaymentStatus.ACTIVE,
@@ -55,7 +78,7 @@ function makeRegisterCommand(
   return {
     saleId: SALE_ID,
     saleNumber: SALE_NUMBER,
-    method: PaymentMethod.CASH,
+    method: 'CASH',
     amount: new Prisma.Decimal('40.00'),
     reference: null,
     actorUserId: ACTOR_ID,
@@ -116,10 +139,20 @@ function createAccountingEngineMock() {
   };
 }
 
+function createPaymentMethodReaderMock() {
+  return {
+    findByCode: jest.fn<
+      Promise<SafePaymentMethod | null>,
+      [string, unknown?]
+    >(),
+  };
+}
+
 describe('PaymentEngine', () => {
   let tx: ReturnType<typeof createTxMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
+  let paymentMethodReader: ReturnType<typeof createPaymentMethodReaderMock>;
   let engine: PaymentEngine;
 
   beforeEach(() => {
@@ -139,9 +172,12 @@ describe('PaymentEngine', () => {
       sourceId: PAYMENT_ID,
       eventType: AccountingEventType.REVERSAL,
     });
+    paymentMethodReader = createPaymentMethodReaderMock();
+    paymentMethodReader.findByCode.mockResolvedValue(makeResolvedMethod());
     engine = new PaymentEngine(
       auditService as unknown as AuditService,
       accountingEngine as unknown as AccountingEngine,
+      paymentMethodReader as unknown as PaymentMethodReader,
     );
 
     tx.payment.create.mockResolvedValue(makePaymentRow());
@@ -163,6 +199,46 @@ describe('PaymentEngine', () => {
       ).toBeUndefined();
     });
 
+    it('resuelve el método dinámico contra el MISMO tx recibido, nunca una conexión Prisma independiente (Ticket C, Bloque C3)', async () => {
+      await engine.register(
+        tx as unknown as Prisma.TransactionClient,
+        makeRegisterCommand(),
+      );
+      expect(paymentMethodReader.findByCode).toHaveBeenCalledWith('CASH', tx);
+    });
+
+    it('normaliza el código (trim + mayúsculas) antes de resolver', async () => {
+      await engine.register(
+        tx as unknown as Prisma.TransactionClient,
+        makeRegisterCommand({ method: '  cash  ' }),
+      );
+      expect(paymentMethodReader.findByCode).toHaveBeenCalledWith('CASH', tx);
+    });
+
+    it('código inexistente -> 404, nunca crea el Payment', async () => {
+      paymentMethodReader.findByCode.mockResolvedValue(null);
+      await expect(
+        engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand({ method: 'NOPE' }),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.payment.create).not.toHaveBeenCalled();
+    });
+
+    it('código existente pero inactivo -> 409, nunca crea el Payment', async () => {
+      paymentMethodReader.findByCode.mockResolvedValue(
+        makeResolvedMethod({ active: false }),
+      );
+      await expect(
+        engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.payment.create).not.toHaveBeenCalled();
+    });
+
     it('usa el tx recibido para crear el pago con select seguro', async () => {
       await engine.register(
         tx as unknown as Prisma.TransactionClient,
@@ -173,7 +249,7 @@ describe('PaymentEngine', () => {
       );
     });
 
-    it('crea el pago ACTIVE con paidAt propio, createdByUserId del actor y campos de anulación null', async () => {
+    it('crea el pago ACTIVE con paidAt propio, createdByUserId del actor, snapshot del método resuelto, y campos de anulación null', async () => {
       const before = Date.now();
       await engine.register(
         tx as unknown as Prisma.TransactionClient,
@@ -186,6 +262,10 @@ describe('PaymentEngine', () => {
           status: PaymentStatus;
           paidAt: Date;
           createdByUserId: string;
+          paymentMethodId: string;
+          paymentMethodCode: string;
+          paymentMethodName: string;
+          paymentMethodAffectsCashDrawer: boolean;
           cancelledAt: unknown;
           cancellationReason: unknown;
           cancelledByUserId: unknown;
@@ -197,6 +277,12 @@ describe('PaymentEngine', () => {
       expect(call.data.paidAt).toBeInstanceOf(Date);
       expect(call.data.paidAt.getTime()).toBeGreaterThanOrEqual(before);
       expect(call.data.paidAt.getTime()).toBeLessThanOrEqual(after);
+      // Snapshot histórico (Ticket C, Bloque C3): congelado desde el método
+      // resuelto en este instante, nunca releído después.
+      expect(call.data.paymentMethodId).toBe(METHOD_ID);
+      expect(call.data.paymentMethodCode).toBe('CASH');
+      expect(call.data.paymentMethodName).toBe('Efectivo');
+      expect(call.data.paymentMethodAffectsCashDrawer).toBe(true);
       // Ninguno de los 4 campos de anulación se incluye en el INSERT: la
       // columna es NULLABLE sin @default, así que omitirlos por completo
       // equivale a NULL en la base (mismo criterio de la fila ACTIVE del
@@ -224,20 +310,20 @@ describe('PaymentEngine', () => {
       expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
-    it('revalida defensivamente la referencia requerida por método (BANK_TRANSFER sin referencia -> error)', async () => {
+    it('revalida defensivamente la referencia exigida por el método RESUELTO (requiresReference=true sin referencia -> error)', async () => {
+      paymentMethodReader.findByCode.mockResolvedValue(
+        makeResolvedMethod({ code: 'TRANSFER', requiresReference: true }),
+      );
       await expect(
         engine.register(
           tx as unknown as Prisma.TransactionClient,
-          makeRegisterCommand({
-            method: PaymentMethod.BANK_TRANSFER,
-            reference: null,
-          }),
+          makeRegisterCommand({ method: 'TRANSFER', reference: null }),
         ),
       ).rejects.toThrow();
       expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
-    it('audita PAYMENT_REGISTERED exactamente una vez, con la whitelist exacta y usando el mismo tx', async () => {
+    it('audita PAYMENT_REGISTERED exactamente una vez, con la whitelist exacta (method = code resuelto) y usando el mismo tx', async () => {
       await engine.register(
         tx as unknown as Prisma.TransactionClient,
         makeRegisterCommand(),
@@ -256,7 +342,7 @@ describe('PaymentEngine', () => {
       expect(call.metadata).toEqual({
         saleId: SALE_ID,
         saleNumber: SALE_NUMBER,
-        method: PaymentMethod.CASH,
+        method: 'CASH',
       });
       expect(call.client).toBe(tx);
     });
@@ -276,7 +362,7 @@ describe('PaymentEngine', () => {
       expect(call.metadata).not.toHaveProperty('reference');
     });
 
-    it('retorna el pago mapeado a forma segura (amount como string de 2 decimales)', async () => {
+    it('retorna el pago mapeado a forma segura (amount como string de 2 decimales, method/methodName snapshoteados)', async () => {
       const result = await engine.register(
         tx as unknown as Prisma.TransactionClient,
         makeRegisterCommand(),
@@ -284,6 +370,8 @@ describe('PaymentEngine', () => {
       expect(result.id).toBe(PAYMENT_ID);
       expect(result.amount).toBe('40.00');
       expect(result.status).toBe(PaymentStatus.ACTIVE);
+      expect(result.method).toBe('CASH');
+      expect(result.methodName).toBe('Efectivo');
     });
 
     it('no actualiza el resumen de la venta (sale.update nunca se llama desde register)', async () => {
@@ -294,7 +382,7 @@ describe('PaymentEngine', () => {
       expect(tx.sale.update).not.toHaveBeenCalled();
     });
 
-    describe('integración contable (Fase 8, Bloque B)', () => {
+    describe('integración contable (Fase 8, Bloque B; recableada en Ticket C, Bloque C3)', () => {
       it('crea el Payment ANTES de postear el cobro contable, con el MISMO tx', async () => {
         await engine.register(
           tx as unknown as Prisma.TransactionClient,
@@ -329,11 +417,17 @@ describe('PaymentEngine', () => {
         expect(postedAt).toBe(persistedPaidAt);
       });
 
-      it('propaga saleNumber/method/amount/actor/ip correctos a postPaymentCollection', async () => {
+      it('propaga saleNumber/accountingDestination (YA resuelto)/amount/actor/ip correctos a postPaymentCollection — nunca el método completo', async () => {
+        paymentMethodReader.findByCode.mockResolvedValue(
+          makeResolvedMethod({
+            code: 'CARD',
+            accountingDestination: PaymentMethodAccountingDestination.BANK,
+          }),
+        );
         await engine.register(
           tx as unknown as Prisma.TransactionClient,
           makeRegisterCommand({
-            method: PaymentMethod.CARD,
+            method: 'CARD',
             amount: new Prisma.Decimal('77.50'),
             reference: 'OP-000456',
             ipAddress: '203.0.113.5',
@@ -343,14 +437,17 @@ describe('PaymentEngine', () => {
           .calls[0][1] as {
           paymentId: string;
           saleNumber: string;
-          method: PaymentMethod;
+          accountingDestination: PaymentMethodAccountingDestination;
           amount: Prisma.Decimal;
           actorUserId: string;
           ipAddress: string | null;
         };
         expect(command.paymentId).toBe(PAYMENT_ID);
         expect(command.saleNumber).toBe(SALE_NUMBER);
-        expect(command.method).toBe(PaymentMethod.CARD);
+        expect(command.accountingDestination).toBe(
+          PaymentMethodAccountingDestination.BANK,
+        );
+        expect(command).not.toHaveProperty('method');
         expect(command.amount.toFixed(2)).toBe('77.50');
         expect(command.actorUserId).toBe(ACTOR_ID);
         expect(command.ipAddress).toBe('203.0.113.5');
@@ -558,6 +655,17 @@ describe('PaymentEngine', () => {
         PaymentCancellationSource.MANUAL,
       );
       expect(call.data.cancellationReason).toBe('Motivo válido');
+    });
+
+    it('nunca vuelve a resolver el PaymentMethod actual (Ticket C, Bloque C3: revierte el asiento ya posteado, no releído)', async () => {
+      tx.$queryRaw.mockResolvedValue([
+        { id: PAYMENT_ID, saleId: SALE_ID, status: PaymentStatus.ACTIVE },
+      ]);
+      await engine.cancel(
+        tx as unknown as Prisma.TransactionClient,
+        makeCancelCommand(),
+      );
+      expect(paymentMethodReader.findByCode).not.toHaveBeenCalled();
     });
 
     it('audita PAYMENT_CANCELLED exactamente una vez, con whitelist exacta (sin reason/amount/reference)', async () => {
@@ -770,6 +878,15 @@ describe('PaymentEngine', () => {
         makeCancelAllCommand(),
       );
       expect(tx.sale.update).not.toHaveBeenCalled();
+    });
+
+    it('nunca vuelve a resolver el PaymentMethod actual', async () => {
+      tx.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }]);
+      await engine.cancelAllActiveForSale(
+        tx as unknown as Prisma.TransactionClient,
+        makeCancelAllCommand(),
+      );
+      expect(paymentMethodReader.findByCode).not.toHaveBeenCalled();
     });
 
     describe('integración contable (Fase 8, Bloque B)', () => {

@@ -1,11 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { PaymentMethod } from '@prisma/client';
 import {
-  IsEnum,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
+  MinLength,
 } from 'class-validator';
 
 /**
@@ -20,16 +19,31 @@ export const PAYMENT_AMOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
  * Cuerpo de un pago posterior (POST /sales/:saleId/payments). saleId viaja
  * en la URL, nunca aquí. paidAt/status/createdBy/campos de anulación/
  * amount summary nunca se aceptan: son valores de sistema calculados por
- * PaymentEngine (Bloque B). La validación dependiente del método
- * (BANK_TRANSFER/BANK_DEPOSIT/CARD exigen referencia no vacía —
- * Documento Maestro §16) es responsabilidad del dominio
- * (payment-calculator.ts): este DTO solo valida la forma HTTP, nunca la
- * duplica.
+ * PaymentEngine (Bloque B).
+ *
+ * `method` (Ticket C, Bloque C3): código de un método de pago dinámico
+ * (`payment_methods.code`, ADMIN-administrable vía PaymentMethodsModule),
+ * NUNCA el antiguo enum PaymentMethod (eliminado). Este DTO solo valida
+ * FORMA HTTP mínima (texto no vacío, longitud razonable) — trim/mayúsculas,
+ * existencia, actividad y la exigencia de referencia dependiente del método
+ * son responsabilidad exclusiva del dominio (payment-calculator.ts +
+ * PaymentEngine.register(), dentro de la misma transacción que crea el
+ * pago): este DTO nunca la duplica ni la anticipa, para no rechazar en la
+ * capa HTTP un `method` en minúsculas que el dominio normalizaría
+ * correctamente.
  */
 export class CreatePaymentDto {
-  @ApiProperty({ enum: PaymentMethod })
-  @IsEnum(PaymentMethod)
-  method!: PaymentMethod;
+  @ApiProperty({
+    minLength: 1,
+    maxLength: 30,
+    example: 'CASH',
+    description:
+      'Código de un método de pago dinámico (ver GET /payment-methods para la lista de códigos activos). Se normaliza a mayúsculas en el dominio; debe existir y estar activo, o la petición se rechaza (404/409).',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(30)
+  method!: string;
 
   @ApiProperty({
     type: String,
@@ -47,7 +61,7 @@ export class CreatePaymentDto {
   @ApiPropertyOptional({
     maxLength: 100,
     description:
-      'Obligatoria para BANK_TRANSFER/BANK_DEPOSIT/CARD (validado en el dominio); opcional para CASH/DIGITAL_WALLET/OTHER.',
+      'Obligatoria cuando el método de pago resuelto tiene requiresReference=true (validado en el dominio, ver GET /payment-methods); opcional en caso contrario.',
     example: 'OP-000123',
   })
   @IsOptional()

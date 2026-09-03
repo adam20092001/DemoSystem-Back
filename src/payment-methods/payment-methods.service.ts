@@ -20,13 +20,15 @@ import { SafePaymentMethod } from './types/safe-payment-method';
 import { UpdatePaymentMethodInput } from './types/update-payment-method.input';
 
 /**
- * Entidad de auditoría estable: SIEMPRE 'PaymentMethod' (nunca el nombre
- * temporal del modelo Prisma, PaymentMethodDefinition — ver comentario de
- * colisión de nombres en schema.prisma). El histórico de auditoría
- * generado en el Bloque C2 debe seguir leyéndose igual después de que el
- * futuro Bloque de CONTRACT renombre el modelo Prisma; el nombre del
- * modelo es un detalle de implementación de esta fase, nunca algo que deba
- * filtrarse a datos persistentes de auditoría.
+ * Entidad de auditoría estable: SIEMPRE 'PaymentMethod' — durante el
+ * Bloque C2 esto ya era intencional aunque el modelo Prisma todavía se
+ * llamaba temporalmente PaymentMethodDefinition (colisión con el entonces
+ * vigente enum PaymentMethod, ver schema.prisma); el Bloque C3 (CONTRACT)
+ * eliminó ese enum y renombró el modelo Prisma a su nombre final
+ * `PaymentMethod`, así que este literal ya coincide también con el nombre
+ * del modelo. El histórico de auditoría generado en C2 se sigue leyendo
+ * igual: el nombre del modelo siempre fue un detalle de implementación,
+ * nunca algo que se filtrara a datos persistentes de auditoría.
  */
 const AUDIT_ENTITY_TYPE = 'PaymentMethod';
 const AUDIT_MODULE = 'PAYMENT_METHODS';
@@ -138,7 +140,7 @@ export class PaymentMethodsService {
       assertCanRequestInactive(requesterRole);
     }
 
-    const rows = await this.prisma.paymentMethodDefinition.findMany({
+    const rows = await this.prisma.paymentMethod.findMany({
       where: includeInactive ? {} : { active: true },
       select: PAYMENT_METHOD_SAFE_SELECT,
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { code: 'asc' }],
@@ -160,7 +162,7 @@ export class PaymentMethodsService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const existing = await tx.paymentMethodDefinition.findUnique({
+      const existing = await tx.paymentMethod.findUnique({
         where: { code },
         select: { id: true },
       });
@@ -170,7 +172,7 @@ export class PaymentMethodsService {
         );
       }
 
-      const created = await tx.paymentMethodDefinition.create({
+      const created = await tx.paymentMethod.create({
         data: {
           code,
           name,
@@ -239,7 +241,7 @@ export class PaymentMethodsService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const existing = await tx.paymentMethodDefinition.findUnique({
+      const existing = await tx.paymentMethod.findUnique({
         where: { id: input.paymentMethodId },
         select: PAYMENT_METHOD_SAFE_SELECT,
       });
@@ -247,7 +249,7 @@ export class PaymentMethodsService {
         throw new NotFoundException('Método de pago no encontrado');
       }
 
-      const data: Prisma.PaymentMethodDefinitionUpdateInput = {};
+      const data: Prisma.PaymentMethodUpdateInput = {};
       const changedFields: string[] = [];
       const oldValues: Record<string, AuditMetadataScalar> = {};
       const newValues: Record<string, AuditMetadataScalar> = {};
@@ -332,7 +334,7 @@ export class PaymentMethodsService {
         return toSafePaymentMethod(existing);
       }
 
-      const updated = await tx.paymentMethodDefinition.update({
+      const updated = await tx.paymentMethod.update({
         where: { id: input.paymentMethodId },
         data,
         select: PAYMENT_METHOD_SAFE_SELECT,

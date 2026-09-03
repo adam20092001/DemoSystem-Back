@@ -504,7 +504,7 @@ async function seedAccounts(): Promise<void> {
  */
 async function seedPaymentMethods(): Promise<void> {
   for (const method of SEED_PAYMENT_METHODS) {
-    await prisma.paymentMethodDefinition.upsert({
+    await prisma.paymentMethod.upsert({
       where: { code: method.code },
       update: {},
       create: {

@@ -9,7 +9,6 @@ import {
   CustomerStatus,
   CustomerType,
   DocumentType,
-  PaymentMethod,
   PaymentStatus,
   Prisma,
   PrismaClient,
@@ -147,7 +146,7 @@ interface SafeSaleBody {
   total: string;
   paidAmount: string;
   balanceDue: string;
-  payments: { id: string; method: PaymentMethod }[];
+  payments: { id: string; method: string }[];
   confirmedAt: string;
   cancelledAt: string | null;
 }
@@ -155,7 +154,7 @@ interface SafeSaleBody {
 interface SafePaymentBody {
   id: string;
   saleId: string;
-  method: PaymentMethod;
+  method: string;
   amount: string;
   status: PaymentStatus;
   paidAt: string;
@@ -916,7 +915,7 @@ describe('Basic Accounting (e2e)', () => {
         AccountingSystemKey.BANK,
         () =>
           registerPaymentHttp(adminCookie, sale.id, {
-            method: PaymentMethod.BANK_TRANSFER,
+            method: 'TRANSFER',
             amount: '10.00',
             reference: 'OP-ATOMIC-64',
           }),
@@ -1229,7 +1228,7 @@ describe('Basic Accounting (e2e)', () => {
     it('dos asientos ORIGINAL (SALE + PAYMENT); resumen operativo PARTIALLY_PAID 40/60, no alterado por contabilidad', async () => {
       const sale = await createSaleOrThrow(adminCookie, {
         items: [{ productId: productHundredId, quantity: '1.000' }],
-        payment: { method: PaymentMethod.CASH, amount: '40.00' },
+        payment: { method: 'CASH', amount: '40.00' },
       });
       expect(sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
       expect(sale.paidAmount).toBe('40.00');
@@ -1273,7 +1272,7 @@ describe('Basic Accounting (e2e)', () => {
     it('dos asientos ORIGINAL (no colapsados); resumen operativo PAID 100/0', async () => {
       const sale = await createSaleOrThrow(adminCookie, {
         items: [{ productId: productHundredId, quantity: '1.000' }],
-        payment: { method: PaymentMethod.CASH, amount: '100.00' },
+        payment: { method: 'CASH', amount: '100.00' },
       });
       expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
       expect(sale.paidAmount).toBe('100.00');
@@ -1300,22 +1299,25 @@ describe('Basic Accounting (e2e)', () => {
   });
 
   describe('§17 — mapeo cuenta de cobro por método de pago (flujo real)', () => {
+    // Baseline dinámico activo (Ticket C, Bloque C1 seed): CASH es la única
+    // con accountingDestination=CASH; CARD/TRANSFER/YAPE/PLIN son BANK. Los
+    // 4 códigos legacy (BANK_TRANSFER/BANK_DEPOSIT/DIGITAL_WALLET/OTHER)
+    // también mapean a BANK pero están INACTIVOS desde C1/C2 — ya no sirven
+    // para registrar un Payment nuevo (409), así que esta prueba usa
+    // únicamente baseline activo.
     it.each([
-      [PaymentMethod.CASH, AccountingSystemKey.CASH],
-      [PaymentMethod.BANK_TRANSFER, AccountingSystemKey.BANK],
-      [PaymentMethod.BANK_DEPOSIT, AccountingSystemKey.BANK],
-      [PaymentMethod.CARD, AccountingSystemKey.BANK],
-      [PaymentMethod.DIGITAL_WALLET, AccountingSystemKey.BANK],
-      [PaymentMethod.OTHER, AccountingSystemKey.BANK],
+      ['CASH', AccountingSystemKey.CASH],
+      ['CARD', AccountingSystemKey.BANK],
+      ['TRANSFER', AccountingSystemKey.BANK],
+      ['YAPE', AccountingSystemKey.BANK],
+      ['PLIN', AccountingSystemKey.BANK],
     ])(
       '%s -> DEBIT %s / CREDIT AR; sin accountId almacenado en Payment',
       async (method, expectedSystemKey) => {
         const sale = await createBasicSale();
-        const needsReference = [
-          PaymentMethod.BANK_TRANSFER,
-          PaymentMethod.BANK_DEPOSIT,
-          PaymentMethod.CARD,
-        ].includes(method);
+        const needsReference = ['CARD', 'TRANSFER', 'YAPE', 'PLIN'].includes(
+          method,
+        );
         const result = await registerPaymentOrThrow(adminCookie, sale.id, {
           method,
           amount: '10.00',
@@ -1349,7 +1351,7 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
 
       const first = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '40.00',
       });
       expect(first.sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
@@ -1378,7 +1380,7 @@ describe('Basic Accounting (e2e)', () => {
       ).toBe('40.00');
 
       const second = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '60.00',
       });
       expect(second.sale.paymentStatus).toBe(SalePaymentStatus.PAID);
@@ -1407,7 +1409,7 @@ describe('Basic Accounting (e2e)', () => {
     it('module ACCOUNTING, entityType AccountingEntry, whitelist exacta {entryId, sourceType, sourceId, eventType}; sin datos comerciales', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
 
@@ -1480,7 +1482,7 @@ describe('Basic Accounting (e2e)', () => {
     it('DEBIT AR / CREDIT collection (inversión exacta); reversesEntryId; postedAt == cancelledAt; original intacto; 1 auditoría de cada tipo', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '25.00',
       });
       const original = (
@@ -1558,7 +1560,7 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
       const REFERENCE = 'OP-SECRETO-999';
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CARD,
+        method: 'CARD',
         amount: '15.00',
         reference: REFERENCE,
       });
@@ -1598,7 +1600,7 @@ describe('Basic Accounting (e2e)', () => {
     it('exactamente una reversa contable, un ACCOUNTING_ENTRY_REVERSED y un PAYMENT_CANCELLED', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '20.00',
       });
 
@@ -1741,7 +1743,7 @@ describe('Basic Accounting (e2e)', () => {
     it('4 asientos totales (SALE ORIGINAL/REVERSAL, PAYMENT ORIGINAL/REVERSAL); Payment CANCELLED via SALE_CANCELLATION; resumen operativo congelado 40/60 PARTIALLY_PAID', async () => {
       const sale = await createSaleOrThrow(adminCookie, {
         items: [{ productId: productHundredId, quantity: '1.000' }],
-        payment: { method: PaymentMethod.CASH, amount: '40.00' },
+        payment: { method: 'CASH', amount: '40.00' },
       });
       const paymentId = sale.payments[0].id;
       ownedPaymentIds.push(paymentId);
@@ -1779,11 +1781,11 @@ describe('Basic Accounting (e2e)', () => {
     it('exactamente 3 nuevas REVERSAL (1 Sale + 2 Payment), cada una apunta solo a su propio original, mismo timestamp de operación', async () => {
       const sale = await createBasicSale();
       const p20 = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '20.00',
       });
       const p30 = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '30.00',
       });
 
@@ -1833,11 +1835,11 @@ describe('Basic Accounting (e2e)', () => {
     it('el pago ya cancelado no recibe una segunda reversa; el otro pago activo sí recibe su reversa automática; totales exactos', async () => {
       const sale = await createBasicSale();
       const paymentA = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '30.00',
       });
       const paymentB = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '20.00',
       });
 
@@ -1931,7 +1933,7 @@ describe('Basic Accounting (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/from-quote/${quote.id}`)
         .set('Cookie', adminCookie)
-        .send({ payment: { method: PaymentMethod.CASH, amount: '100.00' } });
+        .send({ payment: { method: 'CASH', amount: '100.00' } });
       expect(response.status).toBe(201);
       const sale = response.body as SafeSaleBody;
       ownedSaleIds.push(sale.id);
@@ -1992,7 +1994,7 @@ describe('Basic Accounting (e2e)', () => {
         sellerCookie,
         saleBySeller.id,
         {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '10.00',
         },
       );
@@ -2020,7 +2022,7 @@ describe('Basic Accounting (e2e)', () => {
 
       const sale2 = await createBasicSale(adminCookie);
       const payment2 = await registerPaymentOrThrow(adminCookie, sale2.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '5.00',
       });
       const cancelSale2 = await cancelSaleHttp(adminCookie, sale2.id);
@@ -2050,7 +2052,7 @@ describe('Basic Accounting (e2e)', () => {
     it('todas las igualdades exactas exigidas, sin ventanas de tiempo laxas', async () => {
       const sale = await createSaleOrThrow(adminCookie, {
         items: [{ productId: productHundredId, quantity: '1.000' }],
-        payment: { method: PaymentMethod.CASH, amount: '40.00' },
+        payment: { method: 'CASH', amount: '40.00' },
       });
       const paymentId = sale.payments[0].id;
       ownedPaymentIds.push(paymentId);
@@ -2071,7 +2073,7 @@ describe('Basic Accounting (e2e)', () => {
       );
 
       const laterPayment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       const manualCancel = await cancelPaymentHttp(
@@ -3040,7 +3042,7 @@ describe('Basic Accounting (e2e)', () => {
     it('exactamente un ORIGINAL por Sale económicamente activa y por Payment', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       const saleOriginals = await prisma.accountingEntry.count({
@@ -3112,7 +3114,7 @@ describe('Basic Accounting (e2e)', () => {
     it('Payment permanece ACTIVE; sin PAYMENT_CANCELLED; sin REVERSAL; resumen de venta intacto', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       const original = (
@@ -3163,7 +3165,7 @@ describe('Basic Accounting (e2e)', () => {
     it('Sale permanece ACTIVE; sin SALE_CANCELLED; sin reversa; stock intacto; Payment activo intacto', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       const saleOriginal = (
@@ -3231,11 +3233,11 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
       const responses = await Promise.all([
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '70.00',
         }),
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '70.00',
         }),
       ]);
@@ -3275,11 +3277,11 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
       const responses = await Promise.all([
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '40.00',
         }),
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '60.00',
         }),
       ]);
@@ -3310,11 +3312,11 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
       const responses = await Promise.all([
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '50.00',
         }),
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '50.00',
         }),
       ]);
@@ -3344,7 +3346,7 @@ describe('Basic Accounting (e2e)', () => {
       const sale = await createBasicSale();
       const [paymentResponse, cancelResponse] = await Promise.all([
         registerPaymentHttp(adminCookie, sale.id, {
-          method: PaymentMethod.CASH,
+          method: 'CASH',
           amount: '10.00',
         }),
         cancelSaleHttp(adminCookie, sale.id, 'Carrera pago vs anulación'),
@@ -3405,7 +3407,7 @@ describe('Basic Accounting (e2e)', () => {
     it('Sale CANCELLED, Payment CANCELLED, exactamente una reversa por cada original, sin duplicados', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
 
@@ -3480,7 +3482,7 @@ describe('Basic Accounting (e2e)', () => {
     it('una 200 y una respuesta de conflicto; exactamente una Sale REVERSAL; cada Payment ACTIVE recibe a lo sumo una reversa; sin ACCOUNTING_ENTRY_REVERSED duplicado', async () => {
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
 
@@ -3537,7 +3539,7 @@ describe('Basic Accounting (e2e)', () => {
       ).stockCurrent;
       const sale = await createBasicSale();
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '100.00',
       });
 
@@ -3611,7 +3613,7 @@ describe('Basic Accounting (e2e)', () => {
       const before = await prisma.inventoryMovement.count();
 
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       const afterRegister = await prisma.inventoryMovement.count();
@@ -3649,7 +3651,7 @@ describe('Basic Accounting (e2e)', () => {
       });
 
       const payment = await registerPaymentOrThrow(adminCookie, sale.id, {
-        method: PaymentMethod.CASH,
+        method: 'CASH',
         amount: '10.00',
       });
       await cancelPaymentHttp(adminCookie, sale.id, payment.payment.id);
@@ -3668,7 +3670,7 @@ describe('Basic Accounting (e2e)', () => {
     it('GET /accounts-receivable sigue determinado por Sale.status=ACTIVE y balanceDue>0, sin relación con AccountingEntry', async () => {
       const sale = await createSaleOrThrow(adminCookie, {
         items: [{ productId: productHundredId, quantity: '1.000' }],
-        payment: { method: PaymentMethod.CASH, amount: '40.00' },
+        payment: { method: 'CASH', amount: '40.00' },
       });
       ownedPaymentIds.push(sale.payments[0].id);
 

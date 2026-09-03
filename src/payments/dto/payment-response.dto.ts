@@ -1,7 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import {
   PaymentCancellationSource,
-  PaymentMethod,
   PaymentStatus,
   SalePaymentStatus,
   SaleStatus,
@@ -30,8 +29,21 @@ export class PaymentResponseDto {
   @ApiProperty({ format: 'uuid' })
   saleId!: string;
 
-  @ApiProperty({ enum: PaymentMethod })
-  method!: PaymentMethod;
+  @ApiProperty({
+    type: String,
+    example: 'CASH',
+    description:
+      'Código del método de pago dinámico snapshoteado en el instante del cobro (Payment.paymentMethodCode) — NUNCA el code actual del método si este cambió/se desactivó después. Nombre de propiedad preservado por compatibilidad HTTP.',
+  })
+  method!: string;
+
+  @ApiProperty({
+    type: String,
+    example: 'Efectivo',
+    description:
+      'Nombre visible del método de pago snapshoteado en el instante del cobro (Payment.paymentMethodName). Campo aditivo (Ticket C, Bloque C3); nunca el name actual si el método fue renombrado después.',
+  })
+  methodName!: string;
 
   @ApiProperty({
     type: String,
@@ -44,7 +56,7 @@ export class PaymentResponseDto {
     type: String,
     nullable: true,
     description:
-      'Obligatoria en el dominio para BANK_TRANSFER/BANK_DEPOSIT/CARD; opcional para el resto.',
+      'Obligatoria cuando el método de pago snapshoteado (methodName) tenía requiresReference=true en el instante del cobro; opcional en caso contrario.',
   })
   reference!: string | null;
 

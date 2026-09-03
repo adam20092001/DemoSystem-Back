@@ -585,7 +585,11 @@ export class ReportsService {
       });
     }
     if (query.method !== undefined) {
-      conditions.push({ method: query.method });
+      // Filtra por el snapshot histórico (Ticket C, Bloque C3), nunca por
+      // un join en vivo contra el PaymentMethod actual.
+      conditions.push({
+        paymentMethodCode: query.method.trim().toUpperCase(),
+      });
     }
     if (query.status !== undefined) {
       conditions.push({ status: query.status });
@@ -603,7 +607,8 @@ export class ReportsService {
           id: true,
           paidAt: true,
           saleId: true,
-          method: true,
+          paymentMethodCode: true,
+          paymentMethodName: true,
           reference: true,
           amount: true,
           status: true,
@@ -631,7 +636,8 @@ export class ReportsService {
         saleId: row.saleId,
         saleNumber: row.sale.number,
         customerName: row.sale.customerName,
-        method: row.method,
+        method: row.paymentMethodCode,
+        methodName: row.paymentMethodName,
         reference: row.reference,
         amount: row.amount.toFixed(2),
         status: row.status,

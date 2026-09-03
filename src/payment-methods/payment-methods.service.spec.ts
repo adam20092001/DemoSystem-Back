@@ -45,7 +45,7 @@ interface UpdateArgs {
 
 function createPrismaMock() {
   const tx = {
-    paymentMethodDefinition: {
+    paymentMethod: {
       findUnique: jest.fn<Promise<unknown>, [FindUniqueArgs]>(),
       create: jest.fn<Promise<unknown>, [CreateArgs]>(),
       update: jest.fn<Promise<unknown>, [UpdateArgs]>(),
@@ -54,7 +54,7 @@ function createPrismaMock() {
 
   return {
     tx,
-    paymentMethodDefinition: {
+    paymentMethod: {
       findMany: jest.fn<Promise<unknown[]>, [FindManyArgs]>(),
     },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
@@ -87,20 +87,18 @@ describe('PaymentMethodsService', () => {
 
   describe('listPaymentMethods — autorización de lectura', () => {
     it('ADMIN: lista solo activos por defecto', async () => {
-      prisma.paymentMethodDefinition.findMany.mockResolvedValue([
-        makeMethodRow(),
-      ]);
+      prisma.paymentMethod.findMany.mockResolvedValue([makeMethodRow()]);
 
       const result = await service.listPaymentMethods({}, RoleName.ADMIN);
 
       expect(result).toHaveLength(1);
-      expect(prisma.paymentMethodDefinition.findMany).toHaveBeenCalledWith(
+      expect(prisma.paymentMethod.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { active: true } }),
       );
     });
 
     it('MANAGEMENT: también puede leer (solo activos)', async () => {
-      prisma.paymentMethodDefinition.findMany.mockResolvedValue([]);
+      prisma.paymentMethod.findMany.mockResolvedValue([]);
 
       await expect(
         service.listPaymentMethods({}, RoleName.MANAGEMENT),
@@ -108,7 +106,7 @@ describe('PaymentMethodsService', () => {
     });
 
     it('SELLER: también puede leer (solo activos)', async () => {
-      prisma.paymentMethodDefinition.findMany.mockResolvedValue([]);
+      prisma.paymentMethod.findMany.mockResolvedValue([]);
 
       await expect(
         service.listPaymentMethods({}, RoleName.SELLER),
@@ -119,18 +117,18 @@ describe('PaymentMethodsService', () => {
       await expect(
         service.listPaymentMethods({}, RoleName.WAREHOUSE),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(prisma.paymentMethodDefinition.findMany).not.toHaveBeenCalled();
+      expect(prisma.paymentMethod.findMany).not.toHaveBeenCalled();
     });
 
     it('ADMIN + includeInactive=true: consulta sin filtro de active', async () => {
-      prisma.paymentMethodDefinition.findMany.mockResolvedValue([]);
+      prisma.paymentMethod.findMany.mockResolvedValue([]);
 
       await service.listPaymentMethods(
         { includeInactive: true },
         RoleName.ADMIN,
       );
 
-      expect(prisma.paymentMethodDefinition.findMany).toHaveBeenCalledWith(
+      expect(prisma.paymentMethod.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: {} }),
       );
     });
@@ -142,7 +140,7 @@ describe('PaymentMethodsService', () => {
           RoleName.MANAGEMENT,
         ),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(prisma.paymentMethodDefinition.findMany).not.toHaveBeenCalled();
+      expect(prisma.paymentMethod.findMany).not.toHaveBeenCalled();
     });
 
     it('SELLER + includeInactive=true: ForbiddenException', async () => {
@@ -152,11 +150,11 @@ describe('PaymentMethodsService', () => {
     });
 
     it('ordena por sortOrder ASC, name ASC, code ASC', async () => {
-      prisma.paymentMethodDefinition.findMany.mockResolvedValue([]);
+      prisma.paymentMethod.findMany.mockResolvedValue([]);
 
       await service.listPaymentMethods({}, RoleName.ADMIN);
 
-      expect(prisma.paymentMethodDefinition.findMany).toHaveBeenCalledWith(
+      expect(prisma.paymentMethod.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { code: 'asc' }],
         }),
@@ -176,8 +174,8 @@ describe('PaymentMethodsService', () => {
     };
 
     it('ADMIN: normaliza code a mayúsculas, name con trim, crea active=true y audita PAYMENT_METHOD_CREATED', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(null);
-      prisma.tx.paymentMethodDefinition.create.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(null);
+      prisma.tx.paymentMethod.create.mockResolvedValue(
         makeMethodRow({
           id: 'pm-2',
           code: 'YAPE',
@@ -192,8 +190,7 @@ describe('PaymentMethodsService', () => {
 
       const result = await service.createPaymentMethod(baseInput);
 
-      const createCall =
-        prisma.tx.paymentMethodDefinition.create.mock.calls[0]?.[0];
+      const createCall = prisma.tx.paymentMethod.create.mock.calls[0]?.[0];
       expect(createCall?.data).toEqual({
         code: 'YAPE',
         name: 'Yape',
@@ -251,14 +248,12 @@ describe('PaymentMethodsService', () => {
     });
 
     it('code duplicado -> ConflictException', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
-        makeMethodRow(),
-      );
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(makeMethodRow());
 
       await expect(
         service.createPaymentMethod(baseInput),
       ).rejects.toBeInstanceOf(ConflictException);
-      expect(prisma.tx.paymentMethodDefinition.create).not.toHaveBeenCalled();
+      expect(prisma.tx.paymentMethod.create).not.toHaveBeenCalled();
     });
 
     it('name en blanco tras trim -> BadRequestException', async () => {
@@ -274,15 +269,16 @@ describe('PaymentMethodsService', () => {
     });
 
     it('sortOrder omitido -> default 0', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(null);
-      prisma.tx.paymentMethodDefinition.create.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(null);
+      prisma.tx.paymentMethod.create.mockResolvedValue(
         makeMethodRow({ sortOrder: 0 }),
       );
 
       await service.createPaymentMethod(baseInput);
 
-      const createCall = prisma.tx.paymentMethodDefinition.create.mock
-        .calls[0]?.[0] as { data: { sortOrder: number } };
+      const createCall = prisma.tx.paymentMethod.create.mock.calls[0]?.[0] as {
+        data: { sortOrder: number };
+      };
       expect(createCall.data.sortOrder).toBe(0);
     });
   });
@@ -295,10 +291,10 @@ describe('PaymentMethodsService', () => {
     };
 
     it('ADMIN: actualiza name y audita PAYMENT_METHOD_UPDATED con changedFields/oldValues/newValues', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ name: 'Efectivo' }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ name: 'Efectivo (caja)' }),
       );
 
@@ -351,7 +347,7 @@ describe('PaymentMethodsService', () => {
     });
 
     it('id inexistente -> NotFoundException', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(null);
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(null);
 
       await expect(
         service.updatePaymentMethod({ ...baseInput, name: 'X' }),
@@ -359,10 +355,10 @@ describe('PaymentMethodsService', () => {
     });
 
     it('requiresReference update', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ requiresReference: false }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ requiresReference: true }),
       );
 
@@ -372,7 +368,7 @@ describe('PaymentMethodsService', () => {
       });
 
       expect(result.requiresReference).toBe(true);
-      expect(prisma.tx.paymentMethodDefinition.update).toHaveBeenCalledWith(
+      expect(prisma.tx.paymentMethod.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: { requiresReference: true },
         }),
@@ -380,10 +376,10 @@ describe('PaymentMethodsService', () => {
     });
 
     it('affectsCashDrawer update', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ affectsCashDrawer: true }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ affectsCashDrawer: false }),
       );
 
@@ -392,18 +388,18 @@ describe('PaymentMethodsService', () => {
         affectsCashDrawer: false,
       });
 
-      expect(prisma.tx.paymentMethodDefinition.update).toHaveBeenCalledWith(
+      expect(prisma.tx.paymentMethod.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: { affectsCashDrawer: false } }),
       );
     });
 
     it('accountingDestination update', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({
           accountingDestination: PaymentMethodAccountingDestination.CASH,
         }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({
           accountingDestination: PaymentMethodAccountingDestination.BANK,
         }),
@@ -414,7 +410,7 @@ describe('PaymentMethodsService', () => {
         accountingDestination: PaymentMethodAccountingDestination.BANK,
       });
 
-      expect(prisma.tx.paymentMethodDefinition.update).toHaveBeenCalledWith(
+      expect(prisma.tx.paymentMethod.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: {
             accountingDestination: PaymentMethodAccountingDestination.BANK,
@@ -424,36 +420,36 @@ describe('PaymentMethodsService', () => {
     });
 
     it('sortOrder update', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ sortOrder: 10 }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ sortOrder: 25 }),
       );
 
       await service.updatePaymentMethod({ ...baseInput, sortOrder: 25 });
 
-      expect(prisma.tx.paymentMethodDefinition.update).toHaveBeenCalledWith(
+      expect(prisma.tx.paymentMethod.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: { sortOrder: 25 } }),
       );
     });
 
     it('sortOrder negativo -> BadRequestException', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ sortOrder: 10 }),
       );
 
       await expect(
         service.updatePaymentMethod({ ...baseInput, sortOrder: -1 }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(prisma.tx.paymentMethodDefinition.update).not.toHaveBeenCalled();
+      expect(prisma.tx.paymentMethod.update).not.toHaveBeenCalled();
     });
 
     it('desactivar (active true->false) audita PAYMENT_METHOD_DEACTIVATED', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ active: true }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ active: false }),
       );
 
@@ -469,10 +465,10 @@ describe('PaymentMethodsService', () => {
     });
 
     it('reactivar (active false->true) audita PAYMENT_METHOD_ACTIVATED', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ active: false }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ active: true }),
       );
 
@@ -488,10 +484,10 @@ describe('PaymentMethodsService', () => {
     });
 
     it('active transiciona junto con otros campos en el mismo PATCH: UNA sola fila ACTIVATED/DEACTIVATED, nunca una UPDATED adicional', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ active: true, name: 'Efectivo', sortOrder: 10 }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({
           active: false,
           name: 'Efectivo (legacy)',
@@ -518,10 +514,10 @@ describe('PaymentMethodsService', () => {
     });
 
     it('active reenviado con el mismo valor ya vigente no cuenta como transición (queda como UPDATED si algo más cambió)', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ active: true, name: 'Efectivo' }),
       );
-      prisma.tx.paymentMethodDefinition.update.mockResolvedValue(
+      prisma.tx.paymentMethod.update.mockResolvedValue(
         makeMethodRow({ active: true, name: 'Efectivo (caja)' }),
       );
 
@@ -537,7 +533,7 @@ describe('PaymentMethodsService', () => {
     });
 
     it('no-op real (mismos valores ya vigentes): no escribe ni audita, devuelve el recurso actual', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(
         makeMethodRow({ name: 'Efectivo', sortOrder: 10 }),
       );
 
@@ -548,19 +544,17 @@ describe('PaymentMethodsService', () => {
       });
 
       expect(result.name).toBe('Efectivo');
-      expect(prisma.tx.paymentMethodDefinition.update).not.toHaveBeenCalled();
+      expect(prisma.tx.paymentMethod.update).not.toHaveBeenCalled();
       expect(auditService.record).not.toHaveBeenCalled();
     });
 
     it('name en blanco tras trim -> BadRequestException', async () => {
-      prisma.tx.paymentMethodDefinition.findUnique.mockResolvedValue(
-        makeMethodRow(),
-      );
+      prisma.tx.paymentMethod.findUnique.mockResolvedValue(makeMethodRow());
 
       await expect(
         service.updatePaymentMethod({ ...baseInput, name: '   ' }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(prisma.tx.paymentMethodDefinition.update).not.toHaveBeenCalled();
+      expect(prisma.tx.paymentMethod.update).not.toHaveBeenCalled();
     });
 
     it('code NUNCA participa: UpdatePaymentMethodInput no declara ese campo (verificación de tipos en compilación)', () => {

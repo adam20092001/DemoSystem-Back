@@ -1,12 +1,19 @@
-import { PaymentMethod, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 /**
- * Comando interno de PaymentEngine.register() (Bloque B). No es un DTO
- * HTTP: sin decoradores de class-validator, no se construye en ningún
- * controller. amount/reference ya llegan parseados/normalizados por el
- * llamador (PaymentsService/SalesService vía payment-calculator.ts); el
- * motor los revalida igual (defensa en profundidad, mismo criterio que
- * StockMovementCommand). saleNumber viaja explícito porque el motor nunca
+ * Comando interno de PaymentEngine.register() (Bloque B; Ticket C, Bloque
+ * C3 le agrega la resolución dinámica de método). No es un DTO HTTP: sin
+ * decoradores de class-validator, no se construye en ningún controller.
+ * amount/reference ya llegan parseados/normalizados por el llamador
+ * (PaymentsService/SalesService vía payment-calculator.ts); el motor los
+ * revalida igual (defensa en profundidad, mismo criterio que
+ * StockMovementCommand). `method` es el CÓDIGO crudo tal como llegó del
+ * llamador (sin normalizar todavía) — PaymentEngine.register() lo
+ * normaliza y resuelve contra `payment_methods` dentro de su propia
+ * transacción; el comando nunca carga un PaymentMethod ya resuelto,
+ * precisamente para que esa resolución ocurra siempre dentro de la
+ * transacción que crea el Payment (Ticket C, Bloque C3, defensa contra
+ * ventanas de carrera). saleNumber viaja explícito porque el motor nunca
  * consulta Sale por sí mismo (nunca abre transacción ni inyecta
  * PrismaService): lo necesita únicamente para la descripción/metadata de
  * auditoría.
@@ -14,7 +21,7 @@ import { PaymentMethod, Prisma } from '@prisma/client';
 export interface RegisterPaymentCommand {
   saleId: string;
   saleNumber: string;
-  method: PaymentMethod;
+  method: string;
   amount: Prisma.Decimal;
   reference: string | null;
   actorUserId: string;

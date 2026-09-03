@@ -3,7 +3,6 @@ import {
   CategoryStatus,
   CustomerType,
   DocumentType,
-  PaymentMethod,
   PaymentStatus,
   PrismaClient,
   QuoteStatus,
@@ -694,11 +693,21 @@ describe('Reports (e2e)', () => {
       expect(response.status).toBe(400);
     });
 
-    it('R9: method inválido -> 400', async () => {
+    it('R9: method con formato arbitrario -> 200 (Ticket C, Bloque C3: filtro dinámico por snapshot, sin validar contra PaymentMethod), data vacía si nada coincide', async () => {
       const response = await get(
         '/api/v1/reports/payments-by-method',
         adminCookie,
         { method: 'NOT_A_METHOD' },
+      );
+      expect(response.status).toBe(200);
+      expect((response.body as { data: unknown[] }).data).toEqual([]);
+    });
+
+    it('R9: method de más de 30 caracteres -> 400', async () => {
+      const response = await get(
+        '/api/v1/reports/payments-by-method',
+        adminCookie,
+        { method: 'X'.repeat(31) },
       );
       expect(response.status).toBe(400);
     });
@@ -1759,7 +1768,8 @@ describe('Reports (e2e)', () => {
       saleId: string;
       saleNumber: string;
       customerName: string;
-      method: PaymentMethod;
+      method: string;
+      methodName: string;
       reference: string | null;
       amount: string;
       status: PaymentStatus;
@@ -1824,7 +1834,7 @@ describe('Reports (e2e)', () => {
         {
           from: PERIOD_FROM,
           to: PERIOD_TO,
-          method: PaymentMethod.CASH,
+          method: 'CASH',
         },
       );
       const noFilterRows = (
@@ -1878,6 +1888,11 @@ describe('Reports (e2e)', () => {
         (byAdmin.body as { data: unknown }).data as R9Row[]
       ).find((r) => r.paymentId === paymentActiveId);
       expect(activeRow?.createdBy.username).not.toBe(SELLER_USERNAME);
+      // Ticket C, Bloque C3: method/methodName son el snapshot dinámico
+      // (Payment.paymentMethodCode/paymentMethodName), campo aditivo
+      // methodName incluido.
+      expect(activeRow?.method).toBe('CASH');
+      expect(activeRow?.methodName).toBe('Efectivo');
       const bySellerCreator = await get(
         '/api/v1/reports/payments-by-method',
         adminCookie,
@@ -1899,7 +1914,56 @@ describe('Reports (e2e)', () => {
       ).toEqual(['id', 'username', 'firstName', 'lastName'].sort());
     });
 
-    it('reference: string preservada (BANK_TRANSFER) y null preservado (CASH)', async () => {
+    it('Ticket C, Bloque C3: un Payment histórico con method legacy (BANK_TRANSFER, hoy INACTIVO) sigue siendo legible en R9 con su snapshot correcto, y el filtro por ese code lo encuentra', async () => {
+      const productLegacy = await createProductHttp({ salePrice: '20.00' });
+      const customer = await createCustomerHttp();
+      const sale = await createSaleHttp(adminCookie, {
+        customerId: customer.id,
+        items: [{ productId: productLegacy.id, quantity: '1.000' }],
+      });
+      await setSaleConfirmedAt(sale.id, insideInstant);
+
+      // BANK_TRANSFER es baseline legacy INACTIVO desde C1/C2: ya no se
+      // puede usar vía POST /payments (409), pero un Payment que YA lo
+      // tenga snapshoteado (aquí, insertado directo para no depender del
+      // momento en que estuvo activo) debe seguir siendo reportable tal
+      // cual, sin remapear a ningún método vigente.
+      const legacyMethod = await prisma.paymentMethod.findUniqueOrThrow({
+        where: { code: 'BANK_TRANSFER' },
+      });
+      expect(legacyMethod.active).toBe(false);
+      const admin = await prisma.user.findUniqueOrThrow({
+        where: { username: E2E_ADMIN_USERNAME },
+      });
+      const legacyPayment = await prisma.payment.create({
+        data: {
+          saleId: sale.id,
+          paymentMethodId: legacyMethod.id,
+          paymentMethodCode: legacyMethod.code,
+          paymentMethodName: legacyMethod.name,
+          paymentMethodAffectsCashDrawer: legacyMethod.affectsCashDrawer,
+          amount: '20.00',
+          reference: 'OP-LEGACY-R9',
+          status: PaymentStatus.ACTIVE,
+          paidAt: insideInstant,
+          createdByUserId: admin.id,
+        },
+      });
+
+      const response = await get(
+        '/api/v1/reports/payments-by-method',
+        adminCookie,
+        { from: PERIOD_FROM, to: PERIOD_TO, method: 'BANK_TRANSFER' },
+      );
+      expect(response.status).toBe(200);
+      const rows = (response.body as { data: unknown }).data as R9Row[];
+      const row = rows.find((r) => r.paymentId === legacyPayment.id);
+      expect(row).toBeDefined();
+      expect(row?.method).toBe('BANK_TRANSFER');
+      expect(row?.methodName).toBe(legacyMethod.name);
+    });
+
+    it('reference: string preservada (TRANSFER) y null preservado (CASH)', async () => {
       const productR9b = await createProductHttp({ salePrice: '30.00' });
       const customer = await createCustomerHttp();
 
@@ -1912,7 +1976,7 @@ describe('Reports (e2e)', () => {
         adminCookie,
         saleWithRef.id,
         {
-          method: 'BANK_TRANSFER',
+          method: 'TRANSFER',
           amount: '30.00',
           reference: 'OP-E2E-REF-123',
         },
