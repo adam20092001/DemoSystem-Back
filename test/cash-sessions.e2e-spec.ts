@@ -1,5 +1,10 @@
 import { INestApplication } from '@nestjs/common';
-import { CashSessionStatus, PrismaClient, RoleName } from '@prisma/client';
+import {
+  CashSessionStatus,
+  DocumentType,
+  PrismaClient,
+  RoleName,
+} from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
@@ -14,23 +19,26 @@ import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
 /**
- * Ticket B post-MVP, Bloque B2 — CashSessionsModule. Suite dedicada,
- * apertura/lectura únicamente (sin cierre/aprobación/rechazo, eso llega en
- * un bloque posterior). Fixtures propios de esta suite (nunca reutiliza el
- * admin/seller compartido de otras suites): CashSession tiene la
- * invariante "como máximo una sin resolver por usuario", así que cada
- * escenario que necesita una precondición concreta usa su propio usuario
- * dedicado, para no interferir entre pruebas dentro del mismo archivo.
- * Toda CashSession creada aquí se elimina por su ID exacto en afterAll
- * (nunca deleteMany({}) sobre toda la tabla); los usuarios fixture SELLER/
+ * Ticket B post-MVP, Bloques B2+B3 — CashSessionsModule. Fixtures propios
+ * de esta suite (nunca reutiliza el admin/seller compartido de otras
+ * suites): CashSession tiene la invariante "como máximo una sin resolver
+ * por usuario", así que cada escenario que necesita una precondición
+ * concreta usa su propio usuario dedicado, para no interferir entre
+ * pruebas dentro del mismo archivo — o encadena estados secuencialmente en
+ * el MISMO usuario cuando un estado ya resuelto (OPEN tras un cierre
+ * exacto, o CLOSED) no bloquea una apertura siguiente. Toda CashSession
+ * creada aquí se elimina por su ID exacto en afterAll (nunca
+ * deleteMany({}) sobre toda la tabla); los usuarios fixture SELLER/
  * MANAGEMENT/WAREHOUSE, idempotentes vía upsertFixtureUser, se conservan
  * entre corridas (mismo criterio que el resto del repositorio). Para el
- * caso ADMIN se reutiliza el admin compartido (E2E_ADMIN_USERNAME) en vez
- * de crear un ADMIN propio: users-admin-concurrency.e2e-spec.ts cuenta el
- * TOTAL de usuarios ADMIN activos en toda la base de datos como
- * precondición exacta de sus escenarios — un ADMIN adicional persistente
- * creado por esta suite rompería esa precondición en cualquier ejecución
- * posterior de la suite completa.
+ * caso ADMIN se reutiliza el admin compartido (E2E_ADMIN_USERNAME) como
+ * PRIMER revisor siempre que sea posible; el único ADMIN adicional
+ * (ADMIN2_USERNAME, necesario para probar "un ADMIN nunca puede
+ * aprobar/rechazar su propia caja" vs. "un ADMIN distinto sí puede") es
+ * efímero: se crea en beforeAll y se ELIMINA por completo en afterAll —
+ * nunca queda persistente, porque users-admin-concurrency.e2e-spec.ts
+ * cuenta el TOTAL de usuarios ADMIN activos en toda la base de datos como
+ * precondición exacta de sus escenarios.
  */
 const SELLER_USERNAME = 'e2e_seller_cash_sessions_main';
 const SELLER_PASSWORD = 'SellerCashSessions123';
@@ -42,10 +50,22 @@ const SELLER_409_USERNAME = 'e2e_seller_cash_sessions_conflict';
 const SELLER_409_PASSWORD = 'SellerCashSessionsAAA';
 const SELLER_RACE_USERNAME = 'e2e_seller_cash_sessions_race';
 const SELLER_RACE_PASSWORD = 'SellerCashSessionsBBB';
+const SELLER_CLOSE_USERNAME = 'e2e_seller_cash_sessions_close';
+const SELLER_CLOSE_PASSWORD = 'SellerCashSessionsCCC';
+const SELLER_EXPECTED_USERNAME = 'e2e_seller_cash_sessions_expected';
+const SELLER_EXPECTED_PASSWORD = 'SellerCashSessionsDDD';
+const SELLER_APPROVAL_USERNAME = 'e2e_seller_cash_sessions_approval';
+const SELLER_APPROVAL_PASSWORD = 'SellerCashSessionsEEE';
+const SELLER_REJECT_USERNAME = 'e2e_seller_cash_sessions_reject';
+const SELLER_REJECT_PASSWORD = 'SellerCashSessionsFFF';
+const SELLER_RESOLUTION_RACE_USERNAME = 'e2e_seller_cash_sessions_resrace';
+const SELLER_RESOLUTION_RACE_PASSWORD = 'SellerCashSessionsGGG';
 const MANAGEMENT_USERNAME = 'e2e_management_cash_sessions';
 const MANAGEMENT_PASSWORD = 'ManagementCashSessions123';
 const WAREHOUSE_USERNAME = 'e2e_warehouse_cash_sessions';
 const WAREHOUSE_PASSWORD = 'WarehouseCashSessions123';
+const ADMIN2_USERNAME = 'e2e_admin2_cash_sessions_ephemeral';
+const ADMIN2_PASSWORD = 'Admin2CashSessionsHHH';
 
 const NON_EXISTENT_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -66,6 +86,21 @@ interface SafeCashSessionBody {
   approvalComment: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface SafeCashSessionMethodBreakdownRowBody {
+  paymentMethodId: string;
+  paymentMethodCode: string;
+  paymentMethodName: string;
+  totalAmount: string;
+}
+
+interface SafeCashSessionDetailBody extends SafeCashSessionBody {
+  liveCollectionsTotal: string | null;
+  liveCashCollectionsTotal: string | null;
+  liveExpectedCashAmount: string | null;
+  liveBreakdownByMethod: SafeCashSessionMethodBreakdownRowBody[] | null;
+  breakdownByMethod: SafeCashSessionMethodBreakdownRowBody[] | null;
 }
 
 interface PaginatedBody<T> {
@@ -90,12 +125,23 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
   let seller409Id: string;
   let sellerRaceCookie: string;
   let sellerRaceId: string;
+  let sellerCloseCookie: string;
+  let sellerExpectedCookie: string;
+  let sellerApprovalCookie: string;
+  let sellerRejectCookie: string;
+  let sellerResolutionRaceCookie: string;
   let managementCookie: string;
   let warehouseCookie: string;
+  let admin2Cookie: string;
 
   /** IDs propios de CashSession/AuditLog generados por esta suite (cleanup exacto en afterAll). */
   const ownedSessionIds: string[] = [];
   const ownedAuditLogIds: string[] = [];
+  /** Fixtures de Payment/Sale/Customer/Product vinculadas (Ticket B, Bloque B3: prueba de efectivo esperado), cleanup exacto en afterAll. */
+  const ownedPaymentIds: string[] = [];
+  const ownedSaleIds: string[] = [];
+  const ownedCustomerIds: string[] = [];
+  const ownedProductIds: string[] = [];
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
@@ -132,6 +178,36 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
       roleName: RoleName.SELLER,
     });
     await upsertFixtureUser(prisma, {
+      username: SELLER_CLOSE_USERNAME,
+      email: 'e2e_seller_cash_sessions_close@demosystem.test',
+      password: SELLER_CLOSE_PASSWORD,
+      roleName: RoleName.SELLER,
+    });
+    await upsertFixtureUser(prisma, {
+      username: SELLER_EXPECTED_USERNAME,
+      email: 'e2e_seller_cash_sessions_expected@demosystem.test',
+      password: SELLER_EXPECTED_PASSWORD,
+      roleName: RoleName.SELLER,
+    });
+    await upsertFixtureUser(prisma, {
+      username: SELLER_APPROVAL_USERNAME,
+      email: 'e2e_seller_cash_sessions_approval@demosystem.test',
+      password: SELLER_APPROVAL_PASSWORD,
+      roleName: RoleName.SELLER,
+    });
+    await upsertFixtureUser(prisma, {
+      username: SELLER_REJECT_USERNAME,
+      email: 'e2e_seller_cash_sessions_reject@demosystem.test',
+      password: SELLER_REJECT_PASSWORD,
+      roleName: RoleName.SELLER,
+    });
+    await upsertFixtureUser(prisma, {
+      username: SELLER_RESOLUTION_RACE_USERNAME,
+      email: 'e2e_seller_cash_sessions_resrace@demosystem.test',
+      password: SELLER_RESOLUTION_RACE_PASSWORD,
+      roleName: RoleName.SELLER,
+    });
+    await upsertFixtureUser(prisma, {
       username: MANAGEMENT_USERNAME,
       email: 'e2e_management_cash_sessions@demosystem.test',
       password: MANAGEMENT_PASSWORD,
@@ -142,6 +218,31 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
       email: 'e2e_warehouse_cash_sessions@demosystem.test',
       password: WAREHOUSE_PASSWORD,
       roleName: RoleName.WAREHOUSE,
+    });
+    // ADMIN efímero (ver docblock de cabecera): se elimina por completo en
+    // afterAll, nunca queda persistente.
+    await upsertFixtureUser(prisma, {
+      username: ADMIN2_USERNAME,
+      email: 'e2e_admin2_cash_sessions_ephemeral@demosystem.test',
+      password: ADMIN2_PASSWORD,
+      roleName: RoleName.ADMIN,
+    });
+
+    // Secuencia NV: mismo criterio exacto que accounting.e2e-spec.ts/
+    // reports.e2e-spec.ts/sales.e2e-spec.ts. Esta suite crea Sales reales
+    // (createLinkedPayment, Ticket B Bloque B3), así que debe garantizar
+    // defensivamente que la fila exista (recreándola fresca en 0 si una
+    // suite previa la dejó ausente vía su propio afterAll), sin pisar un
+    // contador ya en curso si la fila ya existe (update: {} es un no-op).
+    await prisma.documentSequence.upsert({
+      where: { documentType: DocumentType.SALE },
+      update: {},
+      create: {
+        documentType: DocumentType.SALE,
+        prefix: 'NV-',
+        currentNumber: 0,
+        padding: 6,
+      },
     });
 
     adminCookie = (
@@ -186,11 +287,49 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
     );
     sellerRaceCookie = sellerRaceLogin.cookie;
     sellerRaceId = (sellerRaceLogin.body as { id: string }).id;
+    sellerCloseCookie = (
+      await login(
+        app.getHttpServer(),
+        SELLER_CLOSE_USERNAME,
+        SELLER_CLOSE_PASSWORD,
+      )
+    ).cookie;
+    sellerExpectedCookie = (
+      await login(
+        app.getHttpServer(),
+        SELLER_EXPECTED_USERNAME,
+        SELLER_EXPECTED_PASSWORD,
+      )
+    ).cookie;
+    sellerApprovalCookie = (
+      await login(
+        app.getHttpServer(),
+        SELLER_APPROVAL_USERNAME,
+        SELLER_APPROVAL_PASSWORD,
+      )
+    ).cookie;
+    sellerRejectCookie = (
+      await login(
+        app.getHttpServer(),
+        SELLER_REJECT_USERNAME,
+        SELLER_REJECT_PASSWORD,
+      )
+    ).cookie;
+    sellerResolutionRaceCookie = (
+      await login(
+        app.getHttpServer(),
+        SELLER_RESOLUTION_RACE_USERNAME,
+        SELLER_RESOLUTION_RACE_PASSWORD,
+      )
+    ).cookie;
     managementCookie = (
       await login(app.getHttpServer(), MANAGEMENT_USERNAME, MANAGEMENT_PASSWORD)
     ).cookie;
     warehouseCookie = (
       await login(app.getHttpServer(), WAREHOUSE_USERNAME, WAREHOUSE_PASSWORD)
+    ).cookie;
+    admin2Cookie = (
+      await login(app.getHttpServer(), ADMIN2_USERNAME, ADMIN2_PASSWORD)
     ).cookie;
   });
 
@@ -201,11 +340,77 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
           where: { id: { in: ownedAuditLogIds } },
         });
       }
+      // Orden por FK: AccountingEntry (Payment/Sale) -> Payment
+      // (cashSessionId RESTRICT hacia CashSession) ->
+      // CashSessionPaymentMethodSummary (por si algo quedó sin resolver
+      // hacia OPEN) -> CashSession -> Sale -> Customer/Product.
+      if (ownedPaymentIds.length > 0 || ownedSaleIds.length > 0) {
+        await prisma.accountingEntry.deleteMany({
+          where: {
+            OR: [
+              ...(ownedPaymentIds.length > 0
+                ? [
+                    {
+                      sourceType: 'PAYMENT' as const,
+                      sourceId: { in: ownedPaymentIds },
+                    },
+                  ]
+                : []),
+              ...(ownedSaleIds.length > 0
+                ? [
+                    {
+                      sourceType: 'SALE' as const,
+                      sourceId: { in: ownedSaleIds },
+                    },
+                  ]
+                : []),
+            ],
+          },
+        });
+      }
+      if (ownedPaymentIds.length > 0) {
+        await prisma.payment.deleteMany({
+          where: { id: { in: ownedPaymentIds } },
+        });
+      }
       if (ownedSessionIds.length > 0) {
+        await prisma.cashSessionPaymentMethodSummary.deleteMany({
+          where: { cashSessionId: { in: ownedSessionIds } },
+        });
         await prisma.cashSession.deleteMany({
           where: { id: { in: ownedSessionIds } },
         });
       }
+      if (ownedSaleIds.length > 0) {
+        await prisma.sale.deleteMany({ where: { id: { in: ownedSaleIds } } });
+        // Secuencia NV: mismo criterio exacto que accounting.e2e-spec.ts/
+        // reports.e2e-spec.ts/sales.e2e-spec.ts (se elimina al final, nunca
+        // solo se resetea el contador): esta suite crea Sales reales igual
+        // que aquellas (vía createLinkedPayment, Ticket B Bloque B3), así
+        // que asume la misma responsabilidad de dejar la fila ausente para
+        // que el siguiente archivo que la necesite la recree fresca en 0
+        // vía su propio upsert defensivo. Sin este paso, cualquier suite
+        // posterior que asuma "currentNumber = 0 antes de la primera venta"
+        // (sales.e2e-spec.ts) fallaría por un efecto colateral de esta
+        // suite.
+        await prisma.documentSequence.deleteMany({
+          where: { documentType: DocumentType.SALE },
+        });
+      }
+      if (ownedProductIds.length > 0) {
+        await prisma.product.deleteMany({
+          where: { id: { in: ownedProductIds } },
+        });
+      }
+      if (ownedCustomerIds.length > 0) {
+        await prisma.customer.deleteMany({
+          where: { id: { in: ownedCustomerIds } },
+        });
+      }
+      // ADMIN efímero: sus propias CashSession ya se eliminaron arriba
+      // (rastreadas en ownedSessionIds), así que el borrado del usuario
+      // nunca choca contra la FK CashSession.userId (RESTRICT).
+      await prisma.user.deleteMany({ where: { username: ADMIN2_USERNAME } });
     } finally {
       await app.close();
       await prisma.$disconnect();
@@ -259,6 +464,118 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
     ownedSessionIds.push(body.id);
     await trackLatestAuditRow(AuditAction.CASH_SESSION_OPENED, body.id);
     return body;
+  }
+
+  async function closeSession(
+    cookie: string,
+    body: { countedCashAmount: string; closingObservation?: string },
+  ): Promise<request.Response> {
+    return request(app.getHttpServer())
+      .post('/api/v1/cash-sessions/current/close')
+      .set('Cookie', cookie)
+      .send(body);
+  }
+
+  async function approveSession(
+    cookie: string,
+    id: string,
+    body: { comment?: string } = {},
+  ): Promise<request.Response> {
+    return request(app.getHttpServer())
+      .post(`/api/v1/cash-sessions/${id}/approve`)
+      .set('Cookie', cookie)
+      .send(body);
+  }
+
+  async function rejectSession(
+    cookie: string,
+    id: string,
+    body: { reason?: string },
+  ): Promise<request.Response> {
+    return request(app.getHttpServer())
+      .post(`/api/v1/cash-sessions/${id}/reject`)
+      .set('Cookie', cookie)
+      .send(body);
+  }
+
+  /**
+   * Crea un Sale + Payment real vía la API pública y lo vincula a una
+   * CashSession por escritura directa de Prisma SOLO para el campo
+   * cashSessionId (Ticket B, Bloque B3 §35: "para B3 E2E crear/vincular
+   * fixtures de Payment usando un montaje explícito y acotado" —
+   * PaymentEngine sigue sin asignar Payment.cashSessionId automáticamente
+   * hasta el Bloque B4). La anulación, si se pide, pasa SIEMPRE por el
+   * endpoint real (nunca una escritura cruda de status): §27 exige probar
+   * el snapshot de CashSession sin alterar el comportamiento real de
+   * PaymentsService.cancel().
+   */
+  async function createLinkedPayment(
+    sellerCookieForFixture: string,
+    cashSessionId: string,
+    method: string,
+    amount: string,
+    options: { reference?: string } = {},
+  ): Promise<{
+    id: string;
+    saleId: string;
+    paymentMethodAffectsCashDrawer: boolean;
+  }> {
+    const category = await prisma.category.findFirstOrThrow({
+      where: { code: 'SERVICIOS' },
+    });
+    const unit = await prisma.unit.findFirstOrThrow({ where: { code: 'SER' } });
+
+    const customerResponse = await request(app.getHttpServer())
+      .post('/api/v1/customers')
+      .set('Cookie', sellerCookieForFixture)
+      .send({
+        customerType: 'PERSON',
+        customerStage: 'CUSTOMER',
+        name: `Cliente B3 ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+    expect(customerResponse.status).toBe(201);
+    const customerId = (customerResponse.body as { id: string }).id;
+    ownedCustomerIds.push(customerId);
+
+    const productResponse = await request(app.getHttpServer())
+      .post('/api/v1/products')
+      .set('Cookie', adminCookie)
+      .send({
+        sku: `B3-CS-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: 'Servicio fixture Bloque B3',
+        productType: 'SERVICE',
+        categoryId: category.id,
+        unitId: unit.id,
+        salePrice: amount,
+        isInventoryTracked: false,
+      });
+    expect(productResponse.status).toBe(201);
+    const productId = (productResponse.body as { id: string }).id;
+    ownedProductIds.push(productId);
+
+    const saleResponse = await request(app.getHttpServer())
+      .post('/api/v1/sales')
+      .set('Cookie', sellerCookieForFixture)
+      .send({ customerId, items: [{ productId, quantity: '1' }] });
+    expect(saleResponse.status).toBe(201);
+    const saleId = (saleResponse.body as { id: string }).id;
+    ownedSaleIds.push(saleId);
+
+    const paymentResponse = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/payments`)
+      .set('Cookie', sellerCookieForFixture)
+      .send({ method, amount, reference: options.reference });
+    expect(paymentResponse.status).toBe(201);
+    const paymentId = (paymentResponse.body as { payment: { id: string } })
+      .payment.id;
+    ownedPaymentIds.push(paymentId);
+
+    const linked = await prisma.payment.update({
+      where: { id: paymentId },
+      data: { cashSessionId },
+      select: { id: true, paymentMethodAffectsCashDrawer: true },
+    });
+    return { ...linked, saleId };
   }
 
   // ==================================================================
@@ -553,6 +870,674 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
         where: { userId: sellerRaceId },
       });
       expect(finalCount).toBe(1);
+    });
+  });
+
+  // ==================================================================
+  // POST /cash-sessions/current/close — matriz (Ticket B, Bloque B3 §35)
+  // ==================================================================
+  describe('POST /cash-sessions/current/close', () => {
+    it('OPEN, diferencia cero -> CLOSED directo, sin revisor', async () => {
+      const session = await openCashSessionOrThrow(sellerCloseCookie, '100.00');
+      const response = await closeSession(sellerCloseCookie, {
+        countedCashAmount: '100.00',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      expect(body.id).toBe(session.id);
+      expect(body.status).toBe(CashSessionStatus.CLOSED);
+      expect(body.differenceAmount).toBe('0.00');
+      expect(body.approvedByUserId).toBeNull();
+      expect(body.closedAt).not.toBeNull();
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, session.id);
+    });
+
+    it('descuadre sin closingObservation -> 400, la caja sigue OPEN', async () => {
+      const session = await openCashSessionOrThrow(sellerCloseCookie, '100.00');
+      const response = await closeSession(sellerCloseCookie, {
+        countedCashAmount: '90.00',
+      });
+      expect(response.status).toBe(400);
+      const current = await prisma.cashSession.findUniqueOrThrow({
+        where: { id: session.id },
+      });
+      expect(current.status).toBe(CashSessionStatus.OPEN);
+    });
+
+    it('descuadre con closingObservation válida -> PENDING_APPROVAL, audita CASH_SESSION_CLOSING_REQUESTED', async () => {
+      const response = await closeSession(sellerCloseCookie, {
+        countedCashAmount: '90.00',
+        closingObservation: 'Faltante justificado por vuelto',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      expect(body.status).toBe(CashSessionStatus.PENDING_APPROVAL);
+      expect(body.differenceAmount).toBe('-10.00');
+      expect(body.closingObservation).toBe('Faltante justificado por vuelto');
+      expect(body.closedAt).toBeNull();
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_CLOSING_REQUESTED,
+        body.id,
+      );
+    });
+
+    it('segundo cierre mientras PENDING_APPROVAL -> 409, snapshot no se sobrescribe', async () => {
+      const before = await prisma.cashSession.findFirstOrThrow({
+        where: {
+          userId: (
+            await prisma.user.findUniqueOrThrow({
+              where: { username: SELLER_CLOSE_USERNAME },
+            })
+          ).id,
+          status: CashSessionStatus.PENDING_APPROVAL,
+        },
+      });
+      const response = await closeSession(sellerCloseCookie, {
+        countedCashAmount: '999.00',
+        closingObservation: 'intento de sobrescritura',
+      });
+      expect(response.status).toBe(409);
+      const after = await prisma.cashSession.findUniqueOrThrow({
+        where: { id: before.id },
+      });
+      expect(after.countedCashAmount?.toFixed(2)).toBe(
+        before.countedCashAmount?.toFixed(2),
+      );
+      expect(after.closingObservation).toBe(before.closingObservation);
+    });
+
+    it('sin caja sin resolver -> 404', async () => {
+      const response = await closeSession(sellerNoSessionCookie, {
+        countedCashAmount: '0',
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('countedCashAmount negativo -> 400', async () => {
+      const response = await closeSession(seller2Cookie, {
+        countedCashAmount: '-1.00',
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it('MANAGEMENT -> 403', async () => {
+      const response = await closeSession(managementCookie, {
+        countedCashAmount: '0',
+      });
+      expect(response.status).toBe(403);
+    });
+
+    it('WAREHOUSE -> 403', async () => {
+      const response = await closeSession(warehouseCookie, {
+        countedCashAmount: '0',
+      });
+      expect(response.status).toBe(403);
+    });
+  });
+
+  // ==================================================================
+  // Cálculo de efectivo esperado (Ticket B, Bloque B3 §36)
+  // ==================================================================
+  describe('cálculo de efectivo esperado', () => {
+    it('opening 100 + CASH 200 (afecta caja) + CARD 300 (no afecta caja) -> expected 300, collectionsTotal 500, cashCollectionsTotal 200; CANCELLED excluido', async () => {
+      const session = await openCashSessionOrThrow(
+        sellerExpectedCookie,
+        '100.00',
+      );
+
+      const cashPayment = await createLinkedPayment(
+        sellerExpectedCookie,
+        session.id,
+        'CASH',
+        '200.00',
+      );
+      expect(cashPayment.paymentMethodAffectsCashDrawer).toBe(true);
+
+      const cardPayment = await createLinkedPayment(
+        sellerExpectedCookie,
+        session.id,
+        'CARD',
+        '300.00',
+        { reference: 'OP-B3-CARD' },
+      );
+      expect(cardPayment.paymentMethodAffectsCashDrawer).toBe(false);
+
+      // Payment vinculado pero luego anulado por el flujo REAL de
+      // cancelación (nunca una escritura cruda de status): debe excluirse
+      // por completo del cálculo, igual que si nunca hubiera existido.
+      const cancelledPayment = await createLinkedPayment(
+        sellerExpectedCookie,
+        session.id,
+        'CASH',
+        '999.00',
+      );
+      const cancelResponse = await request(app.getHttpServer())
+        .post(
+          `/api/v1/sales/${cancelledPayment.saleId}/payments/${cancelledPayment.id}/cancel`,
+        )
+        .set('Cookie', adminCookie)
+        .send({ reason: 'Anulación fixture B3 — excluir del cálculo' });
+      expect(cancelResponse.status).toBe(200);
+
+      const currentResponse = await request(app.getHttpServer())
+        .get('/api/v1/cash-sessions/current')
+        .set('Cookie', sellerExpectedCookie);
+      expect(currentResponse.status).toBe(200);
+      const currentBody = currentResponse.body as SafeCashSessionDetailBody;
+      expect(currentBody.liveCollectionsTotal).toBe('500.00');
+      expect(currentBody.liveCashCollectionsTotal).toBe('200.00');
+      expect(currentBody.liveExpectedCashAmount).toBe('300.00');
+      expect(currentBody.liveBreakdownByMethod).toHaveLength(2);
+      expect(currentBody.breakdownByMethod).toBeNull();
+
+      const closeResponse = await closeSession(sellerExpectedCookie, {
+        countedCashAmount: '300.00',
+      });
+      expect(closeResponse.status).toBe(200);
+      const closed = closeResponse.body as SafeCashSessionBody;
+      expect(closed.status).toBe(CashSessionStatus.CLOSED);
+      expect(closed.expectedCashAmount).toBe('300.00');
+      expect(closed.differenceAmount).toBe('0.00');
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, session.id);
+
+      const detailResponse = await request(app.getHttpServer())
+        .get(`/api/v1/cash-sessions/${session.id}`)
+        .set('Cookie', sellerExpectedCookie);
+      expect(detailResponse.status).toBe(200);
+      const detailBody = detailResponse.body as SafeCashSessionDetailBody;
+      expect(detailBody.liveExpectedCashAmount).toBeNull();
+      expect(detailBody.breakdownByMethod).toHaveLength(2);
+      const cashRow = detailBody.breakdownByMethod?.find(
+        (row) => row.paymentMethodCode === 'CASH',
+      );
+      const cardRow = detailBody.breakdownByMethod?.find(
+        (row) => row.paymentMethodCode === 'CARD',
+      );
+      expect(cashRow?.totalAmount).toBe('200.00');
+      expect(cardRow?.totalAmount).toBe('300.00');
+
+      const summaryCount = await prisma.cashSessionPaymentMethodSummary.count({
+        where: { cashSessionId: session.id },
+      });
+      expect(summaryCount).toBe(2);
+    });
+  });
+
+  // ==================================================================
+  // POST /cash-sessions/:id/approve — matriz (Ticket B, Bloque B3 §37)
+  // ==================================================================
+  describe('POST /cash-sessions/:id/approve', () => {
+    async function openAndRequestPending(
+      cookie: string,
+      amount = '100.00',
+      counted = '90.00',
+    ): Promise<SafeCashSessionBody> {
+      await openCashSessionOrThrow(cookie, amount);
+      const response = await closeSession(cookie, {
+        countedCashAmount: counted,
+        closingObservation: 'Descuadre fixture B3',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_CLOSING_REQUESTED,
+        body.id,
+      );
+      return body;
+    }
+
+    it('ADMIN aprueba la caja PENDING_APPROVAL de un SELLER -> CLOSED', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const response = await approveSession(adminCookie, pending.id);
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      expect(body.status).toBe(CashSessionStatus.CLOSED);
+      expect(body.approvedByUserId).not.toBeNull();
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('MANAGEMENT aprueba la caja PENDING_APPROVAL de un SELLER -> CLOSED', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const response = await approveSession(managementCookie, pending.id);
+      expect(response.status).toBe(200);
+      expect((response.body as SafeCashSessionBody).status).toBe(
+        CashSessionStatus.CLOSED,
+      );
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('SELLER -> 403', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const response = await approveSession(sellerApprovalCookie, pending.id);
+      expect(response.status).toBe(403);
+      // Limpieza: la caja sigue pendiente; la resuelve ADMIN para no dejar
+      // un residuo PENDING_APPROVAL fuera de las aserciones de este test.
+      await approveSession(adminCookie, pending.id);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('WAREHOUSE -> 403', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const response = await approveSession(warehouseCookie, pending.id);
+      expect(response.status).toBe(403);
+      await approveSession(adminCookie, pending.id);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('caja no está PENDING_APPROVAL (ya CLOSED) -> 409', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const first = await approveSession(adminCookie, pending.id);
+      expect(first.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+      const second = await approveSession(adminCookie, pending.id);
+      expect(second.status).toBe(409);
+    });
+
+    it('ADMIN nunca puede aprobar su propia caja -> 403; un ADMIN distinto sí puede', async () => {
+      const pending = await openAndRequestPending(admin2Cookie);
+      const selfAttempt = await approveSession(admin2Cookie, pending.id);
+      expect(selfAttempt.status).toBe(403);
+
+      const otherAdminAttempt = await approveSession(adminCookie, pending.id);
+      expect(otherAdminAttempt.status).toBe(200);
+      expect((otherAdminAttempt.body as SafeCashSessionBody).status).toBe(
+        CashSessionStatus.CLOSED,
+      );
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('MANAGEMENT puede aprobar la caja de un ADMIN', async () => {
+      const pending = await openAndRequestPending(admin2Cookie);
+      const response = await approveSession(managementCookie, pending.id);
+      expect(response.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('comment opcional se normaliza y viaja en la respuesta', async () => {
+      const pending = await openAndRequestPending(sellerApprovalCookie);
+      const response = await approveSession(adminCookie, pending.id, {
+        comment: '  Verificado con el cobrador  ',
+      });
+      expect(response.status).toBe(200);
+      expect((response.body as SafeCashSessionBody).approvalComment).toBe(
+        'Verificado con el cobrador',
+      );
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('ID inexistente -> 404', async () => {
+      const response = await approveSession(adminCookie, NON_EXISTENT_UUID);
+      expect(response.status).toBe(404);
+    });
+  });
+
+  // ==================================================================
+  // POST /cash-sessions/:id/reject — matriz (Ticket B, Bloque B3 §38)
+  // ==================================================================
+  describe('POST /cash-sessions/:id/reject', () => {
+    async function openAndRequestPending(
+      cookie: string,
+      amount = '100.00',
+      counted = '90.00',
+    ): Promise<SafeCashSessionBody> {
+      await openCashSessionOrThrow(cookie, amount);
+      const response = await closeSession(cookie, {
+        countedCashAmount: counted,
+        closingObservation: 'Descuadre fixture B3 rechazo',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_CLOSING_REQUESTED,
+        body.id,
+      );
+      return body;
+    }
+
+    it('rechazo sin reason -> 400, la caja sigue PENDING_APPROVAL', async () => {
+      const pending = await openAndRequestPending(sellerRejectCookie);
+      const response = await rejectSession(adminCookie, pending.id, {});
+      expect(response.status).toBe(400);
+      const current = await prisma.cashSession.findUniqueOrThrow({
+        where: { id: pending.id },
+      });
+      expect(current.status).toBe(CashSessionStatus.PENDING_APPROVAL);
+
+      // Limpieza: el 400 deliberadamente NO resuelve la caja (es justo lo
+      // que se está probando). Se aprueba (nunca se rechaza) a propósito:
+      // un rechazo solo devuelve la caja a OPEN, que sigue siendo "sin
+      // resolver" y bloquearía el siguiente test de este describe —
+      // aprobar la lleva a CLOSED (terminal), dejando a sellerRejectCookie
+      // libre para abrir de nuevo.
+      const cleanup = await approveSession(adminCookie, pending.id);
+      expect(cleanup.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('ADMIN rechaza -> OPEN; snapshot limpiado; resumen eliminado; AuditLog captura el snapshot previo', async () => {
+      const opened = await openCashSessionOrThrow(sellerRejectCookie, '100.00');
+      // Payment vinculado ANTES del cierre, para que la fila de resumen
+      // que se prueba "eliminada" abajo sea real (nunca un conteo
+      // trivialmente en cero por falta de datos).
+      await createLinkedPayment(sellerRejectCookie, opened.id, 'CASH', '50.00');
+      const closeResponse = await closeSession(sellerRejectCookie, {
+        countedCashAmount: '90.00',
+        closingObservation: 'Descuadre fixture B3 rechazo',
+      });
+      expect(closeResponse.status).toBe(200);
+      const pending = closeResponse.body as SafeCashSessionBody;
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_CLOSING_REQUESTED,
+        pending.id,
+      );
+
+      const summaryCountBefore =
+        await prisma.cashSessionPaymentMethodSummary.count({
+          where: { cashSessionId: pending.id },
+        });
+      expect(summaryCountBefore).toBe(1);
+
+      const response = await rejectSession(adminCookie, pending.id, {
+        reason: 'El conteo no coincide con lo reportado',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      expect(body.status).toBe(CashSessionStatus.OPEN);
+      expect(body.closeRequestedAt).toBeNull();
+      expect(body.expectedCashAmount).toBeNull();
+      expect(body.countedCashAmount).toBeNull();
+      expect(body.differenceAmount).toBeNull();
+      expect(body.closingObservation).toBeNull();
+      expect(body.closedAt).toBeNull();
+      expect(body.approvedByUserId).toBeNull();
+      expect(body.approvalComment).toBeNull();
+
+      const summaryCountAfter =
+        await prisma.cashSessionPaymentMethodSummary.count({
+          where: { cashSessionId: pending.id },
+        });
+      expect(summaryCountAfter).toBe(0);
+
+      const auditRow = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+          entityId: pending.id,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      ownedAuditLogIds.push(auditRow.id);
+      const metadata = auditRow.metadata as {
+        reason: string;
+        previousDifferenceAmount: string;
+      };
+      expect(metadata.reason).toBe('El conteo no coincide con lo reportado');
+      // opening 100.00 + CASH 50.00 vinculado = expected 150.00; counted 90.00.
+      expect(metadata.previousDifferenceAmount).toBe('-60.00');
+      assertAuditRowHasNoSecrets(auditRow);
+
+      // El rechazo deja la caja OPEN — "sin resolver" todavía (la
+      // invariante de "como máximo una sin resolver" no distingue OPEN de
+      // PENDING_APPROVAL) — se cierra para dejar a sellerRejectCookie
+      // libre para el siguiente test de este describe. El Payment CASH
+      // vinculado (50.00) sigue vinculado tras el rechazo (el rechazo
+      // limpia el snapshot de CashSession, nunca desvincula Payments), así
+      // que el efectivo esperado ahora es 100.00 (opening) + 50.00 = 150.00.
+      const closeCleanup = await closeSession(sellerRejectCookie, {
+        countedCashAmount: '150.00',
+      });
+      expect(closeCleanup.status).toBe(200);
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, pending.id);
+    });
+
+    it('MANAGEMENT rechaza -> OPEN', async () => {
+      const pending = await openAndRequestPending(sellerRejectCookie);
+      const response = await rejectSession(managementCookie, pending.id, {
+        reason: 'Motivo de MANAGEMENT',
+      });
+      expect(response.status).toBe(200);
+      expect((response.body as SafeCashSessionBody).status).toBe(
+        CashSessionStatus.OPEN,
+      );
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+        pending.id,
+      );
+
+      const closeCleanup = await closeSession(sellerRejectCookie, {
+        countedCashAmount: '100.00',
+      });
+      expect(closeCleanup.status).toBe(200);
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, pending.id);
+    });
+
+    it('SELLER -> 403', async () => {
+      const pending = await openAndRequestPending(sellerRejectCookie);
+      const response = await rejectSession(sellerRejectCookie, pending.id, {
+        reason: 'motivo',
+      });
+      expect(response.status).toBe(403);
+      // Limpieza: aprobar (nunca rechazar) resuelve a CLOSED (terminal) en
+      // un solo paso, dejando a sellerRejectCookie libre para el siguiente
+      // test.
+      const cleanup = await approveSession(adminCookie, pending.id);
+      expect(cleanup.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('WAREHOUSE -> 403', async () => {
+      const pending = await openAndRequestPending(sellerRejectCookie);
+      const response = await rejectSession(warehouseCookie, pending.id, {
+        reason: 'motivo',
+      });
+      expect(response.status).toBe(403);
+      const cleanup = await approveSession(adminCookie, pending.id);
+      expect(cleanup.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('ADMIN nunca puede rechazar su propia caja -> 403', async () => {
+      const pending = await openAndRequestPending(admin2Cookie);
+      const response = await rejectSession(admin2Cookie, pending.id, {
+        reason: 'motivo',
+      });
+      expect(response.status).toBe(403);
+      // Limpieza vía un ADMIN DISTINTO (adminCookie, nunca admin2Cookie):
+      // aprobar resuelve a CLOSED en un solo paso.
+      const cleanup = await approveSession(adminCookie, pending.id);
+      expect(cleanup.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        pending.id,
+      );
+    });
+
+    it('caja no está PENDING_APPROVAL (ya OPEN) -> 409', async () => {
+      const pending = await openAndRequestPending(sellerRejectCookie);
+      const first = await rejectSession(adminCookie, pending.id, {
+        reason: 'primero',
+      });
+      expect(first.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+        pending.id,
+      );
+      const second = await rejectSession(adminCookie, pending.id, {
+        reason: 'segundo',
+      });
+      expect(second.status).toBe(409);
+
+      const closeCleanup = await closeSession(sellerRejectCookie, {
+        countedCashAmount: '100.00',
+      });
+      expect(closeCleanup.status).toBe(200);
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, pending.id);
+    });
+
+    it('ID inexistente -> 404', async () => {
+      const response = await rejectSession(adminCookie, NON_EXISTENT_UUID, {
+        reason: 'motivo',
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('tras el rechazo, el operador cierra de nuevo sin ningún residuo del intento anterior (§23 del plan aprobado)', async () => {
+      const pending = await openAndRequestPending(
+        sellerRejectCookie,
+        '100.00',
+        '80.00',
+      );
+      const rejectResponse = await rejectSession(adminCookie, pending.id, {
+        reason: 'Reintente el conteo',
+      });
+      expect(rejectResponse.status).toBe(200);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+        pending.id,
+      );
+
+      // Nuevo cierre EXACTO (sin descuadre esta vez): debe recalcular
+      // desde cero, sin ningún valor del intento rechazado.
+      const recloseResponse = await closeSession(sellerRejectCookie, {
+        countedCashAmount: '100.00',
+      });
+      expect(recloseResponse.status).toBe(200);
+      const reclosed = recloseResponse.body as SafeCashSessionBody;
+      expect(reclosed.id).toBe(pending.id);
+      expect(reclosed.status).toBe(CashSessionStatus.CLOSED);
+      expect(reclosed.differenceAmount).toBe('0.00');
+      expect(reclosed.closingObservation).toBeNull();
+      expect(reclosed.approvedByUserId).toBeNull();
+      await trackLatestAuditRow(AuditAction.CASH_SESSION_CLOSED, pending.id);
+
+      const summaryCount = await prisma.cashSessionPaymentMethodSummary.count({
+        where: { cashSessionId: pending.id },
+      });
+      expect(summaryCount).toBe(0);
+    });
+  });
+
+  // ==================================================================
+  // Concurrencia real de resolución — approve/reject (Ticket B, Bloque B3 §39)
+  // ==================================================================
+  describe('concurrencia real de resolución (approve/reject)', () => {
+    async function openAndRequestPending(): Promise<string> {
+      await openCashSessionOrThrow(sellerResolutionRaceCookie, '100.00');
+      const response = await closeSession(sellerResolutionRaceCookie, {
+        countedCashAmount: '90.00',
+        closingObservation: 'Descuadre fixture concurrencia B3',
+      });
+      expect(response.status).toBe(200);
+      const body = response.body as SafeCashSessionBody;
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_CLOSING_REQUESTED,
+        body.id,
+      );
+      return body.id;
+    }
+
+    it('approve + approve simultáneos: exactamente uno 200, uno 409', async () => {
+      const id = await openAndRequestPending();
+      const [resultA, resultB] = await Promise.allSettled([
+        approveSession(adminCookie, id),
+        approveSession(managementCookie, id),
+      ]);
+      const statuses = [resultA, resultB].map((result) =>
+        result.status === 'fulfilled' ? result.value.status : -1,
+      );
+      expect(statuses.sort()).toEqual([200, 409]);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+        id,
+      );
+
+      const final = await prisma.cashSession.findUniqueOrThrow({
+        where: { id },
+      });
+      expect(final.status).toBe(CashSessionStatus.CLOSED);
+    });
+
+    it('approve + reject simultáneos: exactamente un ganador', async () => {
+      const id = await openAndRequestPending();
+      const [resultA, resultB] = await Promise.allSettled([
+        approveSession(adminCookie, id),
+        rejectSession(managementCookie, id, { reason: 'carrera' }),
+      ]);
+      const statuses = [resultA, resultB].map((result) =>
+        result.status === 'fulfilled' ? result.value.status : -1,
+      );
+      expect(statuses.sort()).toEqual([200, 409]);
+
+      const final = await prisma.cashSession.findUniqueOrThrow({
+        where: { id },
+      });
+      expect([CashSessionStatus.CLOSED, CashSessionStatus.OPEN]).toContain(
+        final.status,
+      );
+      if (final.status === CashSessionStatus.CLOSED) {
+        await trackLatestAuditRow(
+          AuditAction.CASH_SESSION_DISCREPANCY_APPROVED,
+          id,
+        );
+      } else {
+        await trackLatestAuditRow(
+          AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+          id,
+        );
+      }
+    });
+
+    it('reject + reject simultáneos: exactamente uno 200, uno 409', async () => {
+      const id = await openAndRequestPending();
+      const [resultA, resultB] = await Promise.allSettled([
+        rejectSession(adminCookie, id, { reason: 'motivo A' }),
+        rejectSession(managementCookie, id, { reason: 'motivo B' }),
+      ]);
+      const statuses = [resultA, resultB].map((result) =>
+        result.status === 'fulfilled' ? result.value.status : -1,
+      );
+      expect(statuses.sort()).toEqual([200, 409]);
+      await trackLatestAuditRow(
+        AuditAction.CASH_SESSION_DISCREPANCY_REJECTED,
+        id,
+      );
+
+      const final = await prisma.cashSession.findUniqueOrThrow({
+        where: { id },
+      });
+      expect(final.status).toBe(CashSessionStatus.OPEN);
     });
   });
 });

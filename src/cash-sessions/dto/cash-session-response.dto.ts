@@ -91,6 +91,77 @@ export class CashSessionResponseDto {
   updatedAt!: Date;
 }
 
+/** Una fila del desglose por método (Ticket B, Bloque B3) — mismo shape para el desglose en vivo y el congelado. */
+export class CashSessionMethodBreakdownRowResponseDto {
+  @ApiProperty({ format: 'uuid' })
+  paymentMethodId!: string;
+
+  @ApiProperty({ example: 'CASH' })
+  paymentMethodCode!: string;
+
+  @ApiProperty({ example: 'Efectivo' })
+  paymentMethodName!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Decimal con 2 decimales fijos, como string.',
+    example: '200.00',
+  })
+  totalAmount!: string;
+}
+
+/**
+ * Forma enriquecida para GET /cash-sessions/current y GET
+ * /cash-sessions/:id (Ticket B, Bloque B3) — nunca para el historial
+ * paginado. Exactamente uno de los dos pares (live-* y breakdownByMethod)
+ * está poblado según el estado: OPEN usa live-* (recalculado en cada
+ * lectura, nunca persistido); PENDING_APPROVAL/CLOSED usa
+ * breakdownByMethod (snapshot congelado de CashSessionPaymentMethodSummary
+ * en el instante del cierre, jamás recalculado desde el estado actual de
+ * Payment).
+ */
+export class CashSessionDetailResponseDto extends CashSessionResponseDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Suma de TODOS los Payment ACTIVE vinculados (cualquier método). Solo mientras OPEN; null en PENDING_APPROVAL/CLOSED (usar el snapshot congelado).',
+  })
+  liveCollectionsTotal!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Suma de los Payment ACTIVE vinculados cuyo snapshot paymentMethodAffectsCashDrawer=true. Solo mientras OPEN.',
+  })
+  liveCashCollectionsTotal!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'openingAmount + liveCashCollectionsTotal, recalculado en cada lectura. Solo mientras OPEN — NUNCA el mismo campo que el `expectedCashAmount` persistido/congelado una vez que la sesión entra a PENDING_APPROVAL o CLOSED.',
+  })
+  liveExpectedCashAmount!: string | null;
+
+  @ApiProperty({
+    type: [CashSessionMethodBreakdownRowResponseDto],
+    nullable: true,
+    description:
+      'Desglose EN VIVO por método a partir de los Payment ACTIVE vinculados vigentes. Solo mientras OPEN; null en PENDING_APPROVAL/CLOSED.',
+  })
+  liveBreakdownByMethod!: CashSessionMethodBreakdownRowResponseDto[] | null;
+
+  @ApiProperty({
+    type: [CashSessionMethodBreakdownRowResponseDto],
+    nullable: true,
+    description:
+      'Desglose CONGELADO (CashSessionPaymentMethodSummary) en el instante del cierre. null mientras OPEN (todavía no existe ningún intento de cierre); nunca recalculado desde Payment tras el cierre, ni siquiera si un Payment vinculado se anula después.',
+  })
+  breakdownByMethod!: CashSessionMethodBreakdownRowResponseDto[] | null;
+}
+
 /** Respuesta paginada del historial de CashSessions (GET /cash-sessions). */
 export class PaginatedCashSessionsResponseDto {
   @ApiProperty({ type: [CashSessionResponseDto] })

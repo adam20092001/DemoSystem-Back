@@ -1,5 +1,9 @@
 import { Prisma } from '@prisma/client';
-import { SafeCashSession } from '../types/safe-cash-session';
+import { CashSessionMethodBreakdownRow } from '../cash-session-calculator';
+import {
+  SafeCashSession,
+  SafeCashSessionMethodBreakdownRow,
+} from '../types/safe-cash-session';
 
 /**
  * Select explícito: única fuente de verdad de qué sale hacia el dominio
@@ -52,5 +56,59 @@ export function toSafeCashSession(row: CashSessionSafeRow): SafeCashSession {
     approvalComment: row.approvalComment,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+// ==========================================================================
+// Ticket B, Bloque B3 — Payments vinculados y desglose por método
+// ==========================================================================
+
+/**
+ * Select mínimo de Payment necesario para
+ * calculateCashSessionTotals()/CashSessionPaymentSnapshot — nunca el
+ * modelo Payment completo. `status` se incluye a propósito: el cálculo
+ * filtra ACTIVE internamente (defensa en profundidad), así que este select
+ * trae CUALQUIER estado vinculado a la sesión, nunca pre-filtrado aquí.
+ */
+export const CASH_SESSION_LINKED_PAYMENT_SELECT = {
+  amount: true,
+  status: true,
+  paymentMethodId: true,
+  paymentMethodCode: true,
+  paymentMethodName: true,
+  paymentMethodAffectsCashDrawer: true,
+} satisfies Prisma.PaymentSelect;
+
+export type CashSessionLinkedPaymentRow = Prisma.PaymentGetPayload<{
+  select: typeof CASH_SESSION_LINKED_PAYMENT_SELECT;
+}>;
+
+/** Select explícito de una fila YA PERSISTIDA de CashSessionPaymentMethodSummary (snapshot congelado del cierre). */
+export const CASH_SESSION_PAYMENT_METHOD_SUMMARY_SAFE_SELECT = {
+  paymentMethodId: true,
+  paymentMethodCode: true,
+  paymentMethodName: true,
+  totalAmount: true,
+} satisfies Prisma.CashSessionPaymentMethodSummarySelect;
+
+export type CashSessionPaymentMethodSummarySafeRow =
+  Prisma.CashSessionPaymentMethodSummaryGetPayload<{
+    select: typeof CASH_SESSION_PAYMENT_METHOD_SUMMARY_SAFE_SELECT;
+  }>;
+
+/**
+ * Convierte una fila de desglose (en vivo, del calculador puro, o
+ * congelada, ya persistida en CashSessionPaymentMethodSummary) a su forma
+ * seria — mismo shape en ambos orígenes, así que un único mapper sirve
+ * para los dos casos de uso.
+ */
+export function toSafeCashSessionMethodBreakdownRow(
+  row: CashSessionMethodBreakdownRow | CashSessionPaymentMethodSummarySafeRow,
+): SafeCashSessionMethodBreakdownRow {
+  return {
+    paymentMethodId: row.paymentMethodId,
+    paymentMethodCode: row.paymentMethodCode,
+    paymentMethodName: row.paymentMethodName,
+    totalAmount: row.totalAmount.toFixed(2),
   };
 }

@@ -41,3 +41,45 @@ export interface SafeCashSession {
   createdAt: Date;
   updatedAt: Date;
 }
+
+/**
+ * Una fila del desglose por método (Ticket B, Bloque B3), ya con
+ * totalAmount como string de 2 decimales fijos. Usada tanto para el
+ * desglose EN VIVO (liveBreakdownByMethod, solo mientras OPEN) como para el
+ * desglose CONGELADO (breakdownByMethod, snapshot de
+ * CashSessionPaymentMethodSummary, solo PENDING_APPROVAL/CLOSED) — misma
+ * forma en ambos casos, origen de datos distinto.
+ */
+export interface SafeCashSessionMethodBreakdownRow {
+  paymentMethodId: string;
+  paymentMethodCode: string;
+  paymentMethodName: string;
+  totalAmount: string;
+}
+
+/**
+ * Forma enriquecida de CashSession para GET /cash-sessions/current y GET
+ * /cash-sessions/:id (Ticket B, Bloque B3) — NUNCA para el historial
+ * paginado (GET /cash-sessions), que se mantiene liviano a propósito (§25
+ * del plan aprobado: sin desglose por fila para evitar N+1).
+ *
+ * Exactamente uno de los dos pares de campos está poblado según el estado,
+ * nunca ambos a la vez:
+ *  - OPEN: live* recalculado en cada lectura a partir de los Payment ACTIVE
+ *    vinculados vigentes (nunca persistido); breakdownByMethod es null
+ *    (todavía no existe ningún intento de cierre).
+ *  - PENDING_APPROVAL / CLOSED: live* es null (el campo persistido
+ *    `expectedCashAmount` de SafeCashSession ya es la fuente de verdad
+ *    congelada); breakdownByMethod son las filas YA PERSISTIDAS de
+ *    CashSessionPaymentMethodSummary en el instante del cierre — nunca
+ *    recalculadas desde el estado actual de Payment (§26/§27 del plan
+ *    aprobado: un Payment cancelado después del cierre nunca altera este
+ *    snapshot).
+ */
+export interface SafeCashSessionDetail extends SafeCashSession {
+  liveCollectionsTotal: string | null;
+  liveCashCollectionsTotal: string | null;
+  liveExpectedCashAmount: string | null;
+  liveBreakdownByMethod: SafeCashSessionMethodBreakdownRow[] | null;
+  breakdownByMethod: SafeCashSessionMethodBreakdownRow[] | null;
+}
