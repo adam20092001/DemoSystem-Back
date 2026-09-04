@@ -32,7 +32,7 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { createE2eApp } from './helpers/e2e-app';
-import { upsertFixtureUser } from './helpers/fixtures';
+import { openCashSessionFixture, upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -186,6 +186,10 @@ describe('Basic Accounting (e2e)', () => {
   let sellerCookie: string;
   let warehouseCookie: string;
   let adminId: string;
+  // Ticket B, Bloque B4: cajas fixture abiertas para admin/seller (§31 usa
+  // ambos como cobradores).
+  let adminCashSessionId: string;
+  let sellerCashSessionId: string;
 
   let categoryId: string;
   let unitId: string;
@@ -273,6 +277,19 @@ describe('Basic Accounting (e2e)', () => {
         where: { username: E2E_ADMIN_USERNAME },
       })
     ).id;
+    const sellerId = (
+      await prisma.user.findUniqueOrThrow({
+        where: { username: SELLER_USERNAME },
+      })
+    ).id;
+
+    // Ticket B, Bloque B4: PaymentEngine.register() exige que el cobrador
+    // tenga su propia caja (CashSession) abierta. Esta suite registra
+    // pagos reales con adminCookie (admin GLOBAL compartido) y sellerCookie
+    // (§31): ambos necesitan una caja OPEN propia, abierta directamente en
+    // BD (§29 del plan aprobado) y eliminada por su ID exacto en afterAll.
+    adminCashSessionId = (await openCashSessionFixture(prisma, adminId)).id;
+    sellerCashSessionId = (await openCashSessionFixture(prisma, sellerId)).id;
 
     for (const key of Object.values(AccountingSystemKey)) {
       const row = await prisma.account.findUniqueOrThrow({
@@ -456,6 +473,16 @@ describe('Basic Accounting (e2e)', () => {
           where: { saleId: { in: ownedSaleIds } },
         });
       }
+
+      // Ticket B, Bloque B4: cajas fixture de admin/seller — SIEMPRE
+      // después de borrar los Payment propios de arriba (Payment.cashSessionId
+      // es RESTRICT hacia CashSession). adminCashSessionId pertenece al
+      // admin GLOBAL compartido: se elimina aquí para que ninguna otra
+      // suite posterior encuentre una caja sin resolver ya abierta para ese
+      // mismo usuario.
+      await prisma.cashSession.deleteMany({
+        where: { id: { in: [adminCashSessionId, sellerCashSessionId] } },
+      });
 
       // --------------------------------------------------------------
       // 7-8. Sales/SaleItems (cascade), luego Quotes.

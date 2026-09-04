@@ -213,7 +213,12 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   // potencialmente sensible ya persistido en Payment), nunca PII de
   // cliente, nunca cancellationReason (texto libre ya persistido en
   // Payment.cancellationReason), nunca totales de Sale.
-  [AuditAction.PAYMENT_REGISTERED]: ['saleId', 'saleNumber', 'method'],
+  [AuditAction.PAYMENT_REGISTERED]: [
+    'saleId',
+    'saleNumber',
+    'method',
+    'cashSessionId',
+  ],
   [AuditAction.PAYMENT_CANCELLED]: [
     'saleId',
     'saleNumber',
@@ -344,6 +349,59 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'changedFields',
     'oldValues',
     'newValues',
+  ],
+  // Ticket B post-MVP, Bloque B2. CashSessionsService.open() es su único
+  // emisor. Solo campos seguros y ya conocidos por el actor que abrió la
+  // caja: nunca el actor completo, la request cruda, el JWT ni nada
+  // sensible.
+  [AuditAction.CASH_SESSION_OPENED]: [
+    'cashSessionId',
+    'userId',
+    'openingAmount',
+  ],
+  // Ticket B post-MVP, Bloque B3. CashSessionsService.close() es su único
+  // emisor para estas dos primeras. Nunca el actor completo/IP cruda: eso
+  // ya lo registra RecordAuditLogInput.ipAddress por separado.
+  [AuditAction.CASH_SESSION_CLOSED]: [
+    'cashSessionId',
+    'userId',
+    'expectedCashAmount',
+    'countedCashAmount',
+    'differenceAmount',
+  ],
+  [AuditAction.CASH_SESSION_CLOSING_REQUESTED]: [
+    'cashSessionId',
+    'userId',
+    'expectedCashAmount',
+    'countedCashAmount',
+    'differenceAmount',
+    'closingObservation',
+  ],
+  // CashSessionsService.approve()/reject() son sus únicos emisores.
+  // ownerUserId (dueño de la caja) y reviewerUserId (quien aprueba/
+  // rechaza) SIEMPRE son personas distintas — la propia autorización lo
+  // exige antes de llegar aquí.
+  [AuditAction.CASH_SESSION_DISCREPANCY_APPROVED]: [
+    'cashSessionId',
+    'ownerUserId',
+    'reviewerUserId',
+    'expectedCashAmount',
+    'countedCashAmount',
+    'differenceAmount',
+    'comment',
+  ],
+  // Único emisor de reject(): captura el snapshot PREVIO a limpiarlo de
+  // CashSession (Ticket B, Bloque B3 §20) — esta fila es la única
+  // evidencia histórica que sobrevive de ese intento de cierre rechazado.
+  [AuditAction.CASH_SESSION_DISCREPANCY_REJECTED]: [
+    'cashSessionId',
+    'ownerUserId',
+    'reviewerUserId',
+    'reason',
+    'previousExpectedCashAmount',
+    'previousCountedCashAmount',
+    'previousDifferenceAmount',
+    'previousClosingObservation',
   ],
 };
 

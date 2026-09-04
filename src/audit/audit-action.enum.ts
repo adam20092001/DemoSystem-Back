@@ -145,4 +145,21 @@ export enum AuditAction {
   PAYMENT_METHOD_UPDATED = 'PAYMENT_METHOD_UPDATED',
   PAYMENT_METHOD_ACTIVATED = 'PAYMENT_METHOD_ACTIVATED',
   PAYMENT_METHOD_DEACTIVATED = 'PAYMENT_METHOD_DEACTIVATED',
+  // Ticket B post-MVP, Bloque B2: única acción de ese bloque.
+  // CashSessionsService.open() es su único emisor.
+  CASH_SESSION_OPENED = 'CASH_SESSION_OPENED',
+  // Ticket B post-MVP, Bloque B3 — flujo de cierre/descuadre/aprobación/
+  // rechazo, todas emitidas por CashSessionsService. CASH_SESSION_CLOSED:
+  // cierre exacto (differenceAmount=0), directo, sin revisor.
+  // CASH_SESSION_CLOSING_REQUESTED: cierre con descuadre, transición a
+  // PENDING_APPROVAL. CASH_SESSION_DISCREPANCY_APPROVED:
+  // PENDING_APPROVAL -> CLOSED por un revisor (nunca el propio dueño).
+  // CASH_SESSION_DISCREPANCY_REJECTED: PENDING_APPROVAL -> OPEN; el
+  // snapshot de cierre rechazado se limpia de CashSession, así que esta
+  // fila de auditoría es la ÚNICA evidencia histórica que sobrevive de ese
+  // intento (nunca un estado REJECTED propio de CashSession).
+  CASH_SESSION_CLOSED = 'CASH_SESSION_CLOSED',
+  CASH_SESSION_CLOSING_REQUESTED = 'CASH_SESSION_CLOSING_REQUESTED',
+  CASH_SESSION_DISCREPANCY_APPROVED = 'CASH_SESSION_DISCREPANCY_APPROVED',
+  CASH_SESSION_DISCREPANCY_REJECTED = 'CASH_SESSION_DISCREPANCY_REJECTED',
 }

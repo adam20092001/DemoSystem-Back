@@ -1,4 +1,11 @@
-import { PrismaClient, RoleName, User, UserStatus } from '@prisma/client';
+import {
+  CashSessionStatus,
+  Prisma,
+  PrismaClient,
+  RoleName,
+  User,
+  UserStatus,
+} from '@prisma/client';
 import { hashPassword } from '../../src/common/security/password.service';
 import {
   E2E_ADMIN_ACTIVE_PASSWORD,
@@ -132,4 +139,36 @@ export async function ensureActiveTestAdmin(
   });
 
   return user;
+}
+
+/**
+ * Abre una CashSession OPEN directamente en BD para el actor de una suite
+ * NO relacionada con CashSessions (Ticket B, Bloque B4 §29 del plan
+ * aprobado): desde este bloque, PaymentEngine.register() exige que
+ * cualquier cobrador tenga su propia caja sin resolver, así que las
+ * suites de Payments/Sales/Accounting/Reports/etc. necesitan esta fila
+ * para que sus fixtures de cobro no sean rechazadas con 409 — sin
+ * necesitar ejercer el endpoint HTTP real de apertura (eso queda reservado
+ * a cash-sessions.e2e-spec.ts, la única suite que SÍ prueba el flujo de
+ * apertura en sí). El índice único parcial
+ * `cash_sessions_one_unresolved_per_user` impide abrir dos veces para el
+ * mismo usuario: cada suite que llama a esto lo hace UNA sola vez
+ * (normalmente en beforeAll) para su propio actor cobrador dedicado, y
+ * elimina la fila por su ID exacto en su propio afterAll — nunca una
+ * reutilización entre archivos, nunca un actor compartido globalmente
+ * (mismo criterio de propiedad exacta que el resto del repositorio).
+ */
+export async function openCashSessionFixture(
+  prisma: PrismaClient,
+  userId: string,
+  openingAmount: string = '0',
+): Promise<{ id: string }> {
+  return prisma.cashSession.create({
+    data: {
+      userId,
+      status: CashSessionStatus.OPEN,
+      openingAmount: new Prisma.Decimal(openingAmount),
+    },
+    select: { id: true },
+  });
 }

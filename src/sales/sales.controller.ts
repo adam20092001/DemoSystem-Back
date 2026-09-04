@@ -72,7 +72,7 @@ export class SalesController {
   @ApiOperation({
     summary: 'Registrar una venta directa (nace confirmada)',
     description:
-      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse.',
+      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse. Ticket B, Bloque B4: si se incluye `payment`, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la venta completa no se confirma (la transacción revierte por completo, incluida la venta) y el pago se vincula automáticamente a esa caja.',
   })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
@@ -84,7 +84,7 @@ export class SalesController {
   })
   @ApiConflictResponse({
     description:
-      'Cliente/producto/categoría/unidad inactivos, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente genérico/bloqueado.',
+      'Cliente/producto/categoría/unidad inactivos, stock insuficiente, el pago inicial supera el total, saldo pendiente positivo con cliente genérico/bloqueado, o (con pago inicial) el actor no tiene ninguna caja abierta o su caja está pendiente de aprobación de un descuadre (Ticket B, Bloque B4).',
   })
   @Roles(...WRITE_ROLES)
   @Post()
@@ -116,7 +116,7 @@ export class SalesController {
     summary:
       'Confirmar una venta a partir de una cotización PENDIENTE o ACEPTADA',
     description:
-      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`); sin cuerpo, `{}` y `{ payment: {...} }` son todos válidos.',
+      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`); sin cuerpo, `{}` y `{ payment: {...} }` son todos válidos. Ticket B, Bloque B4: si se incluye `payment`, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la conversión completa no se confirma y el pago se vincula automáticamente a esa caja.',
   })
   @ApiParam({ name: 'quoteId', format: 'uuid' })
   @ApiCreatedResponse({ type: SaleResponseDto })
@@ -129,7 +129,7 @@ export class SalesController {
   })
   @ApiConflictResponse({
     description:
-      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente bloqueado.',
+      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, stock insuficiente, el pago inicial supera el total, saldo pendiente positivo con cliente bloqueado, o (con pago inicial) el actor no tiene ninguna caja abierta o su caja está pendiente de aprobación de un descuadre (Ticket B, Bloque B4).',
   })
   @Roles(...WRITE_ROLES)
   @Post('from-quote/:quoteId')

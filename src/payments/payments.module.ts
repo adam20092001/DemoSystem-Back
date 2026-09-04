@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module';
+import { CashSessionsModule } from '../cash-sessions/cash-sessions.module';
 import { PaymentMethodsModule } from '../payment-methods/payment-methods.module';
 import { AccountsReceivableController } from './accounts-receivable.controller';
 import { AccountsReceivableService } from './accounts-receivable.service';
@@ -34,9 +35,18 @@ import { PaymentsService } from './payments.service';
  * AccountingModule, sin ciclo. PaymentMethodReader NUNCA se registra
  * manualmente aquí en `providers`: PaymentMethodsModule es su único
  * propietario, solo se reutiliza vía `exports`.
+ *
+ * Ticket B, Bloque B4: importa CashSessionsModule para que PaymentEngine
+ * pueda inyectar CashSessionReader y exigir/bloquear la caja del cobrador
+ * dentro de la misma transacción de register() — mismo precedente exacto
+ * que PaymentMethodsModule. CashSessionsModule tampoco importa
+ * PaymentsModule ni SalesModule (su cálculo de efectivo esperado lee
+ * `payments` directamente vía Prisma), así que la dependencia sigue en un
+ * solo sentido, sin ciclo. CashSessionReader NUNCA se registra manualmente
+ * aquí: CashSessionsModule es su único propietario.
  */
 @Module({
-  imports: [AccountingModule, PaymentMethodsModule],
+  imports: [AccountingModule, PaymentMethodsModule, CashSessionsModule],
   controllers: [PaymentsController, AccountsReceivableController],
   providers: [PaymentEngine, PaymentsService, AccountsReceivableService],
   exports: [PaymentEngine],
