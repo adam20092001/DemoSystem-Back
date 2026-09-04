@@ -13,8 +13,9 @@ Autenticación multi-rol (JWT en cookie HttpOnly) · Usuarios y roles ·
 Catálogo (categorías, unidades, productos) · Inventario (movimientos y
 saldo) · Clientes (incluye "Público general") · Cotizaciones · Ventas / POS ·
 Pagos (métodos de pago administrables por ADMIN) y cuentas por cobrar ·
-Contabilidad básica · Reportes y dashboard · Configuración y correlativos ·
-Auditoría · **Facturación electrónica (demostración)**.
+**Caja / arqueo de caja** (una caja abierta por cobrador, obligatoria para
+cobrar) · Contabilidad básica · Reportes y dashboard · Configuración y
+correlativos · Auditoría · **Facturación electrónica (demostración)**.
 
 > ⚠️ **Facturación electrónica = demostración, no SUNAT real.** El único
 > proveedor implementado es `MockElectronicInvoicingProvider`
@@ -268,6 +269,45 @@ fijo del backend:
   método, no una regla fija por código — el backend la valida al momento del
   cobro contra la configuración vigente de ese método.
 
+## Caja / Cash Sessions
+
+Cada cobrador (ADMIN o SELLER) opera con su propia caja (`CashSession`),
+abierta manualmente — nunca automática al iniciar sesión:
+
+- `POST /api/v1/cash-sessions/open` (`openingAmount`, admite 0, nunca
+  negativo). Como máximo **una** caja sin resolver (`OPEN` o
+  `PENDING_APPROVAL`) por usuario a la vez, protegido por un índice único
+  parcial en base de datos — no solo por una validación de aplicación.
+- **Todo cobro nuevo exige que el cobrador tenga su propia caja `OPEN`**:
+  sin caja abierta, o con la caja en `PENDING_APPROVAL`, `POST
+  /api/v1/sales/:saleId/payments` (y el pago inicial embebido en `POST
+  /api/v1/sales` / `POST /api/v1/sales/from-quote/:quoteId`) responde 409.
+  La regla es la misma para **cualquier** método de pago (incluido uno
+  dinámico creado por ADMIN): `affectsCashDrawer` decide si un cobro cuenta
+  como efectivo físico, nunca si exige caja abierta. El vínculo
+  (`Payment.cashSessionId`) lo asigna el servidor; el cliente nunca lo
+  controla.
+- Efectivo esperado: `expectedCashAmount = openingAmount + SUM(Payment ACTIVE
+  vinculado con paymentMethodAffectsCashDrawer=true)` — siempre a partir del
+  **snapshot** del método en el instante del cobro, nunca del
+  `PaymentMethod` actual (un método renombrado o cuya `affectsCashDrawer`
+  cambie después no altera un cobro ya registrado).
+- Cierre (`POST /api/v1/cash-sessions/current/close`, `countedCashAmount`):
+  si `countedCashAmount - expectedCashAmount = 0`, la caja pasa a `CLOSED`
+  directamente. Si hay descuadre, `closingObservation` es obligatoria y la
+  caja pasa a `PENDING_APPROVAL` — no admite nuevos cobros ni un segundo
+  intento de cierre hasta resolverse.
+- Un descuadre pendiente lo resuelve ADMIN o MANAGEMENT:
+  `POST /api/v1/cash-sessions/:id/approve` (→ `CLOSED`, acepta el snapshot
+  tal cual fue enviado, sin recalcular) o
+  `POST /api/v1/cash-sessions/:id/reject` (`reason` obligatorio → vuelve a
+  `OPEN`, con el snapshot de cierre limpiado; el operador puede cerrar de
+  nuevo con datos frescos). **Nadie puede aprobar ni rechazar su propia
+  caja**, sin importar su rol activo.
+- Una caja `CLOSED` es inmutable: si un Payment vinculado se anula después,
+  el snapshot de esa caja (montos esperado/contado/diferencia y el desglose
+  por método) no se recalcula ni cambia.
+
 ## Base de datos
 
 ```bash
@@ -325,9 +365,9 @@ arriesgar otra base.
 
 Monolito modular en NestJS: un solo despliegue, un módulo por dominio bajo
 `src/` (`auth`, `users`, `categories`, `units`, `products`, `inventory`,
-`customers`, `quotes`, `sales`, `payments`, `payment-methods`, `accounting`,
-`reports`, `configuration`, `audit`, `electronic-invoicing`, más soporte
-interno como `document-sequences`). Cada módulo separa controller (HTTP/roles/Swagger),
+`customers`, `quotes`, `sales`, `payments`, `payment-methods`, `cash-sessions`,
+`accounting`, `reports`, `configuration`, `audit`, `electronic-invoicing`, más
+soporte interno como `document-sequences`). Cada módulo separa controller (HTTP/roles/Swagger),
 service (reglas de negocio y transacciones) y DTOs (validación de entrada);
 Prisma solo se usa desde la capa de servicios, nunca desde los controllers.
 

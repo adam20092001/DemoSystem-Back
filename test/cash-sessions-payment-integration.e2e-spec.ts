@@ -1,6 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import {
   CashSessionStatus,
+  CustomerStage,
+  CustomerStatus,
   DocumentType,
   PaymentMethodAccountingDestination,
   Prisma,
@@ -60,6 +62,9 @@ describe('Cash Sessions <-> Payments (e2e) — Ticket B, Bloque B4', () => {
   const SELLER_RACE_PASSWORD = 'SellerB4Race123';
   const SELLER_TWO_USERNAME = 'e2e_seller_b4_two';
   const SELLER_TWO_PASSWORD = 'SellerB4Two123';
+  // Mismo código exacto que payments.e2e-spec.ts/sales.e2e-spec.ts/
+  // reports.e2e-spec.ts/electronic-invoicing-api.e2e-spec.ts.
+  const TEST_GENERIC_CODE = 'PUBLIC_GENERAL';
 
   let adminCookie: string;
   let sellerMatrixCookie: string;
@@ -212,8 +217,36 @@ describe('Cash Sessions <-> Payments (e2e) — Ticket B, Bloque B4', () => {
     const unit = await prisma.unit.findFirstOrThrow({ where: { code: 'SER' } });
     unitId = unit.id;
 
-    const generic = await prisma.customer.findFirstOrThrow({
-      where: { isGeneric: true },
+    // Ticket B, Bloque B5: el cliente "Público general" NO es un singleton
+    // sembrado permanente — es un fixture DE PROPIEDAD COMPARTIDA entre las
+    // suites que lo usan (mismo criterio exacto que payments.e2e-spec.ts/
+    // sales.e2e-spec.ts/reports.e2e-spec.ts/electronic-invoicing-api.e2e-spec.ts):
+    // cada una lo re-upsertea en su propio beforeAll y lo elimina en su
+    // propio afterAll, para que la siguiente suite que lo necesite lo
+    // recree fresco. Un `findFirstOrThrow` aquí (el bug real descubierto en
+    // B5) asumía presencia permanente y fallaba (P2025) cuando esta suite
+    // corría justo después de otra que ya lo había eliminado.
+    const generic = await prisma.customer.upsert({
+      where: { code: TEST_GENERIC_CODE },
+      update: {
+        name: 'Público general',
+        isGeneric: true,
+        customerType: null,
+        customerStage: CustomerStage.CUSTOMER,
+        status: CustomerStatus.ACTIVE,
+        documentType: null,
+        documentNumber: null,
+      },
+      create: {
+        code: TEST_GENERIC_CODE,
+        name: 'Público general',
+        isGeneric: true,
+        customerType: null,
+        customerStage: CustomerStage.CUSTOMER,
+        status: CustomerStatus.ACTIVE,
+        documentType: null,
+        documentNumber: null,
+      },
     });
     genericCustomerId = generic.id;
   }, 120000);
@@ -311,6 +344,16 @@ describe('Cash Sessions <-> Payments (e2e) — Ticket B, Bloque B4', () => {
         });
         await prisma.customer.deleteMany({
           where: { id: { in: ownedCustomerIds } },
+        });
+      }
+      // Mismo criterio exacto que payments.e2e-spec.ts/sales.e2e-spec.ts/
+      // reports.e2e-spec.ts/electronic-invoicing-api.e2e-spec.ts: el cliente
+      // "Público general" se elimina en el afterAll de quien lo upsertea,
+      // para que la siguiente suite que lo necesite lo recree fresco (nunca
+      // asumido como singleton sembrado permanente).
+      if (genericCustomerId) {
+        await prisma.customer.deleteMany({
+          where: { id: genericCustomerId },
         });
       }
     } finally {

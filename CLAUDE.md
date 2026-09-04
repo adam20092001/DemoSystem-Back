@@ -84,6 +84,7 @@ Reglas de capas:
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
 16. **Facturación electrónica (demostración)** — emisión de FACTURA/BOLETA sobre ventas confirmadas mediante una abstracción de proveedor (`ElectronicInvoicingProvider`), con `MockElectronicInvoicingProvider` como única implementación existente. Un documento `ACCEPTED` por el proveedor MOCK no tiene validez fiscal ante SUNAT (ver §7). Series fiscales (`FiscalSeries`) separadas de los correlativos comerciales (`DocumentSequence`).
+17. **Caja / arqueo de caja (Ticket B post-MVP)** — cada cobrador (`ADMIN`/`SELLER`) opera su propia `CashSession` (`CashSessionsModule`, `POST/GET /api/v1/cash-sessions/*`), abierta siempre manualmente; como máximo una sin resolver (`OPEN`/`PENDING_APPROVAL`) por usuario. Todo `Payment` nuevo exige que el cobrador tenga su caja `OPEN` (`PaymentEngine.register()`, vía `CashSessionReader` compartido) y se vincula a ella automáticamente — la exigencia es por acción, nunca por rol fijo ni por si el método afecta el cajón físico. Ver §6 para las reglas críticas exactas del cierre/aprobación/rechazo.
 
 ---
 
@@ -121,6 +122,13 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - Los **correlativos se generan en el backend, dentro de una transacción** (nunca en el cliente, nunca fuera de transacción).
 - Se guardan **snapshots del producto** (código, nombre, precio, unidad, impuestos) en cotizaciones y ventas: los cambios posteriores del catálogo no alteran documentos emitidos.
 - **No se eliminan físicamente** registros con historial; se desactivan o anulan (borrado lógico).
+
+**Caja (arqueo)**
+- Todo **`Payment` nuevo exige que el cobrador tenga su propia `CashSession` `OPEN`** (regla por acción, evaluada en `PaymentEngine.register()`), sin importar el método de pago ni si `affectsCashDrawer` es `true` o `false`; sin caja abierta, o con la caja en `PENDING_APPROVAL`, el cobro falla (409) y `Payment.cashSessionId` nunca lo controla el cliente.
+- `expectedCashAmount = openingAmount + SUM(Payment ACTIVE vinculado con paymentMethodAffectsCashDrawer=true)`, siempre a partir del **snapshot** del método al momento del cobro, nunca del `PaymentMethod` actual.
+- Un cierre sin descuadre pasa a `CLOSED` directo; un cierre con descuadre exige `closingObservation` y pasa a `PENDING_APPROVAL` (no admite nuevos cobros ni un segundo cierre) hasta que `ADMIN` o `MANAGEMENT` lo apruebe (acepta el snapshot tal cual, sin recalcular) o lo rechace (vuelve a `OPEN`, snapshot limpiado; el operador puede cerrar de nuevo con datos frescos).
+- **Nadie puede aprobar ni rechazar el descuadre de su propia caja**, sin importar su rol activo (regla de identidad, no de rol).
+- Una caja `CLOSED` es **inmutable**: anular un `Payment` ya vinculado después no recalcula ni altera su snapshot (montos ni desglose por método).
 
 **Transversales**
 - Los **roles y permisos se validan desde el backend**.
@@ -213,11 +221,12 @@ docs/Documento_Maestro_POS_Gestion_Comercial_MVP.docx
 
 ## 11. Estado actual del repositorio
 
-Los 16 módulos de la sección 4 están implementados, incluida la autenticación
-multi-rol (KAN-18: un usuario puede tener varios roles asignados; la sesión
-elige uno activo) y la facturación electrónica de demostración (Fase 11,
-proveedor MOCK). Prisma, Swagger, Docker Compose, `.env.example` y el
-esquema completo existen y están en uso.
+Los 16 módulos base de la sección 4 están implementados, incluida la
+autenticación multi-rol (KAN-18: un usuario puede tener varios roles
+asignados; la sesión elige uno activo) y la facturación electrónica de
+demostración (Fase 11, proveedor MOCK). Prisma, Swagger, Docker Compose,
+`.env.example` y el esquema completo existen y están en uso. El módulo 17
+(Caja) es una incorporación post-MVP posterior, detallada más abajo.
 
 El repositorio está en **Fase 12 (estabilización de demo)**: auditoría de
 todo lo anterior, mejoras de tooling de bajo riesgo (`lint:check`, reset
@@ -232,6 +241,18 @@ ADMIN (`PaymentMethodsModule` + `PaymentEngine`, ver §4 punto 11): migración
 EXPAND, API de administración y migración CONTRACT que retira el enum y la
 columna antiguos. Los 9 métodos baseline y el comportamiento de cobro/anulación
 existente se preservan sin cambios funcionales para el resto del dominio.
+
+El Ticket B post-MVP (rama `feat/cash-sessions`, 4 bloques + estabilización)
+agregó el módulo de caja (`CashSessionsModule`, ver §4 punto 17): persistencia
+(migración `20260903225735_add_cash_sessions`, aditiva, `Payment.cashSessionId`
+nullable), apertura/lectura, el flujo completo de cierre/descuadre/aprobación/
+rechazo, y finalmente la integración obligatoria con `PaymentEngine.register()`
+(todo `Payment` nuevo exige la caja `OPEN` del cobrador; se vincula
+automáticamente). Máquina de 3 estados exacta: `OPEN` → `CLOSED` (sin
+descuadre) o `OPEN` → `PENDING_APPROVAL` → `CLOSED`/`OPEN` (aprobación/rechazo
+de un descuadre) — nunca `REJECTED`/`CANCELLED`/`APPROVED` como estado, ni
+reapertura desde `CLOSED`. Ver §6 para las reglas críticas exactas.
+Migraciones totales: **14**.
 
 ---
 
