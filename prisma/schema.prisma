@@ -168,6 +168,13 @@ model User {
   // criterio que soldSales/cancelledSales arriba.
   createdPayments          Payment[]           @relation("PaymentCreatedBy")
   cancelledPayments        Payment[]           @relation("PaymentCancelledBy")
+  // Arqueos de caja (Ticket B post-MVP, Bloque B1: solo persistencia, sin
+  // reglas de negocio todavía). Dos relaciones nombradas por el mismo
+  // motivo que Sale/Payment arriba: CashSession referencia User dos veces
+  // (el cobrador dueño de la caja y, opcionalmente, quien aprueba un cierre
+  // con descuadre).
+  cashSessions             CashSession[]       @relation("CashSessionOwner")
+  approvedCashSessions     CashSession[]       @relation("CashSessionApprovedBy")
   // Asientos contables (Fase 8, Bloque A): un único actor por asiento (quien
   // ejecutó la operación de negocio que lo generó); a diferencia de
   // Sale/Payment, un AccountingEntry nunca se "anula" con el mismo actor
@@ -859,6 +866,18 @@ model Payment {
   paymentMethodName              String        @map("payment_method_name") @db.VarChar(60)
   paymentMethodAffectsCashDrawer Boolean       @map("payment_method_affects_cash_drawer")
 
+  // --- Ticket B post-MVP, Bloque B1 (persistencia únicamente) ------------
+  // FK NULLABLE PARA SIEMPRE, a propósito: todo Payment anterior a este
+  // bloque es histórico legítimo y jamás recibe una CashSession fabricada
+  // (sin backfill, ver migration.sql). Un Payment nuevo, a partir de un
+  // bloque de negocio posterior de Ticket B, exigirá una CashSession
+  // abierta por regla de APLICACIÓN — nunca por NOT NULL de columna, porque
+  // eso rompería retroactivamente todo el histórico pre-B1. onDelete:
+  // Restrict, mismo criterio que el resto de las FK de Payment: una
+  // CashSession nunca se borra físicamente mientras tenga Payments.
+  cashSessionId String?      @map("cash_session_id") @db.Uuid
+  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
+
   // Las 3 CHECK vigentes (monto positivo, referencia no vacía, consistencia
   // de anulación) se agregan a mano en migration.sql, mismo criterio que
   // Sale/Quote/InventoryMovement. El cuarto CHECK histórico
@@ -879,11 +898,19 @@ model Payment {
   // directamente (el filtrado histórico siempre usa el snapshot
   // paymentMethodCode, nunca un join en vivo — ver Ticket C, Bloque C3
   // §22/§24 del plan aprobado).
+  //
+  // (cashSessionId, status): Ticket B, Bloque B1 — patrón de consulta ya
+  // aprobado para el futuro cálculo de cierre/actual de caja ("Payments
+  // ACTIVE de esta CashSession"), mismo criterio evidenciado que los demás
+  // índices compuestos de esta tabla. Ningún código de negocio lo consume
+  // todavía en B1 (persistencia únicamente); se agrega ahora porque el
+  // patrón de consulta ya está aprobado, no por especulación.
   @@index([saleId, paidAt])
   @@index([paidAt, id])
   @@index([status, paidAt])
   @@index([createdByUserId, paidAt])
   @@index([paymentMethodCode, paidAt, id])
+  @@index([cashSessionId, status])
   @@map("payments")
 }
 
@@ -933,6 +960,9 @@ model PaymentMethod {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   payments Payment[]
+  // Desglose de cierres de caja por método (Ticket B post-MVP, Bloque B1:
+  // tabla vacía hasta un bloque de negocio posterior).
+  cashSessionSummaries CashSessionPaymentMethodSummary[]
 
   // Los 3 CHECK (code con formato ^[A-Z][A-Z0-9_]{1,29}$, name no en blanco,
   // sort_order >= 0) se agregan a mano en migration.sql, mismo criterio que
@@ -1405,4 +1435,152 @@ model ElectronicDocumentItem {
   // CHECK de aritmetica exacta se agregan a mano en migration.sql.
   @@unique([electronicDocumentId, lineNumber])
   @@map("electronic_document_items")
+}
+
+// --- Arqueos de caja (Ticket B post-MVP, Bloque B1) -------------------------
+//
+// SOLO PERSISTENCIA: sin controller, sin service propio, sin endpoints, sin
+// auditoría propia, sin reglas de negocio aplicadas todavía. Este bloque
+// existe para que un bloque posterior (apertura/cierre/aprobación) tenga un
+// esquema ya validado y probado sobre el que construir, sin necesidad de una
+// migración adicional para el modelo base.
+//
+// Exactamente 3 estados aprobados — sin REJECTED/CANCELLED/APPROVED: un
+// rechazo vuelve la fila a OPEN (el snapshot del intento de cierre se
+// limpia) y el historial de esa decisión vive en AuditLog, nunca como un
+// estado terminal propio de CashSession (evita el problema de "cuál fue el
+// último rechazo" ante intentos repetidos).
+enum CashSessionStatus {
+  OPEN
+  PENDING_APPROVAL
+  CLOSED
+}
+
+/**
+ * Un arqueo de caja por cobrador (Ticket B, Bloque B1). Cada usuario puede
+ * tener como máximo UNA fila sin resolver (OPEN o PENDING_APPROVAL) a la
+ * vez — invariante de concurrencia protegida por un índice único parcial
+ * (`cash_sessions_one_unresolved_per_user`, agregado a mano en
+ * migration.sql, ver comentario ahí; el DSL de Prisma no expresa WHERE
+ * parcial). La responsabilidad de caja pertenece a la IDENTIDAD del usuario,
+ * nunca a su rol activo de sesión (sin roleSnapshot/activeRole aquí): un
+ * mismo usuario ADMIN o SELLER es el mismo dueño de caja
+ * independientemente del rol con el que haya iniciado sesión en un momento
+ * dado.
+ *
+ * Máquina de 3 estados (sin REJECTED/CANCELLED/APPROVED, ver
+ * CashSessionStatus): OPEN -> PENDING_APPROVAL (cierre con descuadre) ->
+ * OPEN (rechazo, snapshot de cierre limpiado) o CLOSED (aprobación); OPEN ->
+ * CLOSED directo (cierre sin descuadre, sin revisor). Los 3 campos de
+ * aprobación (approvedByUserId/approvedAt/approvalComment) representan
+ * ÚNICAMENTE una aprobación real de un cierre con descuadre — un cierre
+ * limpio nunca los puebla (ver `cash_sessions_status_consistency` en
+ * migration.sql). Sin rejectedByUserId/rejectedAt/rejectionReason a
+ * propósito: el rechazo no es un estado terminal propio, así que no hay
+ * "el último rechazo" que fijar aquí sin ambigüedad ante reintentos — esa
+ * evidencia histórica es responsabilidad exclusiva de AuditLog, en un
+ * bloque posterior que sí emita esa acción.
+ */
+model CashSession {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("CashSessionOwner", fields: [userId], references: [id], onDelete: Restrict)
+
+  status CashSessionStatus @default(OPEN)
+
+  // Apertura: siempre manual, siempre obligatoria, nunca negativa (CHECK en
+  // migration.sql). Puede ser 0 (caja abierta sin fondo inicial).
+  openingAmount Decimal  @map("opening_amount") @db.Decimal(14, 2)
+  openedAt      DateTime @default(now()) @map("opened_at")
+
+  // Snapshot del intento de cierre vigente: NULL mientras OPEN (incluido
+  // tras un rechazo, que limpia estos 5 campos), poblado en
+  // PENDING_APPROVAL y en CLOSED. differenceAmount = countedCashAmount -
+  // expectedCashAmount, verificado por
+  // `cash_sessions_difference_arithmetic` en migration.sql — nunca
+  // calculado con punto flotante (Decimal(14,2) = NUMERIC(14,2) exacto).
+  // expectedCashAmount se calculará en un bloque posterior a partir de
+  // openingAmount + suma de Payments ACTIVE que afectan caja de esta
+  // sesión — esa aritmética es cross-table (Payment), nunca un CHECK de
+  // esta sola tabla.
+  closeRequestedAt   DateTime? @map("close_requested_at")
+  expectedCashAmount Decimal?  @map("expected_cash_amount") @db.Decimal(14, 2)
+  countedCashAmount  Decimal?  @map("counted_cash_amount") @db.Decimal(14, 2)
+  differenceAmount   Decimal?  @map("difference_amount") @db.Decimal(14, 2)
+  closingObservation String?   @map("closing_observation") @db.VarChar(500)
+
+  closedAt DateTime? @map("closed_at")
+
+  // Solo se puebla para un cierre con descuadre finalmente APROBADO (nunca
+  // para un cierre sin descuadre, nunca mientras PENDING_APPROVAL). ADMIN y
+  // MANAGEMENT son los revisores aprobados; la prohibición de
+  // autoaprobación (session.userId === reviewer.id) es responsabilidad de
+  // un servicio de un bloque posterior, no requiere ninguna columna aquí.
+  approvedByUserId String?   @map("approved_by_user_id") @db.Uuid
+  approvedBy       User?     @relation("CashSessionApprovedBy", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  approvedAt       DateTime? @map("approved_at")
+  approvalComment  String?   @map("approval_comment") @db.VarChar(500)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  payments               Payment[]
+  paymentMethodSummaries CashSessionPaymentMethodSummary[]
+
+  // El índice único parcial de "como máximo una fila sin resolver por
+  // usuario" (agregado a mano en migration.sql) ya cubre, como efecto
+  // colateral, la única consulta de lectura ya aprobada para un bloque
+  // posterior ("¿tiene este usuario una CashSession sin resolver?" — WHERE
+  // user_id = ? AND status IN ('OPEN','PENDING_APPROVAL')): Postgres puede
+  // usar un índice único parcial para ese lookup exacto, así que no se
+  // agrega un @@index([userId, status]) redundante. Sin índices sobre
+  // status/openedAt/closedAt en solitario: ningún patrón de consulta real
+  // los necesita todavía en B1 (persistencia únicamente) — se agregarían de
+  // forma aditiva en el bloque que primero los evidencie (p. ej. un futuro
+  // listado de arqueos para revisión), nunca por anticipación.
+  @@map("cash_sessions")
+}
+
+/**
+ * Desglose por método de pago del cierre de una CashSession (Ticket B,
+ * Bloque B1: solo tabla, sin filas hasta un bloque de negocio posterior). Se
+ * crea junto con el snapshot de cierre (closeRequestedAt en adelante) —
+ * nunca antes, nunca vacío para todos los métodos activos (un bloque
+ * posterior solo crea una fila por método efectivamente representado por
+ * Payments ACTIVE de esa sesión). paymentMethodId es la FK real e
+ * inmutable (PaymentMethod nunca se borra físicamente, ver
+ * PaymentMethodsService) — nunca nullable, a diferencia de una FK
+ * "defensiva" pensada para un flujo de borrado que este dominio no permite.
+ * paymentMethodCode/paymentMethodName son el mismo tipo de snapshot
+ * histórico que Payment.paymentMethodCode/paymentMethodName (Ticket C,
+ * Bloque C3): un método renombrado después no debe alterar un cierre ya
+ * registrado.
+ */
+model CashSessionPaymentMethodSummary {
+  id String @id @default(uuid()) @db.Uuid
+
+  cashSessionId String      @map("cash_session_id") @db.Uuid
+  cashSession   CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Cascade)
+
+  paymentMethodId String        @map("payment_method_id") @db.Uuid
+  paymentMethod   PaymentMethod @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+
+  paymentMethodCode String @map("payment_method_code") @db.VarChar(30)
+  paymentMethodName String @map("payment_method_name") @db.VarChar(60)
+
+  totalAmount Decimal @map("total_amount") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Identidad relacional real: PaymentMethod.code es único e inmutable, así
+  // que (cashSessionId, paymentMethodId) es la clave natural — nunca
+  // (cashSessionId, paymentMethodCode), que duplicaría esa identidad sobre
+  // un campo snapshot en vez de la FK estable. cashSessionId como prefijo
+  // izquierdo de este único compuesto ya cubre "cargar el desglose de una
+  // sesión" (mismo criterio que ElectronicDocumentItem con
+  // electronicDocumentId): no se agrega un índice adicional solo sobre
+  // cashSessionId.
+  @@unique([cashSessionId, paymentMethodId])
+  @@map("cash_session_payment_method_summaries")
 }
