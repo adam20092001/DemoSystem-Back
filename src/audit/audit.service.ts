@@ -345,6 +345,15 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'oldValues',
     'newValues',
   ],
+  // Ticket B post-MVP, Bloque B2. CashSessionsService.open() es su único
+  // emisor. Solo campos seguros y ya conocidos por el actor que abrió la
+  // caja: nunca el actor completo, la request cruda, el JWT ni nada
+  // sensible.
+  [AuditAction.CASH_SESSION_OPENED]: [
+    'cashSessionId',
+    'userId',
+    'openingAmount',
+  ],
 };
 
 function isPlainObject(

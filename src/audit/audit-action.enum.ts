@@ -145,4 +145,10 @@ export enum AuditAction {
   PAYMENT_METHOD_UPDATED = 'PAYMENT_METHOD_UPDATED',
   PAYMENT_METHOD_ACTIVATED = 'PAYMENT_METHOD_ACTIVATED',
   PAYMENT_METHOD_DEACTIVATED = 'PAYMENT_METHOD_DEACTIVATED',
+  // Ticket B post-MVP, Bloque B2: única acción de este bloque.
+  // CashSessionsService.open() es su único emisor. Sin
+  // CASH_SESSION_CLOSED/APPROVED/REJECTED todavía: B2 es apertura/lectura
+  // únicamente — esas acciones llegan en los bloques que de verdad emiten
+  // esos eventos de negocio (B3+).
+  CASH_SESSION_OPENED = 'CASH_SESSION_OPENED',
 }
