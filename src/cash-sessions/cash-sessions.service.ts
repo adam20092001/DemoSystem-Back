@@ -16,6 +16,7 @@ import {
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
+import { CashSessionReader } from './cash-session-reader.service';
 import {
   assertClosingObservationRequiredForDifference,
   calculateCashSessionTotals,
@@ -46,14 +47,6 @@ import {
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
-
-/** Fila mínima bloqueada de CashSession, leída directamente vía SQL crudo dentro de close() (mismo patrón que LockedSaleRow en payments.service.ts). */
-interface LockedCashSessionRow {
-  id: string;
-  userId: string;
-  status: CashSessionStatus;
-  openingAmount: Prisma.Decimal;
-}
 
 /** Estados considerados "sin resolver" — mismo criterio que el índice único parcial `cash_sessions_one_unresolved_per_user`. */
 const UNRESOLVED_STATUSES: CashSessionStatus[] = [
@@ -164,21 +157,22 @@ function assertReviewerIsNotOwner(
 }
 
 /**
- * Administración de arqueos de caja (Ticket B post-MVP, Bloques B2+B3):
- * apertura, lectura (actual/historial/detalle) y ahora el flujo completo de
+ * Administración de arqueos de caja (Ticket B post-MVP, Bloques B2+B3+B4):
+ * apertura, lectura (actual/historial/detalle) y el flujo completo de
  * cierre — exacto (OPEN -> CLOSED directo) o con descuadre
  * (OPEN -> PENDING_APPROVAL -> CLOSED por aprobación, o -> OPEN de nuevo
- * por rechazo). PaymentEngine SIGUE sin tocarse en este bloque:
- * Payment.cashSessionId sigue sin asignarse en ningún flujo de cobro real
- * (eso es exclusivo del Bloque B4) — el cálculo de efectivo esperado de
- * este bloque solo LEE Payments ya vinculados por fixtures de prueba o por
- * un futuro B4, nunca los crea ni los vincula él mismo.
+ * por rechazo). Desde el Bloque B4, Payment.cashSessionId se asigna
+ * automáticamente al registrar cualquier cobro (PaymentEngine.register(),
+ * vía CashSessionReader compartido) — este servicio nunca crea ni vincula
+ * Payments él mismo: el cálculo de efectivo esperado de close()/
+ * enrichWithBreakdown() solo LEE los Payment ya vinculados por ese flujo.
  */
 @Injectable()
 export class CashSessionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly cashSessionReader: CashSessionReader,
   ) {}
 
   /**
@@ -262,11 +256,13 @@ export class CashSessionsService {
    * B3). Siempre opera sobre "la caja actual del actor" — nunca una
    * cashSessionId arbitraria del body (§3 del plan aprobado). Bloqueo
    * `SELECT ... FOR UPDATE` sobre esa fila DENTRO de la misma transacción
-   * (§9): la misma fila que un futuro Bloque B4 bloqueará también durante
-   * el registro de un Payment, para serializar cierre vs. cobro. Solo OPEN
-   * puede enviarse a cierre; PENDING_APPROVAL responde 409 (inmutabilidad
-   * mientras está pendiente, §12) — nunca se sobrescribe un snapshot
-   * pendiente con un segundo intento.
+   * (§9), vía CashSessionReader.lockUnresolvedForUser() (Ticket B, Bloque
+   * B4 §6): la MISMA fila y el MISMO lector que PaymentEngine.register()
+   * bloquea durante el registro de un Payment, para serializar cierre vs.
+   * cobro (nunca dos consultas SQL redactadas por separado que podrían
+   * divergir). Solo OPEN puede enviarse a cierre; PENDING_APPROVAL responde
+   * 409 (inmutabilidad mientras está pendiente, §12) — nunca se sobrescribe
+   * un snapshot pendiente con un segundo intento.
    */
   async close(input: CloseCashSessionInput): Promise<SafeCashSession> {
     assertCanCloseCashSession(input.requesterRole);
@@ -276,15 +272,11 @@ export class CashSessionsService {
     );
 
     return this.prisma.$transaction(async (tx) => {
-      const lockedRows = await tx.$queryRaw<LockedCashSessionRow[]>(Prisma.sql`
-        SELECT id, user_id AS "userId", status, opening_amount AS "openingAmount"
-        FROM cash_sessions
-        WHERE user_id = ${input.actorUserId}::uuid
-          AND status IN ('OPEN', 'PENDING_APPROVAL')
-        FOR UPDATE
-      `);
-      const session = lockedRows[0];
-      if (session === undefined) {
+      const session = await this.cashSessionReader.lockUnresolvedForUser(
+        tx,
+        input.actorUserId,
+      );
+      if (session === null) {
         throw new NotFoundException('No tiene una caja sin resolver');
       }
       if (session.status !== CashSessionStatus.OPEN) {

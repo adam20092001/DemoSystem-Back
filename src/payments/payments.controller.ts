@@ -65,7 +65,7 @@ export class PaymentsController {
   @ApiOperation({
     summary: 'Registrar un pago posterior sobre una venta existente',
     description:
-      'Pago completo o parcial (Documento Maestro §16). El saldo pendiente se calcula en vivo bajo bloqueo de la venta: el monto nunca puede superar el saldo disponible en ese instante. La elegibilidad depende únicamente de que la venta esté ACTIVE — el estado actual del cliente (incluso INACTIVE o BLOCKED) nunca impide cobrar una deuda existente. El resumen de pago de la venta (paidAmount/balanceDue/paymentStatus) se recalcula desde la suma de todos los pagos ACTIVE, nunca con aritmética incremental. `method` (Ticket C, Bloque C3) es un código de método de pago dinámico (ver GET /payment-methods), resuelto dentro de la misma transacción que crea el pago: debe existir y estar activo.',
+      'Pago completo o parcial (Documento Maestro §16). El saldo pendiente se calcula en vivo bajo bloqueo de la venta: el monto nunca puede superar el saldo disponible en ese instante. La elegibilidad depende únicamente de que la venta esté ACTIVE — el estado actual del cliente (incluso INACTIVE o BLOCKED) nunca impide cobrar una deuda existente. El resumen de pago de la venta (paidAmount/balanceDue/paymentStatus) se recalcula desde la suma de todos los pagos ACTIVE, nunca con aritmética incremental. `method` (Ticket C, Bloque C3) es un código de método de pago dinámico (ver GET /payment-methods), resuelto dentro de la misma transacción que crea el pago: debe existir y estar activo. Ticket B, Bloque B4: el cobrador (actor autenticado) debe tener su propia caja (CashSession) abierta — el pago se vincula automáticamente a ella (`Payment.cashSessionId`, nunca elegible por el cliente); esta exigencia aplica a CUALQUIER método de pago, sin importar si afecta o no el efectivo físico de caja.',
   })
   @ApiParam({ name: 'saleId', format: 'uuid' })
   @ApiCreatedResponse({ type: PaymentMutationResponseDto })
@@ -79,7 +79,7 @@ export class PaymentsController {
   })
   @ApiConflictResponse({
     description:
-      'La venta está anulada, el monto supera el saldo pendiente vigente (incluido el caso de saldo ya en 0), o method corresponde a un método de pago actualmente inactivo.',
+      'La venta está anulada, el monto supera el saldo pendiente vigente (incluido el caso de saldo ya en 0), method corresponde a un método de pago actualmente inactivo, el cobrador no tiene ninguna caja abierta (Ticket B, Bloque B4), o su caja está pendiente de aprobación de un descuadre (no admite nuevos cobros hasta resolverse).',
   })
   @Roles(...REGISTER_ROLES)
   @Post('sales/:saleId/payments')

@@ -213,7 +213,12 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   // potencialmente sensible ya persistido en Payment), nunca PII de
   // cliente, nunca cancellationReason (texto libre ya persistido en
   // Payment.cancellationReason), nunca totales de Sale.
-  [AuditAction.PAYMENT_REGISTERED]: ['saleId', 'saleNumber', 'method'],
+  [AuditAction.PAYMENT_REGISTERED]: [
+    'saleId',
+    'saleNumber',
+    'method',
+    'cashSessionId',
+  ],
   [AuditAction.PAYMENT_CANCELLED]: [
     'saleId',
     'saleNumber',

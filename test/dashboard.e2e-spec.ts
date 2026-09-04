@@ -21,7 +21,7 @@ import {
   E2E_ADMIN_ACTIVE_PASSWORD,
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
-import { upsertFixtureUser } from './helpers/fixtures';
+import { openCashSessionFixture, upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -56,6 +56,8 @@ describe('Dashboard (e2e)', () => {
 
   let adminCookie: string;
   let sellerCookie: string;
+  // Ticket B, Bloque B4: caja fixture abierta para admin (§29).
+  let adminCashSessionId: string;
   let seller2Cookie: string;
   let managementCookie: string;
   let warehouseCookie: string;
@@ -431,6 +433,17 @@ describe('Dashboard (e2e)', () => {
       },
     });
 
+    // Ticket B, Bloque B4: PaymentEngine.register() exige que el cobrador
+    // tenga su propia caja (CashSession) abierta. Esta suite registra
+    // pagos reales exclusivamente con adminCookie (admin GLOBAL
+    // compartido) — abierta directamente en BD (§29 del plan aprobado) y
+    // eliminada por su ID exacto en afterAll.
+    const adminUser = await prisma.user.findUniqueOrThrow({
+      where: { username: E2E_ADMIN_USERNAME },
+    });
+    adminCashSessionId = (await openCashSessionFixture(prisma, adminUser.id))
+      .id;
+
     const category = await prisma.category.upsert({
       where: { code: 'E2EDASHCAT' },
       update: { status: CategoryStatus.ACTIVE },
@@ -496,6 +509,13 @@ describe('Dashboard (e2e)', () => {
         });
         await prisma.sale.deleteMany({ where: { id: { in: createdSaleIds } } });
       }
+
+      // Ticket B, Bloque B4: caja fixture del admin GLOBAL compartido —
+      // SIEMPRE después de borrar los Payment propios de arriba
+      // (Payment.cashSessionId es RESTRICT hacia CashSession).
+      await prisma.cashSession.deleteMany({
+        where: { id: adminCashSessionId },
+      });
 
       if (createdQuoteIds.length > 0) {
         await prisma.auditLog.deleteMany({

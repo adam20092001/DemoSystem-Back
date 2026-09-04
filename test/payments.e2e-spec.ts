@@ -26,7 +26,7 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { createE2eApp } from './helpers/e2e-app';
-import { upsertFixtureUser } from './helpers/fixtures';
+import { openCashSessionFixture, upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -167,6 +167,20 @@ describe('Payments (e2e)', () => {
   // probar el cutover dinámico — eliminados por su ID exacto en afterAll,
   // nunca se toca ninguno de los 9 baseline.
   const ownedPaymentMethodIds: string[] = [];
+  // Ticket B, Bloque B4: desde este bloque, PaymentEngine.register() exige
+  // que el cobrador tenga su propia caja (CashSession) abierta. Este spec
+  // registra pagos reales vía HTTP con admin/seller/fkCreator — cada uno
+  // necesita una caja OPEN propia, abierta directamente en BD (§29 del plan
+  // aprobado: suite no relacionada con CashSessions, sin ejercer el
+  // endpoint HTTP real de apertura) y eliminada por su ID exacto en
+  // afterAll. adminCashSessionId usa al admin GLOBAL compartido
+  // (E2E_ADMIN_USERNAME): es seguro porque Jest corre en serie
+  // (--runInBand) y esta suite elimina su propia fila antes de que
+  // cualquier otra suite posterior intente abrir la suya para ese mismo
+  // usuario (mismo criterio de propiedad exacta que el resto del repo).
+  let adminCashSessionId: string;
+  let sellerCashSessionId: string;
+  let fkCreatorCashSessionId: string;
 
   const RUN_ID = Date.now();
   let counter = 0;
@@ -261,6 +275,14 @@ describe('Payments (e2e)', () => {
         where: { username: FK_CANCELLER_USERNAME },
       })
     ).id;
+
+    // Ticket B, Bloque B4: caja abierta para cada actor que registra pagos
+    // reales vía HTTP en este spec (fkCancellerCookie nunca registra pagos,
+    // solo anula — la anulación no exige caja abierta, ver §19/§20).
+    adminCashSessionId = (await openCashSessionFixture(prisma, adminId)).id;
+    sellerCashSessionId = (await openCashSessionFixture(prisma, sellerId)).id;
+    fkCreatorCashSessionId = (await openCashSessionFixture(prisma, fkCreatorId))
+      .id;
 
     // ---------------------------------------------------------------
     // Clientes fixture. Sale no requiere SaleItem/Product/Category/Unit:
@@ -379,6 +401,24 @@ describe('Payments (e2e)', () => {
         });
         await prisma.sale.deleteMany({ where: { id: { in: ownedSaleIds } } });
       }
+
+      // Ticket B, Bloque B4: cajas fixture de admin/seller/fkCreator — SIEMPRE
+      // después de borrar los Payment propios de arriba (Payment.cashSessionId
+      // es RESTRICT hacia CashSession). adminCashSessionId pertenece al admin
+      // GLOBAL compartido: se elimina aquí para que ninguna otra suite
+      // posterior encuentre una caja sin resolver ya abierta para ese mismo
+      // usuario.
+      await prisma.cashSession.deleteMany({
+        where: {
+          id: {
+            in: [
+              adminCashSessionId,
+              sellerCashSessionId,
+              fkCreatorCashSessionId,
+            ],
+          },
+        },
+      });
 
       // Ticket C, Bloque C3: custom PaymentMethod propios de este spec.
       // Toda Payment que los referenciaba ya se eliminó arriba
@@ -1668,7 +1708,7 @@ describe('Payments (e2e)', () => {
   // Auditoría — registro
   // ==================================================================
   describe('auditoría — PAYMENT_REGISTERED', () => {
-    it('exactamente 1 auditoría, module PAYMENTS, entityType Payment; whitelist exacta {saleId, saleNumber, method}', async () => {
+    it('exactamente 1 auditoría, module PAYMENTS, entityType Payment; whitelist exacta {saleId, saleNumber, method, cashSessionId}', async () => {
       const sale = await createFixtureSale({ total: '25.00' });
       const result = await registerPaymentOrThrow(adminCookie, sale.id, {
         method: 'TRANSFER',
@@ -1687,11 +1727,13 @@ describe('Payments (e2e)', () => {
       expect(row.module).toBe('PAYMENTS');
       const metadata = row.metadata as Record<string, unknown>;
       expect(Object.keys(metadata).sort()).toEqual(
-        ['saleId', 'saleNumber', 'method'].sort(),
+        ['saleId', 'saleNumber', 'method', 'cashSessionId'].sort(),
       );
       expect(metadata.saleId).toBe(sale.id);
       expect(metadata.saleNumber).toBe(sale.number);
       expect(metadata.method).toBe('TRANSFER');
+      // Ticket B, Bloque B4: la caja del cobrador (admin, en este caso).
+      expect(metadata.cashSessionId).toBe(adminCashSessionId);
       expect(metadata).not.toHaveProperty('amount');
       expect(metadata).not.toHaveProperty('reference');
       expect(metadata).not.toHaveProperty('customerName');

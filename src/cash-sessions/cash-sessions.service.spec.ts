@@ -12,6 +12,7 @@ import {
 } from '../common/date/business-date';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PrismaService } from '../database/prisma.service';
+import { CashSessionReader } from './cash-session-reader.service';
 import { CashSessionsService } from './cash-sessions.service';
 
 const NOW = new Date('2026-03-15T10:00:00.000Z');
@@ -136,19 +137,32 @@ function createAuditServiceMock() {
   };
 }
 
+/** Ticket B, Bloque B4: mock del lector/bloqueador compartido inyectado por CashSessionsService.close() (mismo que consume PaymentEngine.register()). */
+function createCashSessionReaderMock() {
+  return {
+    lockUnresolvedForUser: jest.fn<
+      Promise<Record<string, unknown> | null>,
+      [unknown, string]
+    >(),
+  };
+}
+
 describe('CashSessionsService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
+  let cashSessionReader: ReturnType<typeof createCashSessionReaderMock>;
   let service: CashSessionsService;
 
   beforeEach(() => {
     prisma = createPrismaMock();
     auditService = createAuditServiceMock();
     auditService.record.mockResolvedValue(undefined);
+    cashSessionReader = createCashSessionReaderMock();
 
     service = new CashSessionsService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
+      cashSessionReader as unknown as CashSessionReader,
     );
   });
 
@@ -341,15 +355,12 @@ describe('CashSessionsService', () => {
     function mockLockedOpenSession(
       overrides: Partial<Record<string, unknown>> = {},
     ) {
-      prisma.tx.$queryRaw.mockResolvedValue([
-        {
-          id: 'cs-1',
-          userId: 'user-1',
-          status: CashSessionStatus.OPEN,
-          openingAmount: new Prisma.Decimal('100.00'),
-          ...overrides,
-        },
-      ]);
+      cashSessionReader.lockUnresolvedForUser.mockResolvedValue({
+        id: 'cs-1',
+        status: CashSessionStatus.OPEN,
+        openingAmount: new Prisma.Decimal('100.00'),
+        ...overrides,
+      });
     }
 
     beforeEach(() => {
@@ -427,7 +438,7 @@ describe('CashSessionsService', () => {
     });
 
     it('sin caja sin resolver -> 404', async () => {
-      prisma.tx.$queryRaw.mockResolvedValue([]);
+      cashSessionReader.lockUnresolvedForUser.mockResolvedValue(null);
       await expect(
         service.close({
           countedCashAmount: '100.00',

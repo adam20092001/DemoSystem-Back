@@ -499,15 +499,18 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
   }
 
   /**
-   * Crea un Sale + Payment real vía la API pública y lo vincula a una
-   * CashSession por escritura directa de Prisma SOLO para el campo
-   * cashSessionId (Ticket B, Bloque B3 §35: "para B3 E2E crear/vincular
-   * fixtures de Payment usando un montaje explícito y acotado" —
-   * PaymentEngine sigue sin asignar Payment.cashSessionId automáticamente
-   * hasta el Bloque B4). La anulación, si se pide, pasa SIEMPRE por el
-   * endpoint real (nunca una escritura cruda de status): §27 exige probar
-   * el snapshot de CashSession sin alterar el comportamiento real de
-   * PaymentsService.cancel().
+   * Crea un Sale + Payment real vía la API pública. Desde el Ticket B,
+   * Bloque B4, PaymentEngine.register() vincula Payment.cashSessionId
+   * automáticamente a la caja OPEN del actor (sellerCookieForFixture) —
+   * esta función ya NO escribe ese campo a mano (a diferencia del Bloque
+   * B3, que sí lo hacía como scaffolding explícito mientras B4 no
+   * existía): en su lugar, verifica que el vínculo automático coincida
+   * exactamente con `cashSessionId` (la caja abierta previamente por el
+   * propio test para ese mismo actor), lo cual prueba genuinamente la
+   * integración B4 en vez de asumirla. La anulación, si se pide, pasa
+   * SIEMPRE por el endpoint real (nunca una escritura cruda de status):
+   * §27 exige probar el snapshot de CashSession sin alterar el
+   * comportamiento real de PaymentsService.cancel().
    */
   async function createLinkedPayment(
     sellerCookieForFixture: string,
@@ -570,11 +573,17 @@ describe('Cash Sessions (e2e) — Ticket B, Bloque B2', () => {
       .payment.id;
     ownedPaymentIds.push(paymentId);
 
-    const linked = await prisma.payment.update({
+    // Ticket B, Bloque B4: prueba genuina de la integración — el vínculo
+    // ya lo asignó PaymentEngine.register() él mismo, nunca esta fixture.
+    const linked = await prisma.payment.findUniqueOrThrow({
       where: { id: paymentId },
-      data: { cashSessionId },
-      select: { id: true, paymentMethodAffectsCashDrawer: true },
+      select: {
+        id: true,
+        cashSessionId: true,
+        paymentMethodAffectsCashDrawer: true,
+      },
     });
+    expect(linked.cashSessionId).toBe(cashSessionId);
     return { ...linked, saleId };
   }
 

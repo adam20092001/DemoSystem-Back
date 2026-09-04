@@ -38,7 +38,7 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { createE2eApp } from './helpers/e2e-app';
-import { upsertFixtureUser } from './helpers/fixtures';
+import { openCashSessionFixture, upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -299,6 +299,9 @@ describe('Sales (e2e)', () => {
   let adminId: string;
   let sellerId: string;
   let fkUserId: string;
+  // Ticket B, Bloque B4: caja abierta para admin, único actor que registra
+  // pagos iniciales embebidos en este spec.
+  let adminCashSessionId: string;
 
   let categoryId: string;
   let categoryInactiveId: string;
@@ -451,6 +454,16 @@ describe('Sales (e2e)', () => {
       where: { username: FK_USER_USERNAME },
     });
     fkUserId = fkUser.id;
+
+    // Ticket B, Bloque B4: PaymentEngine.register() exige que el cobrador
+    // tenga su propia caja (CashSession) abierta. Este spec solo registra
+    // pagos iniciales embebidos con adminCookie (E2E_ADMIN_USERNAME, el
+    // admin GLOBAL compartido) — nunca con sellerCookie — así que basta con
+    // abrir una única caja fixture para admin (§29 del plan aprobado: DB
+    // directa, sin ejercer el endpoint HTTP real de apertura). Se elimina
+    // por su ID exacto en afterAll antes de que cualquier otra suite
+    // posterior intente abrir la suya para ese mismo usuario.
+    adminCashSessionId = (await openCashSessionFixture(prisma, adminId)).id;
 
     // ---------------------------------------------------------------
     // Secuencia NV propia del spec: upsert defensivo, eliminada en afterAll.
@@ -898,6 +911,15 @@ describe('Sales (e2e)', () => {
         });
         await prisma.sale.deleteMany({ where: { id: { in: allSaleIds } } });
       }
+
+      // Ticket B, Bloque B4: caja fixture de admin — SIEMPRE después de
+      // borrar los Payment propios de arriba (Payment.cashSessionId es
+      // RESTRICT hacia CashSession). Pertenece al admin GLOBAL compartido:
+      // se elimina aquí para que ninguna otra suite posterior encuentre una
+      // caja sin resolver ya abierta para ese mismo usuario.
+      await prisma.cashSession.deleteMany({
+        where: { id: adminCashSessionId },
+      });
 
       const allQuoteIds = [...createdQuoteIds, ...directQuoteIds];
       if (allQuoteIds.length > 0) {

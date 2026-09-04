@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import {
   AccountingSourceType,
+  CashSessionStatus,
   PaymentCancellationSource,
   PaymentStatus,
   Prisma,
@@ -12,6 +13,7 @@ import {
 import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { CashSessionReader } from '../cash-sessions/cash-session-reader.service';
 import { PaymentMethodReader } from '../payment-methods/payment-method-reader.service';
 import {
   deriveSalePaymentSummary,
@@ -70,6 +72,28 @@ interface LockedPaymentRow {
  * simplemente por cuál transacción confirma primero, mismo criterio de
  * tolerancia que el resto del dominio ya aplica a Product/Category
  * mientras se confirma una Venta).
+ *
+ * Ticket B, Bloque B4: register() es también el ÚNICO punto del dominio que
+ * exige y resuelve la caja del cobrador. La regla final aprobada es sobre
+ * la ACCIÓN (registrar un cobro), nunca sobre un rol fijo: se evalúa contra
+ * `command.actorUserId`, así que si un rol futuro distinto de ADMIN/SELLER
+ * llegara a poder registrar Payments, la regla se aplicaría igual sin
+ * ningún cambio aquí. CashSessionReader.lockUnresolvedForUser() bloquea
+ * (SELECT ... FOR UPDATE) la caja sin resolver del cobrador DENTRO de esta
+ * misma transacción, ANTES de tocar `payments` — la misma fila y el mismo
+ * lector que CashSessionsService.close() (Bloque B3) bloquea al cerrar,
+ * así que ambas operaciones se serializan correctamente sobre la MISMA
+ * caja (§12 del plan aprobado): si el cobro obtiene el lock primero, el
+ * cierre posterior necesariamente ve (y por lo tanto calcula) ese Payment;
+ * si el cierre lo obtiene primero, el cobro posterior ve el nuevo estado
+ * (CLOSED o PENDING_APPROVAL) y falla con 409. La exigencia aplica sin
+ * importar el método de pago (CASH, CARD, un método dinámico custom con
+ * affectsCashDrawer=false, etc. — ese campo solo alimenta el cálculo de
+ * efectivo físico esperado, nunca esta puerta de entrada) ni el destino
+ * contable del método. Payment.cashSessionId se asigna SIEMPRE desde la
+ * fila ya bloqueada (`session.id`), nunca desde un valor que el llamador
+ * pudiera intentar inyectar: ni RegisterPaymentCommand ni ningún DTO HTTP
+ * exponen ese campo.
  */
 @Injectable()
 export class PaymentEngine {
@@ -77,6 +101,7 @@ export class PaymentEngine {
     private readonly auditService: AuditService,
     private readonly accountingEngine: AccountingEngine,
     private readonly paymentMethodReader: PaymentMethodReader,
+    private readonly cashSessionReader: CashSessionReader,
   ) {}
 
   /**
@@ -102,6 +127,26 @@ export class PaymentEngine {
     command: RegisterPaymentCommand,
   ): Promise<SafePayment> {
     assertValidPaymentAmountShape(command.amount);
+
+    // Ticket B, Bloque B4 §5/§11/§12: la caja del cobrador se bloquea
+    // PRIMERO, antes de resolver el método de pago y antes de cualquier
+    // escritura en `payments` — es el mismo orden y el mismo lock que
+    // CashSessionsService.close() usa sobre la misma fila, así que ambas
+    // operaciones se serializan correctamente entre sí.
+    const session = await this.cashSessionReader.lockUnresolvedForUser(
+      tx,
+      command.actorUserId,
+    );
+    if (session === null) {
+      throw new ConflictException(
+        'No hay una caja abierta para registrar el cobro.',
+      );
+    }
+    if (session.status !== CashSessionStatus.OPEN) {
+      throw new ConflictException(
+        'La caja está pendiente de aprobación y no admite nuevos cobros.',
+      );
+    }
 
     const normalizedCode = normalizePaymentMethodCode(command.method);
     const method = await this.paymentMethodReader.findByCode(
@@ -141,6 +186,9 @@ export class PaymentEngine {
         paymentMethodCode: method.code,
         paymentMethodName: method.name,
         paymentMethodAffectsCashDrawer: method.affectsCashDrawer,
+        // Ticket B, Bloque B4 §9: SIEMPRE la caja ya bloqueada arriba —
+        // nunca un valor propagado desde el comando/DTO del llamador.
+        cashSessionId: session.id,
       },
       select: PAYMENT_SAFE_SELECT,
     });
@@ -170,6 +218,10 @@ export class PaymentEngine {
         saleId: command.saleId,
         saleNumber: command.saleNumber,
         method: method.code,
+        // Ticket B, Bloque B4 §18: valor informativo adicional, mínimo y
+        // seguro (mismo UUID ya persistido en Payment.cashSessionId); no se
+        // introduce ninguna AuditAction nueva solo por este vínculo.
+        cashSessionId: session.id,
       },
       ipAddress: command.ipAddress,
       client: tx,
