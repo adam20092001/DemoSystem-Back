@@ -2,9 +2,11 @@ import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PAYMENT_METHOD_CODE_PATTERN } from '../payment-methods/constants/payment-method.constants';
 import {
+  MAX_INITIAL_PAYMENTS,
   PAYMENT_CANCELLATION_REASON_MAX_LENGTH,
   PAYMENT_REFERENCE_MAX_LENGTH,
 } from './constants/payment.constants';
+import { InitialPaymentInput } from './types/payment.input';
 
 /**
  * Forma textual estricta: solo dígitos, sin signo, sin notación científica,
@@ -125,6 +127,87 @@ export function normalizePaymentReference(
     );
   }
   return normalized;
+}
+
+/**
+ * Pago inicial ya parseado/normalizado, listo para PaymentEngine.register().
+ * `method` sigue siendo el código CRUDO tal como llegó: su normalización y
+ * resolución ocurren dentro de PaymentEngine.register(), en la misma
+ * transacción que crea el Payment (Ticket C, Bloque C3) — nunca aquí.
+ */
+export interface ParsedInitialPayment {
+  method: string;
+  amount: Prisma.Decimal;
+  reference: string | null;
+}
+
+/** Lote normalizado de pagos iniciales: `items` en el orden recibido y su suma exacta. */
+export interface ParsedInitialPaymentBatch {
+  items: ParsedInitialPayment[];
+  totalAmount: Prisma.Decimal;
+}
+
+/**
+ * R1: normaliza el pago inicial de una venta, venga en la forma singular
+ * existente (`payment`) o como lote (`payments`, 1..MAX_INITIAL_PAYMENTS
+ * elementos), a una única lista interna. PURA y previa a la transacción
+ * (mismo criterio que el parseo actual del pago inicial en SalesService):
+ * un lote malformado falla con 400 sin abrir transacción. Cada elemento
+ * pasa exactamente por parsePaymentAmount() y normalizePaymentReference(),
+ * en ese orden — la forma singular conserva así el mismo comportamiento y
+ * los mismos errores que hoy. Los métodos repetidos se admiten. No valida
+ * la suma contra el total de la venta: eso es una regla de estado en vivo
+ * que se evalúa dentro de la transacción.
+ *
+ * `null` se trata igual que ausente, mismo criterio que @IsOptional() de
+ * class-validator en la capa HTTP.
+ */
+export function parseInitialPayments(
+  payment?: InitialPaymentInput | null,
+  payments?: readonly InitialPaymentInput[] | null,
+): ParsedInitialPaymentBatch {
+  const hasPayment = payment !== undefined && payment !== null;
+  const hasPayments = payments !== undefined && payments !== null;
+
+  if (hasPayment && hasPayments) {
+    throw new BadRequestException(
+      'No se puede enviar "payment" y "payments" a la vez',
+    );
+  }
+
+  let inputs: readonly InitialPaymentInput[];
+  if (hasPayments) {
+    if (!Array.isArray(payments)) {
+      throw new BadRequestException('"payments" debe ser una lista de pagos');
+    }
+    if (payments.length === 0) {
+      throw new BadRequestException(
+        '"payments" debe contener al menos un pago',
+      );
+    }
+    if (payments.length > MAX_INITIAL_PAYMENTS) {
+      throw new BadRequestException(
+        `"payments" admite como máximo ${MAX_INITIAL_PAYMENTS} pagos`,
+      );
+    }
+    inputs = payments;
+  } else if (hasPayment) {
+    inputs = [payment];
+  } else {
+    inputs = [];
+  }
+
+  const items = inputs.map((input) => ({
+    method: input.method,
+    amount: parsePaymentAmount(input.amount),
+    reference: normalizePaymentReference(input.reference),
+  }));
+  const totalAmount = items.reduce(
+    (accumulated, item) => accumulated.plus(item.amount),
+    new Prisma.Decimal(0),
+  );
+
+  return { items, totalAmount };
 }
 
 /**
