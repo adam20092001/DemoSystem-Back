@@ -55,6 +55,20 @@ export type UserWithRoles = Prisma.UserGetPayload<{
   select: typeof USER_WITH_ROLES_SELECT;
 }>;
 
+/**
+ * Select explícito de GET /users/lookup (R3-B1): identidad mínima para
+ * selectores de filtro. Mismo criterio que USER_WITH_ROLES_SELECT — lo que
+ * no se selecciona aquí nunca sale de la base de datos (sin email, roles,
+ * passwordHash, failedLoginAttempts, blockedAt ni fechas de sesión).
+ */
+export const USER_LOOKUP_SELECT = {
+  id: true,
+  username: true,
+  firstName: true,
+  lastName: true,
+  status: true,
+} satisfies Prisma.UserSelect;
+
 /** Extrae los nombres de rol asignados de una fila UserWithRoles, sin orden particular. */
 export function assignedRoleNames(user: UserWithRoles): RoleName[] {
   return user.roles.map((userRole) => userRole.role.name);

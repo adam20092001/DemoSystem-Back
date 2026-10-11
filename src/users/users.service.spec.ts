@@ -361,6 +361,79 @@ describe('UsersService', () => {
     });
   });
 
+  describe('lookupUsers (R3-B1)', () => {
+    function makeLookupRow(
+      id: string,
+      firstName: string,
+      lastName: string,
+      username: string,
+      status: UserStatus,
+    ) {
+      return { id, username, firstName, lastName, status };
+    }
+
+    it('usa un select explícito con solo los 5 campos permitidos, sin filtro de estado ni paginación', async () => {
+      prisma.user.findMany.mockResolvedValue([]);
+
+      await service.lookupUsers();
+
+      expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
+      expect(prisma.user.findMany).toHaveBeenCalledWith({
+        select: {
+          id: true,
+          username: true,
+          firstName: true,
+          lastName: true,
+          status: true,
+        },
+        orderBy: [
+          { firstName: 'asc' },
+          { lastName: 'asc' },
+          { username: 'asc' },
+          { id: 'asc' },
+        ],
+      });
+    });
+
+    it('incluye usuarios ACTIVE, INACTIVE y BLOCKED tal como los devuelve la consulta', async () => {
+      const rows = [
+        makeLookupRow('u-1', 'Ana', 'Activa', 'aactiva', UserStatus.ACTIVE),
+        makeLookupRow(
+          'u-2',
+          'Beto',
+          'Inactivo',
+          'binactivo',
+          UserStatus.INACTIVE,
+        ),
+        makeLookupRow('u-3', 'Carla', 'Bloqueada', 'cbloq', UserStatus.BLOCKED),
+      ];
+      prisma.user.findMany.mockResolvedValue(rows);
+
+      const result = await service.lookupUsers();
+
+      expect(result.map((user) => user.status)).toEqual([
+        UserStatus.ACTIVE,
+        UserStatus.INACTIVE,
+        UserStatus.BLOCKED,
+      ]);
+      for (const user of result) {
+        expect(Object.keys(user).sort()).toEqual(
+          ['firstName', 'id', 'lastName', 'status', 'username'].sort(),
+        );
+      }
+    });
+
+    it('no abre transacciones ni registra auditoría (lectura pura)', async () => {
+      prisma.user.findMany.mockResolvedValue([]);
+
+      await service.lookupUsers();
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+      expect(prisma.user.count).not.toHaveBeenCalled();
+    });
+  });
+
   describe('findUserById', () => {
     it('devuelve la forma segura cuando el usuario existe', async () => {
       prisma.user.findUnique.mockResolvedValue(makeUserRow());
