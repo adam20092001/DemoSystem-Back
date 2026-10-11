@@ -15,6 +15,7 @@ import { PrismaService } from '../database/prisma.service';
 import {
   assignedRoleNames,
   toSafeUser,
+  USER_LOOKUP_SELECT,
   USER_WITH_ROLES_SELECT,
 } from './mappers/user.mapper';
 import {
@@ -27,6 +28,7 @@ import { ListUsersQuery, PaginatedResult } from './types/list-users.query';
 import { ResetPasswordResult } from './types/reset-password.result';
 import { SafeUser } from './types/safe-user';
 import { UpdateUserInput } from './types/update-user.input';
+import { UserLookupItem } from './types/user-lookup-item';
 
 const TEMPORARY_PASSWORD_LENGTH = 20;
 // Sin 0/O ni 1/l/I, para reducir errores al transcribir la contraseña temporal.
@@ -146,6 +148,25 @@ export class UsersService {
       total,
       totalPages: total === 0 ? 0 : Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * Lista mínima de usuarios para selectores de filtro (R3-B1). Sin filtro
+   * de estado a propósito: un usuario INACTIVE/BLOCKED puede ser vendedor o
+   * cobrador de registros históricos y debe poder seleccionarse. Sin
+   * paginación: el sistema es interno con un número reducido de usuarios.
+   * Orden determinista firstName, lastName, username, id.
+   */
+  async lookupUsers(): Promise<UserLookupItem[]> {
+    return this.prisma.user.findMany({
+      select: USER_LOOKUP_SELECT,
+      orderBy: [
+        { firstName: 'asc' },
+        { lastName: 'asc' },
+        { username: 'asc' },
+        { id: 'asc' },
+      ],
+    });
   }
 
   async findUserById(id: string): Promise<SafeUser> {

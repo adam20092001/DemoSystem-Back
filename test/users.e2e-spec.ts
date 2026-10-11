@@ -1,5 +1,5 @@
 import { ConflictException, INestApplication } from '@nestjs/common';
-import { PrismaClient, RoleName } from '@prisma/client';
+import { PrismaClient, RoleName, UserStatus } from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
@@ -199,6 +199,268 @@ describe('Users (e2e)', () => {
         });
 
       expect(response.status).toBe(400);
+    });
+  });
+
+  describe('GET /users/lookup (R3-B1)', () => {
+    const LOOKUP_KEYS = [
+      'firstName',
+      'id',
+      'lastName',
+      'status',
+      'username',
+    ].sort();
+    const MANAGEMENT_USERNAME = 'e2e_lookup_management';
+    const MANAGEMENT_PASSWORD = 'LookupManagement123';
+    const WAREHOUSE_USERNAME = 'e2e_lookup_warehouse';
+    const WAREHOUSE_PASSWORD = 'LookupWarehouse123';
+    const MULTIROLE_USERNAME = 'e2e_lookup_multirole';
+    const MULTIROLE_PASSWORD = 'LookupMultiRole123';
+    const INACTIVE_USERNAME = 'e2e_lookup_inactive';
+    const BLOCKED_USERNAME = 'e2e_lookup_blocked';
+
+    interface LookupItemBody {
+      id: string;
+      username: string;
+      firstName: string;
+      lastName: string;
+      status: UserStatus;
+    }
+
+    let sellerCookie: string;
+    let managementCookie: string;
+    let warehouseCookie: string;
+    let inactiveUserId: string;
+    let blockedUserId: string;
+
+    async function loginOrThrow(
+      username: string,
+      password: string,
+    ): Promise<string> {
+      const result = await login(app.getHttpServer(), username, password);
+      if (result.status !== 200) {
+        throw new Error(
+          `No se pudo autenticar a ${username}: ${JSON.stringify(result.body)}`,
+        );
+      }
+      return result.cookie;
+    }
+
+    function getLookup(cookie?: string): request.Test {
+      const req = request(app.getHttpServer()).get('/api/v1/users/lookup');
+      return cookie === undefined ? req : req.set('Cookie', cookie);
+    }
+
+    beforeAll(async () => {
+      await upsertFixtureUser(prisma, {
+        username: MANAGEMENT_USERNAME,
+        email: 'e2e_lookup_management@demosystem.test',
+        password: MANAGEMENT_PASSWORD,
+        roleName: RoleName.MANAGEMENT,
+      });
+      await upsertFixtureUser(prisma, {
+        username: WAREHOUSE_USERNAME,
+        email: 'e2e_lookup_warehouse@demosystem.test',
+        password: WAREHOUSE_PASSWORD,
+        roleName: RoleName.WAREHOUSE,
+      });
+      const inactive = await upsertFixtureUser(prisma, {
+        username: INACTIVE_USERNAME,
+        email: 'e2e_lookup_inactive@demosystem.test',
+        firstName: 'Histórico',
+        lastName: 'Inactivo',
+        password: 'LookupInactive123',
+        roleName: RoleName.SELLER,
+        status: UserStatus.INACTIVE,
+      });
+      inactiveUserId = inactive.id;
+      const blocked = await upsertFixtureUser(prisma, {
+        username: BLOCKED_USERNAME,
+        email: 'e2e_lookup_blocked@demosystem.test',
+        firstName: 'Histórico',
+        lastName: 'Bloqueado',
+        password: 'LookupBlocked123',
+        roleName: RoleName.SELLER,
+        status: UserStatus.BLOCKED,
+        blockedAt: new Date(),
+      });
+      blockedUserId = blocked.id;
+
+      // Usuario con dos roles asignados (WAREHOUSE + SELLER), para verificar
+      // que la autorización se evalúa contra el rol ACTIVO de la sesión.
+      const multiRole = await upsertFixtureUser(prisma, {
+        username: MULTIROLE_USERNAME,
+        email: 'e2e_lookup_multirole@demosystem.test',
+        password: MULTIROLE_PASSWORD,
+        roleName: RoleName.WAREHOUSE,
+      });
+      const sellerRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.SELLER },
+      });
+      await prisma.userRole.create({
+        data: { userId: multiRole.id, roleId: sellerRole.id },
+      });
+
+      sellerCookie = await loginOrThrow(SELLER_USERNAME, SELLER_PASSWORD);
+      managementCookie = await loginOrThrow(
+        MANAGEMENT_USERNAME,
+        MANAGEMENT_PASSWORD,
+      );
+      warehouseCookie = await loginOrThrow(
+        WAREHOUSE_USERNAME,
+        WAREHOUSE_PASSWORD,
+      );
+    });
+
+    it.each([
+      ['ADMIN', () => adminCookie],
+      ['SELLER', () => sellerCookie],
+      ['MANAGEMENT', () => managementCookie],
+    ])('%s responde 200 con un arreglo', async (_role, cookieOf) => {
+      const response = await getLookup(cookieOf());
+
+      expect(response.status).toBe(200);
+      expect(Array.isArray(response.body)).toBe(true);
+    });
+
+    it('WAREHOUSE responde 403', async () => {
+      const response = await getLookup(warehouseCookie);
+      expect(response.status).toBe(403);
+    });
+
+    it('sin cookie responde 401', async () => {
+      const response = await getLookup();
+      expect(response.status).toBe(401);
+    });
+
+    it('"lookup" no se resuelve como :id (nunca 400 de ParseUUIDPipe)', async () => {
+      const response = await getLookup(adminCookie);
+      expect(response.status).not.toBe(400);
+      expect(response.status).toBe(200);
+    });
+
+    it('cada elemento expone exactamente id/username/firstName/lastName/status, sin datos sensibles', async () => {
+      const response = await getLookup(sellerCookie);
+      const body = response.body as LookupItemBody[];
+
+      expect(body.length).toBeGreaterThan(0);
+      for (const item of body) {
+        expect(Object.keys(item).sort()).toEqual(LOOKUP_KEYS);
+      }
+      const serialized = JSON.stringify(response.body);
+      expect(serialized).not.toContain('passwordHash');
+      expect(serialized).not.toContain('email');
+      expect(serialized).not.toContain('roles');
+      expect(serialized).not.toContain('failedLoginAttempts');
+      expect(serialized).not.toContain('blockedAt');
+      expect(serialized).not.toContain('@demosystem');
+    });
+
+    it('incluye usuarios históricos INACTIVE y BLOCKED con su estado real', async () => {
+      const response = await getLookup(sellerCookie);
+      const body = response.body as LookupItemBody[];
+
+      expect(body.find((item) => item.id === inactiveUserId)).toEqual({
+        id: inactiveUserId,
+        username: INACTIVE_USERNAME,
+        firstName: 'Histórico',
+        lastName: 'Inactivo',
+        status: UserStatus.INACTIVE,
+      });
+      expect(body.find((item) => item.id === blockedUserId)).toEqual({
+        id: blockedUserId,
+        username: BLOCKED_USERNAME,
+        firstName: 'Histórico',
+        lastName: 'Bloqueado',
+        status: UserStatus.BLOCKED,
+      });
+    });
+
+    it('no modifica a los usuarios históricos (lectura pura)', async () => {
+      await getLookup(adminCookie);
+
+      const rows = await prisma.user.findMany({
+        where: { id: { in: [inactiveUserId, blockedUserId] } },
+        select: { id: true, status: true },
+      });
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          { id: inactiveUserId, status: UserStatus.INACTIVE },
+          { id: blockedUserId, status: UserStatus.BLOCKED },
+        ]),
+      );
+    });
+
+    it('orden determinista firstName, lastName, username, id', async () => {
+      const response = await getLookup(adminCookie);
+      const body = response.body as LookupItemBody[];
+
+      const expected = await prisma.user.findMany({
+        select: { id: true },
+        orderBy: [
+          { firstName: 'asc' },
+          { lastName: 'asc' },
+          { username: 'asc' },
+          { id: 'asc' },
+        ],
+      });
+      expect(body.map((item) => item.id)).toEqual(
+        expected.map((row) => row.id),
+      );
+    });
+
+    it('se evalúa contra el rol ACTIVO: un usuario SELLER+WAREHOUSE obtiene 200 como SELLER y 403 como WAREHOUSE', async () => {
+      const cookie = await loginOrThrow(MULTIROLE_USERNAME, MULTIROLE_PASSWORD);
+
+      const asSeller = await getLookup(cookie);
+      expect(asSeller.status).toBe(200);
+
+      const switchToWarehouse = await request(app.getHttpServer())
+        .post('/api/v1/auth/switch-role')
+        .set('Cookie', cookie)
+        .send({ role: RoleName.WAREHOUSE });
+      expect(switchToWarehouse.status).toBe(200);
+      // Mismo criterio de extracción que test/helpers/http.ts#login().
+      const setCookie = (switchToWarehouse.headers['set-cookie'] ??
+        []) as unknown as string[];
+      const warehouseSessionCookie = (setCookie[0] ?? '').split(';')[0] ?? '';
+      expect(warehouseSessionCookie.length).toBeGreaterThan(0);
+
+      const asWarehouse = await getLookup(warehouseSessionCookie);
+      expect(asWarehouse.status).toBe(403);
+    });
+
+    describe('GET /users (administración) sigue siendo exclusivo de ADMIN', () => {
+      it('SELLER → 403', async () => {
+        const response = await request(app.getHttpServer())
+          .get('/api/v1/users')
+          .set('Cookie', sellerCookie);
+        expect(response.status).toBe(403);
+      });
+
+      it('MANAGEMENT → 403', async () => {
+        const response = await request(app.getHttpServer())
+          .get('/api/v1/users')
+          .set('Cookie', managementCookie);
+        expect(response.status).toBe(403);
+      });
+
+      it('ADMIN → 200 paginado, comportamiento sin cambios', async () => {
+        const response = await request(app.getHttpServer())
+          .get('/api/v1/users')
+          .set('Cookie', adminCookie);
+        expect(response.status).toBe(200);
+        expect(Object.keys(response.body as object).sort()).toEqual(
+          ['data', 'limit', 'page', 'total', 'totalPages'].sort(),
+        );
+      });
+
+      it('MANAGEMENT → GET /users/:id sigue siendo 403', async () => {
+        const response = await request(app.getHttpServer())
+          .get(`/api/v1/users/${inactiveUserId}`)
+          .set('Cookie', managementCookie);
+        expect(response.status).toBe(403);
+      });
     });
   });
 

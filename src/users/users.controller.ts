@@ -34,10 +34,12 @@ import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { PaginatedUsersResponseDto } from './dto/paginated-users-response.dto';
 import { ResetPasswordResponseDto } from './dto/reset-password-response.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UserLookupResponseDto } from './dto/user-lookup-response.dto';
 import { UserResponseDto } from './dto/user-response.dto';
 import { PaginatedResult } from './types/list-users.query';
 import { ResetPasswordResult } from './types/reset-password.result';
 import { SafeUser } from './types/safe-user';
+import { UserLookupItem } from './types/user-lookup-item';
 import { UsersService } from './users.service';
 
 /**
@@ -65,6 +67,29 @@ export class UsersController {
   @ApiOkResponse({ type: PaginatedUsersResponseDto })
   list(@Query() query: ListUsersQueryDto): Promise<PaginatedResult<SafeUser>> {
     return this.usersService.listUsers(query);
+  }
+
+  /**
+   * R3-B1: declarada ANTES de `@Get(':id')` para que "lookup" nunca se
+   * resuelva como `:id` (ParseUUIDPipe respondería 400). El `@Roles` de
+   * método reemplaza al `@Roles(ADMIN)` de clase (RolesGuard usa
+   * getAllAndOverride, handler primero); solo amplía esta ruta de lectura
+   * mínima, nunca el resto de la administración de usuarios.
+   */
+  @Get('lookup')
+  @Roles(RoleName.ADMIN, RoleName.SELLER, RoleName.MANAGEMENT)
+  @ApiOperation({
+    summary: 'Lista mínima de usuarios para filtros de historial',
+    description:
+      'Identidad mínima (id, username, firstName, lastName, status) de TODOS los usuarios, incluidos INACTIVE/BLOCKED, para filtrar el historial de Ventas (sellerId) y Cobros (createdByUserId). Sin paginación. Orden firstName, lastName, username, id. Nunca expone email, roles ni datos de seguridad. Permitido para los roles activos ADMIN, SELLER y MANAGEMENT.',
+  })
+  @ApiOkResponse({ type: [UserLookupResponseDto] })
+  @ApiForbiddenResponse({
+    description: 'Rol activo distinto de ADMIN, SELLER o MANAGEMENT',
+    type: ErrorResponseDto,
+  })
+  lookup(): Promise<UserLookupItem[]> {
+    return this.usersService.lookupUsers();
   }
 
   @Get(':id')
