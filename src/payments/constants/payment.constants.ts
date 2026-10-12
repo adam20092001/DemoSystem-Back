@@ -11,3 +11,10 @@ export const PAYMENT_REFERENCE_MAX_LENGTH = 100;
 
 /** payments.cancellation_reason VARCHAR(200), igual que sales.cancellation_reason. */
 export const PAYMENT_CANCELLATION_REASON_MAX_LENGTH = 200;
+
+/**
+ * R1 (regla de negocio aprobada): máximo de pagos iniciales en un mismo
+ * lote al confirmar una venta (directa o desde cotización). No es un
+ * límite de columna: lo aplica parseInitialPayments() (payment-calculator.ts).
+ */
+export const MAX_INITIAL_PAYMENTS = 10;

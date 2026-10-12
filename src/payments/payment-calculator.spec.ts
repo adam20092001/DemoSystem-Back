@@ -6,8 +6,11 @@ import {
   normalizePaymentCancellationReason,
   normalizePaymentMethodCode,
   normalizePaymentReference,
+  parseInitialPayments,
   parsePaymentAmount,
 } from './payment-calculator';
+import { MAX_INITIAL_PAYMENTS } from './constants/payment.constants';
+import { InitialPaymentInput } from './types/payment.input';
 
 describe('parsePaymentAmount', () => {
   it('entero válido', () => {
@@ -212,5 +215,231 @@ describe('normalizePaymentCancellationReason', () => {
     expect(() => normalizePaymentCancellationReason('a'.repeat(201))).toThrow(
       BadRequestException,
     );
+  });
+});
+
+describe('parseInitialPayments (R1-B1)', () => {
+  function cashOf(amount: string): InitialPaymentInput {
+    return { method: 'CASH', amount };
+  }
+
+  function batchOf(count: number): InitialPaymentInput[] {
+    return Array.from({ length: count }, () => cashOf('1.00'));
+  }
+
+  describe('sin pago inicial', () => {
+    it.each([
+      ['ambos ausentes', undefined, undefined],
+      ['ambos null (equivale a ausente)', null, null],
+    ])('%s: lote vacío y total Decimal 0', (_label, payment, payments) => {
+      const result = parseInitialPayments(payment, payments);
+
+      expect(result.items).toEqual([]);
+      expect(Prisma.Decimal.isDecimal(result.totalAmount)).toBe(true);
+      expect(result.totalAmount.equals(0)).toBe(true);
+    });
+  });
+
+  describe('forma singular existente (`payment`)', () => {
+    it('produce exactamente un elemento normalizado y su monto como total', () => {
+      const result = parseInitialPayments({
+        method: 'CASH',
+        amount: '40.00',
+        reference: '  OP-1  ',
+      });
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].method).toBe('CASH');
+      expect(result.items[0].amount.toFixed(2)).toBe('40.00');
+      expect(result.items[0].reference).toBe('OP-1');
+      expect(result.totalAmount.toFixed(2)).toBe('40.00');
+    });
+
+    it('equivale exactamente a parsePaymentAmount + normalizePaymentReference (mismo resultado que el parseo singular actual)', () => {
+      const input: InitialPaymentInput = {
+        method: '  yape ',
+        amount: '010.5',
+        reference: '   ',
+      };
+
+      const [item] = parseInitialPayments(input).items;
+
+      // `method` se conserva CRUDO: la normalización/resolución sigue
+      // ocurriendo dentro de PaymentEngine.register().
+      expect(item.method).toBe(input.method);
+      expect(item.amount.equals(parsePaymentAmount(input.amount))).toBe(true);
+      expect(item.reference).toBe(normalizePaymentReference(input.reference));
+      expect(item.reference).toBeNull();
+    });
+
+    it('referencia ausente -> null', () => {
+      const [item] = parseInitialPayments(cashOf('10.00')).items;
+      expect(item.reference).toBeNull();
+    });
+
+    it('monto inválido conserva el mismo error 400 que parsePaymentAmount', () => {
+      expect(() => parseInitialPayments(cashOf('0'))).toThrow(
+        BadRequestException,
+      );
+      expect(() => parseInitialPayments(cashOf('10.999'))).toThrow(
+        'El monto debe ser un decimal positivo, como texto, con máximo 2 decimales',
+      );
+    });
+
+    it('referencia demasiado larga conserva el mismo error 400 que normalizePaymentReference', () => {
+      expect(() =>
+        parseInitialPayments({
+          method: 'CASH',
+          amount: '10.00',
+          reference: 'x'.repeat(101),
+        }),
+      ).toThrow('La referencia no puede superar los 100 caracteres');
+    });
+  });
+
+  describe('lote (`payments`)', () => {
+    it('tres pagos válidos (250 = CASH 100 + YAPE 100 + CARD 50): tres elementos y suma exacta', () => {
+      const result = parseInitialPayments(undefined, [
+        { method: 'CASH', amount: '100.00' },
+        { method: 'YAPE', amount: '100.00', reference: 'OP-123' },
+        { method: 'CARD', amount: '50.00', reference: 'VCH-9' },
+      ]);
+
+      expect(result.items).toHaveLength(3);
+      expect(result.totalAmount.toFixed(2)).toBe('250.00');
+    });
+
+    it('conserva el orden original de los pagos', () => {
+      const result = parseInitialPayments(undefined, [
+        { method: 'CARD', amount: '3.00', reference: 'C' },
+        { method: 'CASH', amount: '1.00' },
+        { method: 'YAPE', amount: '2.00', reference: 'Y' },
+      ]);
+
+      expect(result.items.map((item) => item.method)).toEqual([
+        'CARD',
+        'CASH',
+        'YAPE',
+      ]);
+      expect(result.items.map((item) => item.amount.toFixed(2))).toEqual([
+        '3.00',
+        '1.00',
+        '2.00',
+      ]);
+    });
+
+    it('admite métodos repetidos', () => {
+      const result = parseInitialPayments(undefined, [
+        cashOf('60.00'),
+        cashOf('40.00'),
+      ]);
+
+      expect(result.items.map((item) => item.method)).toEqual(['CASH', 'CASH']);
+      expect(result.totalAmount.toFixed(2)).toBe('100.00');
+    });
+
+    it('un solo elemento en el lote es válido', () => {
+      const result = parseInitialPayments(undefined, [cashOf('5.00')]);
+      expect(result.items).toHaveLength(1);
+      expect(result.totalAmount.toFixed(2)).toBe('5.00');
+    });
+
+    it('acepta exactamente MAX_INITIAL_PAYMENTS (10) pagos', () => {
+      expect(MAX_INITIAL_PAYMENTS).toBe(10);
+      const result = parseInitialPayments(undefined, batchOf(10));
+
+      expect(result.items).toHaveLength(10);
+      expect(result.totalAmount.toFixed(2)).toBe('10.00');
+    });
+
+    it('rechaza 11 pagos con 400', () => {
+      expect(() => parseInitialPayments(undefined, batchOf(11))).toThrow(
+        new BadRequestException('"payments" admite como máximo 10 pagos'),
+      );
+    });
+
+    it('rechaza un arreglo vacío explícito con 400', () => {
+      expect(() => parseInitialPayments(undefined, [])).toThrow(
+        new BadRequestException('"payments" debe contener al menos un pago'),
+      );
+    });
+
+    it('rechaza un valor que no es arreglo con 400', () => {
+      expect(() =>
+        parseInitialPayments(
+          undefined,
+          cashOf('1.00') as unknown as InitialPaymentInput[],
+        ),
+      ).toThrow(BadRequestException);
+    });
+
+    it('rechaza enviar `payment` y `payments` a la vez con 400, incluso con un lote válido', () => {
+      expect(() =>
+        parseInitialPayments(cashOf('10.00'), [cashOf('10.00')]),
+      ).toThrow(
+        new BadRequestException(
+          'No se puede enviar "payment" y "payments" a la vez',
+        ),
+      );
+    });
+
+    it('`payment` + `payments` vacío también es conflicto (la exclusión se evalúa primero)', () => {
+      expect(() => parseInitialPayments(cashOf('10.00'), [])).toThrow(
+        'No se puede enviar "payment" y "payments" a la vez',
+      );
+    });
+
+    it('un monto inválido en cualquier posición rechaza todo el lote con el error existente', () => {
+      expect(() =>
+        parseInitialPayments(undefined, [
+          cashOf('10.00'),
+          cashOf('-5.00'),
+          cashOf('10.00'),
+        ]),
+      ).toThrow(
+        'El monto debe ser un decimal positivo, como texto, con máximo 2 decimales',
+      );
+    });
+
+    it('normaliza la referencia de cada elemento con las reglas existentes', () => {
+      const result = parseInitialPayments(undefined, [
+        { method: 'YAPE', amount: '1.00', reference: '  OP-9  ' },
+        { method: 'CASH', amount: '1.00', reference: '   ' },
+        { method: 'CASH', amount: '1.00' },
+      ]);
+
+      expect(result.items.map((item) => item.reference)).toEqual([
+        'OP-9',
+        null,
+        null,
+      ]);
+    });
+
+    it('montos límite: 0.01 y el máximo de Decimal(14,2) son válidos', () => {
+      const result = parseInitialPayments(undefined, [
+        cashOf('0.01'),
+        cashOf('999999999999.99'),
+      ]);
+
+      expect(result.items[0].amount.toFixed(2)).toBe('0.01');
+      expect(result.items[1].amount.toFixed(2)).toBe('999999999999.99');
+      expect(result.totalAmount.toFixed(2)).toBe('1000000000000.00');
+    });
+
+    it('la suma es aritmética Decimal exacta, sin errores de punto flotante', () => {
+      // 0.1 + 0.2 en punto flotante de JS es 0.30000000000000004.
+      const result = parseInitialPayments(undefined, [
+        cashOf('0.10'),
+        cashOf('0.20'),
+      ]);
+      expect(result.totalAmount.equals(new Prisma.Decimal('0.30'))).toBe(true);
+      expect(result.totalAmount.toFixed(2)).toBe('0.30');
+
+      const many = parseInitialPayments(
+        undefined,
+        Array.from({ length: 10 }, () => cashOf('0.10')),
+      );
+      expect(many.totalAmount.equals(new Prisma.Decimal('1.00'))).toBe(true);
+    });
   });
 });
