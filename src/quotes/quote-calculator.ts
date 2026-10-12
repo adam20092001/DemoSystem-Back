@@ -200,6 +200,164 @@ export function calculateTaxAmount(
   return taxAmount;
 }
 
+/** Montos de un documento calculado con precios FINALES (IGV incluido cuando aplica). */
+export interface TaxInclusiveTotals {
+  /** Σ lineTotal: suma de líneas a precio final de catálogo (con IGV). */
+  itemsTotal: Prisma.Decimal;
+  /** Persistible: taxableBase + discountAmount (antes de impuesto). */
+  subtotal: Prisma.Decimal;
+  /** Persistible: descuento del cliente expresado antes de impuesto. */
+  discountAmount: Prisma.Decimal;
+  /** IGV contenido en `total`, por residuo (total - taxableBase). */
+  taxAmount: Prisma.Decimal;
+  /** Base imponible: subtotal - discountAmount. */
+  taxableBase: Prisma.Decimal;
+  /** Importe a pagar: itemsTotal - customerDiscount (exacto, sin redondeo). */
+  total: Prisma.Decimal;
+}
+
+export interface TaxInclusiveTotalsInput {
+  /** lineTotal de cada ítem, ya calculados con calculateLineTotal() sobre el precio final. */
+  lineTotals: readonly Prisma.Decimal[];
+  /** Descuento de documento sobre el importe FINAL (lo que ve el cliente). */
+  customerDiscount: Prisma.Decimal;
+  taxEnabled: boolean;
+  taxRate: Prisma.Decimal;
+  maxDiscountPercent: Prisma.Decimal;
+}
+
+const HALF_CENT = new Prisma.Decimal('0.005');
+const ONE_CENT = new Prisma.Decimal('0.01');
+
+/**
+ * ROUND_HALF_UP(numerator / divisor, 2) EXACTO. La división de Prisma.Decimal
+ * redondea internamente a 20 dígitos significativos; con importes de hasta
+ * 12 enteros un cociente periódico podría, en teoría, cruzar el límite de
+ * medio céntimo antes del redondeo final (doble redondeo). Por eso el
+ * candidato se verifica con multiplicaciones exactas (sin división):
+ * b es correcto ⇔ (b - 0.005)·d ≤ numerador < (b + 0.005)·d (d > 0), y se
+ * corrige un céntimo si no lo es.
+ */
+function roundHalfUpQuotient(
+  numerator: Prisma.Decimal,
+  divisor: Prisma.Decimal,
+): Prisma.Decimal {
+  let candidate = numerator
+    .dividedBy(divisor)
+    .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  if (candidate.minus(HALF_CENT).mul(divisor).greaterThan(numerator)) {
+    candidate = candidate.minus(ONE_CENT);
+  } else if (
+    candidate.plus(HALF_CENT).mul(divisor).lessThanOrEqualTo(numerator)
+  ) {
+    candidate = candidate.plus(ONE_CENT);
+  }
+  return candidate;
+}
+
+function assertMoneyShape(value: Prisma.Decimal, label: string): void {
+  // Los lineTotal ya vienen de calculateLineTotal(): una forma inválida aquí
+  // es un invariante interno roto (409), no un error del cliente.
+  if (
+    !Prisma.Decimal.isDecimal(value) ||
+    !value.isFinite() ||
+    value.decimalPlaces() > 2
+  ) {
+    throw new ConflictException(`El ${label} no es un monto válido`);
+  }
+  assertMoneyWithinRange(value, label);
+}
+
+/**
+ * R2: montos de un documento cuyos precios de catálogo son FINALES (incluyen
+ * IGV cuando aplica). Nunca suma IGV encima: lo DESGLOSA del importe a
+ * pagar. PURA: solo Prisma.Decimal, sin base de datos ni inyección de Nest.
+ *
+ *   itemsTotal     = Σ lineTotal
+ *   total          = itemsTotal - customerDiscount          (exacto)
+ *   divisor        = taxEnabled ? 1 + taxRate/100 : 1
+ *   taxableBase    = ROUND_HALF_UP(total / divisor, 2)       (a nivel de DOCUMENTO)
+ *   taxAmount      = total - taxableBase                     (por residuo)
+ *   discountAmount = ROUND_HALF_UP(customerDiscount / divisor, 2)
+ *   subtotal       = taxableBase + discountAmount
+ *
+ * Por construcción: total = subtotal - discountAmount + taxAmount,
+ * taxableBase = subtotal - discountAmount, y ningún monto es negativo
+ * (taxableBase ≤ total porque total ya es un múltiplo exacto de 0.01 ≥
+ * total/divisor). Así se cumplen las CHECK actuales de cabecera sin
+ * modificarlas. El IGV se obtiene por residuo — nunca taxableBase × tasa —
+ * para que el importe a pagar sea EXACTAMENTE el precio final (10.00 →
+ * base 8.47 + IGV 1.53, nunca 8.47 × 1.18 = 9.99).
+ *
+ * El descuento conserva las reglas existentes, evaluadas sobre el importe
+ * FINAL que ve el cliente: assertDiscountWithinSubtotal() (nunca mayor que
+ * itemsTotal) y assertDiscountWithinConfiguredLimit() (porcentaje máximo
+ * configurado) — mismas funciones y mensajes, sin reglas nuevas.
+ *
+ * R2-B2: preparación únicamente. Ningún servicio de producción la invoca
+ * todavía (QuotesService/SalesService siguen con la semántica histórica).
+ */
+export function calculateTaxInclusiveTotals(
+  input: TaxInclusiveTotalsInput,
+): TaxInclusiveTotals {
+  input.lineTotals.forEach((lineTotal) =>
+    assertMoneyShape(lineTotal, 'total de línea'),
+  );
+
+  const { customerDiscount, taxEnabled, taxRate, maxDiscountPercent } = input;
+  if (
+    !Prisma.Decimal.isDecimal(customerDiscount) ||
+    !customerDiscount.isFinite() ||
+    customerDiscount.lessThan(0) ||
+    customerDiscount.decimalPlaces() > 2
+  ) {
+    throw new BadRequestException(
+      'El descuento debe ser un decimal no negativo con máximo 2 decimales',
+    );
+  }
+  if (
+    taxEnabled &&
+    (!Prisma.Decimal.isDecimal(taxRate) ||
+      taxRate.lessThan(0) ||
+      taxRate.greaterThan(100))
+  ) {
+    // CompanySettings ya garantiza 0-100 (CHECK company_settings_tax_rate):
+    // fuera de rango aquí es un invariante interno roto.
+    throw new ConflictException('La tasa de impuesto configurada es inválida');
+  }
+
+  const itemsTotal = calculateSubtotal([...input.lineTotals]);
+  assertDiscountWithinSubtotal(customerDiscount, itemsTotal);
+  assertDiscountWithinConfiguredLimit(
+    customerDiscount,
+    itemsTotal,
+    maxDiscountPercent,
+  );
+
+  const total = itemsTotal.minus(customerDiscount);
+  const divisor = taxEnabled
+    ? new Prisma.Decimal(1).plus(taxRate.dividedBy(100))
+    : new Prisma.Decimal(1);
+
+  const taxableBase = roundHalfUpQuotient(total, divisor);
+  const taxAmount = total.minus(taxableBase);
+  const discountAmount = roundHalfUpQuotient(customerDiscount, divisor);
+  const subtotal = taxableBase.plus(discountAmount);
+
+  assertMoneyWithinRange(subtotal, 'subtotal');
+  assertMoneyWithinRange(taxAmount, 'impuesto');
+  assertMoneyWithinRange(total, 'total');
+
+  return {
+    itemsTotal,
+    subtotal,
+    discountAmount,
+    taxAmount,
+    taxableBase,
+    total,
+  };
+}
+
 /**
  * Estado efectivo: EXPIRED es derivado, nunca persistido por la Fase 5.
  * REJECTED/CONVERTED son terminales sin importar la fecha. PENDING/ACCEPTED
