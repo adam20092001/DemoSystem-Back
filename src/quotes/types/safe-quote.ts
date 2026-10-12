@@ -80,6 +80,14 @@ export interface SafeQuote {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: string;
+  /** R2-B3: false = semántica histórica (IGV sumado); true = precios finales con IGV incluido. */
+  pricesIncludeTax: boolean;
+  /** R2-B3: Σ lineTotal (precio final si pricesIncludeTax; antes de impuesto si es histórica). */
+  itemsTotal: string;
+  /** R2-B3: descuento que vio el cliente (itemsTotal - total si pricesIncludeTax; = discountAmount si es histórica). */
+  customerDiscountAmount: string;
+  /** R2-B3: subtotal - discountAmount. */
+  taxableBase: string;
   notes: string | null;
   items: SafeQuoteItem[];
   createdAt: Date;

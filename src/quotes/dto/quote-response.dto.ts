@@ -214,20 +214,32 @@ export class QuoteResponseDto {
   @ApiProperty({ type: String, example: '2026-04-15' })
   expirationDate!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    type: String,
+    description:
+      'Subtotal ANTES de impuesto (persistido). Con pricesIncludeTax=true: taxableBase + discountAmount, derivado de precios finales. Con pricesIncludeTax=false (histórico): Σ lineTotal antes de impuesto.',
+  })
   subtotal!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    type: String,
+    description:
+      'Descuento persistido, SIEMPRE antes de impuesto. Para el descuento que ve el cliente use customerDiscountAmount.',
+  })
   discountAmount!: string;
 
   @ApiProperty({
     type: String,
     description:
-      'IGV a nivel de documento (Fase 10, Bloque C): "0.00" si taxEnabled=false; ROUND(taxableBase * taxRate / 100, 2) si true. Snapshot histórico congelado al crear/actualizar comercialmente.',
+      'IGV. Con pricesIncludeTax=true: IGV CONTENIDO en el total (total - taxableBase, desglosado del precio final). Con pricesIncludeTax=false (histórico, Fase 10, Bloque C): IGV sumado a nivel de documento, ROUND(taxableBase * taxRate / 100, 2). "0.00" si taxEnabled=false.',
   })
   taxAmount!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    type: String,
+    description:
+      'Importe a pagar. Siempre subtotal - discountAmount + taxAmount. Con pricesIncludeTax=true también es itemsTotal - customerDiscountAmount.',
+  })
   total!: string;
 
   @ApiProperty({
@@ -250,6 +262,32 @@ export class QuoteResponseDto {
       'Fase 11, Bloque B: tasa de IGV vigente al calcular este snapshot comercial. Congelada, mismo criterio que taxAmount.',
   })
   taxRate!: string;
+
+  @ApiProperty({
+    description:
+      'R2: semántica de precios del documento (no si el IGV está activo). true = unitPrice/lineTotal son precios FINALES al cliente y el IGV está incluido en ellos. false = cotización histórica: unitPrice/lineTotal antes de impuesto e IGV sumado encima; sus montos nunca se recalculan.',
+  })
+  pricesIncludeTax!: boolean;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'R2: Σ lineTotal de los ítems. Con pricesIncludeTax=true, importe a precio final antes del descuento; con false, importe antes de impuesto (igual a subtotal).',
+  })
+  itemsTotal!: string;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'R2: descuento que ve el cliente. Con pricesIncludeTax=true: itemsTotal - total (descuento sobre el precio final). Con false (histórico): igual a discountAmount, porque el descuento se aplicó antes de sumar el IGV.',
+  })
+  customerDiscountAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'R2: base imponible, subtotal - discountAmount.',
+  })
+  taxableBase!: string;
 
   @ApiProperty({ type: String, nullable: true })
   notes!: string | null;

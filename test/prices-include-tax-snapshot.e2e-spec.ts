@@ -256,16 +256,16 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
     });
   });
 
-  describe('escritores de R2-B1: semántica histórica explícita (false)', () => {
-    it('POST /quotes persiste pricesIncludeTax=false', async () => {
+  describe('escritores: semántica explícita por documento', () => {
+    it('R2-B3: POST /quotes persiste pricesIncludeTax=true', async () => {
       const quoteId = await createQuote();
       const row = await prisma.quote.findUniqueOrThrow({
         where: { id: quoteId },
       });
-      expect(row.pricesIncludeTax).toBe(false);
+      expect(row.pricesIncludeTax).toBe(true);
     });
 
-    it('POST /sales (venta directa) persiste pricesIncludeTax=false', async () => {
+    it('R2-B1 (sin cambios hasta R2-B4): POST /sales (venta directa) persiste pricesIncludeTax=false', async () => {
       const customerId = await createCustomer();
       const productId = await createServiceProduct('118.00');
       const response = await request(app.getHttpServer())
@@ -300,7 +300,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
         where: { id: saleId },
       });
       expect(sale.pricesIncludeTax).toBe(quote.pricesIncludeTax);
-      expect(sale.pricesIncludeTax).toBe(false);
+      expect(sale.pricesIncludeTax).toBe(true);
       expect(sale.subtotal.equals(quote.subtotal)).toBe(true);
       expect(sale.discountAmount.equals(quote.discountAmount)).toBe(true);
       expect(sale.taxAmount.equals(quote.taxAmount)).toBe(true);
@@ -309,13 +309,29 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
       expect(sale.taxRate.equals(quote.taxRate)).toBe(true);
     });
 
-    it('las respuestas HTTP públicas no exponen pricesIncludeTax todavía', async () => {
+    it('R2-B3: el detalle de cotización expone pricesIncludeTax; ventas y listados de cotizaciones todavía no', async () => {
       const quoteId = await createQuote();
-      const response = await request(app.getHttpServer())
+      const detail = await request(app.getHttpServer())
         .get(`/api/v1/quotes/${quoteId}`)
         .set('Cookie', sellerCookie);
-      expect(response.status).toBe(200);
-      expect(response.body).not.toHaveProperty('pricesIncludeTax');
+      expect(detail.status).toBe(200);
+      expect(detail.body).toHaveProperty('pricesIncludeTax', true);
+
+      const list = await request(app.getHttpServer())
+        .get('/api/v1/quotes')
+        .set('Cookie', sellerCookie);
+      expect(list.status).toBe(200);
+      for (const item of (list.body as { data: object[] }).data) {
+        expect(item).not.toHaveProperty('pricesIncludeTax');
+      }
+
+      const conversion = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteId}`)
+        .set('Cookie', sellerCookie)
+        .send({});
+      expect(conversion.status).toBe(201);
+      ownedSaleIds.push((conversion.body as { id: string }).id);
+      expect(conversion.body).not.toHaveProperty('pricesIncludeTax');
     });
   });
 });

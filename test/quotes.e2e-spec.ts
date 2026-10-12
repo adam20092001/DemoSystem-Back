@@ -63,6 +63,11 @@ const SAFE_QUOTE_DETAIL_KEYS = [
   'currencyCode',
   'taxEnabled',
   'taxRate',
+  // R2-B3: contrato aditivo del detalle (el listado no cambia).
+  'pricesIncludeTax',
+  'itemsTotal',
+  'customerDiscountAmount',
+  'taxableBase',
   'notes',
   'items',
   'createdAt',

@@ -83,6 +83,7 @@ export const QUOTE_DETAIL_SELECT = {
   currencyCode: true,
   taxEnabled: true,
   taxRate: true,
+  pricesIncludeTax: true,
   notes: true,
   items: { select: QUOTE_ITEM_SELECT },
   createdAt: true,
@@ -153,10 +154,39 @@ function toSafeQuoteItem(row: QuoteItemRow): SafeQuoteItem {
   };
 }
 
+/**
+ * R2-B3: montos derivados para mostrar el documento según SU semántica de
+ * precios (nunca persistidos, nunca reinterpretando un documento):
+ *  - pricesIncludeTax=true: las líneas están a precio final; el descuento
+ *    al cliente es lo que se restó del total de ítems (itemsTotal - total).
+ *  - pricesIncludeTax=false (histórico): las líneas están antes de impuesto
+ *    y el descuento se aplicó antes de sumar el IGV, así que el descuento
+ *    que vio el cliente ES el discountAmount persistido.
+ * taxableBase = subtotal - discountAmount en ambos casos.
+ */
+function deriveDisplayAmounts(row: QuoteDetailRow): {
+  itemsTotal: Prisma.Decimal;
+  customerDiscountAmount: Prisma.Decimal;
+  taxableBase: Prisma.Decimal;
+} {
+  const itemsTotal = row.items.reduce(
+    (accumulated, item) => accumulated.plus(item.lineTotal),
+    new Prisma.Decimal(0),
+  );
+  return {
+    itemsTotal,
+    customerDiscountAmount: row.pricesIncludeTax
+      ? itemsTotal.minus(row.total)
+      : row.discountAmount,
+    taxableBase: row.subtotal.minus(row.discountAmount),
+  };
+}
+
 export function toSafeQuote(
   row: QuoteDetailRow,
   businessDate: string,
 ): SafeQuote {
+  const display = deriveDisplayAmounts(row);
   return {
     id: row.id,
     number: row.number,
@@ -177,6 +207,10 @@ export function toSafeQuote(
     currencyCode: row.currencyCode,
     taxEnabled: row.taxEnabled,
     taxRate: row.taxRate.toFixed(2),
+    pricesIncludeTax: row.pricesIncludeTax,
+    itemsTotal: display.itemsTotal.toFixed(2),
+    customerDiscountAmount: display.customerDiscountAmount.toFixed(2),
+    taxableBase: display.taxableBase.toFixed(2),
     notes: row.notes,
     items: row.items.map(toSafeQuoteItem),
     createdAt: row.createdAt,
