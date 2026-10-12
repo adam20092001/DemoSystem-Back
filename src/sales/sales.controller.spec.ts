@@ -140,6 +140,30 @@ describe('SalesController', () => {
       );
     });
 
+    it('R1-B2: con payments: delega cada elemento mapeado en el mismo orden, sin lógica propia', async () => {
+      service.createDirect.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.create(
+        {
+          ...dto,
+          payments: [
+            { method: 'CASH', amount: '100.00', reference: undefined },
+            { method: 'YAPE', amount: '100.00', reference: 'OP-123' },
+          ],
+        },
+        ACTOR,
+        request,
+      );
+
+      const [input] = service.createDirect.mock.calls[0];
+      expect(input.payment).toBeUndefined();
+      expect(input.payments).toEqual([
+        { method: 'CASH', amount: '100.00', reference: undefined },
+        { method: 'YAPE', amount: '100.00', reference: 'OP-123' },
+      ]);
+    });
+
     it('el actor autenticado sigue siendo el único origen de actorUserId, incluso con payment presente', async () => {
       service.createDirect.mockResolvedValue(SAMPLE_SALE);
       const request = { ip: '203.0.113.5' } as unknown as Request;
@@ -205,6 +229,30 @@ describe('SalesController', () => {
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
+    });
+
+    it('R1-B2: cuerpo con payments: delega cada elemento mapeado en el mismo orden', async () => {
+      service.createFromQuote.mockResolvedValue(SAMPLE_SALE);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      await controller.fromQuote(
+        'quote-1',
+        {
+          payments: [
+            { method: 'CASH', amount: '6.00', reference: undefined },
+            { method: 'CASH', amount: '4.00', reference: undefined },
+          ],
+        },
+        ACTOR,
+        request,
+      );
+
+      const [input] = service.createFromQuote.mock.calls[0];
+      expect(input.payment).toBeUndefined();
+      expect(input.payments).toEqual([
+        { method: 'CASH', amount: '6.00', reference: undefined },
+        { method: 'CASH', amount: '4.00', reference: undefined },
+      ]);
     });
 
     it('ipAddress ausente se envía como null', async () => {

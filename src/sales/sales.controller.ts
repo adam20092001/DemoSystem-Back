@@ -72,12 +72,12 @@ export class SalesController {
   @ApiOperation({
     summary: 'Registrar una venta directa (nace confirmada)',
     description:
-      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse. Ticket B, Bloque B4: si se incluye `payment`, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la venta completa no se confirma (la transacción revierte por completo, incluida la venta) y el pago se vincula automáticamente a esa caja.',
+      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse. Ticket B, Bloque B4: si se incluye `payment`, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la venta completa no se confirma (la transacción revierte por completo, incluida la venta) y el pago se vincula automáticamente a esa caja. R1: alternativamente admite `payments` (lote de 1 a 10 pagos iniciales, métodos repetidos admitidos), excluyente con `payment`; todos se registran en la misma transacción y en el orden recibido y, si cualquiera falla, la venta completa no se confirma.',
   })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload inválido, sin ítems, producto repetido, cantidad/descuento inválidos, o pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método).',
+      'Payload inválido, sin ítems, producto repetido, cantidad/descuento inválidos, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
   })
   @ApiNotFoundResponse({
     description: 'El cliente o algún producto no existe.',
@@ -107,6 +107,11 @@ export class SalesController {
             reference: dto.payment.reference,
           }
         : undefined,
+      payments: dto.payments?.map((payment) => ({
+        method: payment.method,
+        amount: payment.amount,
+        reference: payment.reference,
+      })),
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
@@ -116,13 +121,13 @@ export class SalesController {
     summary:
       'Confirmar una venta a partir de una cotización PENDIENTE o ACEPTADA',
     description:
-      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`); sin cuerpo, `{}` y `{ payment: {...} }` son todos válidos. Ticket B, Bloque B4: si se incluye `payment`, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la conversión completa no se confirma y el pago se vincula automáticamente a esa caja.',
+      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`) o un lote de 1 a 10 pagos iniciales (`payments`, R1), excluyentes entre sí; sin cuerpo, `{}`, `{ payment: {...} }` y `{ payments: [...] }` son todos válidos. Ticket B, Bloque B4: si se incluye algún pago, el actor autenticado debe tener su propia caja (CashSession) abierta — de lo contrario la conversión completa no se confirma y cada pago se vincula automáticamente a esa caja. Si cualquier pago del lote falla, la conversión completa no se confirma.',
   })
   @ApiParam({ name: 'quoteId', format: 'uuid' })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
     description:
-      'quoteId inválido, o pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método).',
+      'quoteId inválido, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
   })
   @ApiNotFoundResponse({
     description: 'La cotización, el cliente o algún producto no existe.',
@@ -148,6 +153,11 @@ export class SalesController {
             reference: dto.payment.reference,
           }
         : undefined,
+      payments: dto?.payments?.map((payment) => ({
+        method: payment.method,
+        amount: payment.amount,
+        reference: payment.reference,
+      })),
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });

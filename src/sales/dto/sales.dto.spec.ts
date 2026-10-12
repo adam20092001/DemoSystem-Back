@@ -293,6 +293,101 @@ describe('CreateSaleDto', () => {
       );
     });
   });
+
+  describe('lote de pagos iniciales `payments` (R1-B2)', () => {
+    function paymentsOf(count: number) {
+      return Array.from({ length: count }, () => ({
+        method: 'CASH',
+        amount: '1.00',
+      }));
+    }
+
+    it('lote válido de 3 métodos (con referencias): sin errores', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payments: [
+          { method: 'CASH', amount: '100.00' },
+          { method: 'YAPE', amount: '100.00', reference: 'OP-123' },
+          { method: 'CARD', amount: '50.00', reference: 'VCH-9' },
+        ],
+      });
+      const errors = await validate(instance);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('10 elementos: válido', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payments: paymentsOf(10),
+      });
+      expect(await validate(instance)).toHaveLength(0);
+    });
+
+    it('11 elementos -> 400', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        { ...baseValid, payments: paymentsOf(11) },
+        'payments',
+      );
+    });
+
+    it('arreglo vacío -> 400', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        { ...baseValid, payments: [] },
+        'payments',
+      );
+    });
+
+    it('no-arreglo -> 400', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        { ...baseValid, payments: { method: 'CASH', amount: '1.00' } },
+        'payments',
+      );
+    });
+
+    it('monto anidado malformado en cualquier posición reporta error anidado', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payments: [
+          { method: 'CASH', amount: '1.00' },
+          { method: 'CASH', amount: '-1.00' },
+        ],
+      });
+      const errors = await validate(instance);
+      expect(errors.some((e) => e.property === 'payments')).toBe(true);
+    });
+
+    it('method anidado de más de 30 caracteres reporta error anidado', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payments: [{ method: 'A'.repeat(31), amount: '1.00' }],
+      });
+      const errors = await validate(instance);
+      expect(errors.some((e) => e.property === 'payments')).toBe(true);
+    });
+
+    it('campo no declarado dentro de un elemento -> 400 por whitelist', async () => {
+      await expectRejectedProperty(
+        CreateSaleDto,
+        {
+          ...baseValid,
+          payments: [{ method: 'CASH', amount: '1.00', paidAt: '2026-01-01' }],
+        },
+        'paidAt',
+      );
+    });
+
+    it('`payment` + `payments` pasan la capa HTTP: la exclusión es responsabilidad del dominio (parseInitialPayments, 400)', async () => {
+      const instance = plainToInstance(CreateSaleDto, {
+        ...baseValid,
+        payment: { method: 'CASH', amount: '1.00' },
+        payments: [{ method: 'CASH', amount: '1.00' }],
+      });
+      expect(await validate(instance)).toHaveLength(0);
+    });
+  });
 });
 
 describe('CreateSaleItemDto (a través de CreateSaleDto)', () => {
@@ -548,6 +643,45 @@ describe('ConvertQuoteToSaleDto', () => {
     });
     const errors = await validate(instance);
     expect(errors.some((e) => e.property === 'payment')).toBe(true);
+  });
+
+  it('R1-B2: cuerpo con `payments` válido: sin errores', async () => {
+    const instance = plainToInstance(ConvertQuoteToSaleDto, {
+      payments: [
+        { method: 'CASH', amount: '6.00' },
+        { method: 'CASH', amount: '4.00' },
+      ],
+    });
+    expect(await validate(instance)).toHaveLength(0);
+  });
+
+  it('R1-B2: `payments` vacío -> 400', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      { payments: [] },
+      'payments',
+    );
+  });
+
+  it('R1-B2: `payments` con 11 elementos -> 400', async () => {
+    await expectRejectedProperty(
+      ConvertQuoteToSaleDto,
+      {
+        payments: Array.from({ length: 11 }, () => ({
+          method: 'CASH',
+          amount: '1.00',
+        })),
+      },
+      'payments',
+    );
+  });
+
+  it('R1-B2: monto anidado malformado en `payments` reporta error anidado', async () => {
+    const instance = plainToInstance(ConvertQuoteToSaleDto, {
+      payments: [{ method: 'CASH', amount: '1e2' }],
+    });
+    const errors = await validate(instance);
+    expect(errors.some((e) => e.property === 'payments')).toBe(true);
   });
 
   it('customerId no se acepta -> 400 por whitelist', async () => {

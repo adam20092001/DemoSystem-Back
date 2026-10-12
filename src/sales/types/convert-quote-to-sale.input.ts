@@ -6,13 +6,15 @@ import { InitialPaymentInput } from '../../payments/types/payment.input';
  * `sellerId` tampoco aparece aquí: para venta desde cotización siempre es
  * Quote.sellerId (D10), nunca el actor que ejecuta la conversión — ese
  * actor queda trazado únicamente en AuditLog.userId. `payment` (Fase 7,
- * Bloque B) es el ÚNICO dato de pago aceptado, opcional: nunca un campo de
+ * Bloque B) y `payments` (R1, lote) son los ÚNICOS datos de pago aceptados,
+ * opcionales y mutuamente excluyentes: nunca un campo de
  * precio/descuento/cliente/vendedor — esos siguen siendo copia exacta e
  * inmutable del Quote.
  */
 export interface ConvertQuoteToSaleInput {
   quoteId: string;
   payment?: InitialPaymentInput;
+  payments?: InitialPaymentInput[];
   actorUserId: string;
   ipAddress?: string | null;
 }

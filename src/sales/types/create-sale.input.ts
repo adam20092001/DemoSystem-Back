@@ -14,14 +14,16 @@ export interface CreateSaleItemInput {
  * paymentStatus/paidAmount/balanceDue/deliveryStatus/unitPrice/lineTotal/
  * totales/snapshots/confirmedAt/notes: todos son valores de sistema
  * calculados por SalesService, nunca controlados por el llamador.
- * `payment` (Fase 7, Bloque B) es el ÚNICO dato de pago aceptado: opcional,
- * sin paidAt/status/actor propios (el actor ya es `actorUserId`).
+ * `payment` (Fase 7, Bloque B) y `payments` (R1, lote) son los ÚNICOS datos
+ * de pago aceptados: opcionales, mutuamente excluyentes, sin paidAt/status/
+ * actor propios (el actor ya es `actorUserId`).
  */
 export interface CreateSaleInput {
   customerId: string;
   discountAmount?: string;
   items: CreateSaleItemInput[];
   payment?: InitialPaymentInput;
+  payments?: InitialPaymentInput[];
   actorUserId: string;
   ipAddress?: string | null;
 }

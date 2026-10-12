@@ -1543,6 +1543,203 @@ describe('SalesService', () => {
         expect(actions).not.toContain(AuditAction.PAYMENT_REGISTERED);
       });
 
+      describe('R1 — lote `payments`', () => {
+        const batchFor10 = [
+          { method: 'CASH', amount: '4.00' },
+          { method: 'YAPE', amount: '4.00', reference: 'OP-1' },
+          { method: 'CARD', amount: '2.00', reference: 'VCH-1' },
+        ];
+
+        it('registra cada pago en SECUENCIA, en el orden recibido, con el mismo tx; PAID 10/0', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          let inFlight = 0;
+          let maxInFlight = 0;
+          paymentEngine.register.mockImplementation(async () => {
+            inFlight += 1;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            await Promise.resolve();
+            inFlight -= 1;
+            return makePaymentRow();
+          });
+
+          await service.createDirect({
+            ...validDirectInput,
+            payments: batchFor10,
+          });
+
+          expect(maxInFlight).toBe(1);
+          expect(paymentEngine.register).toHaveBeenCalledTimes(3);
+          const commands = paymentEngine.register.mock.calls.map(
+            ([tx, command]) => {
+              expect(tx).toBe(prisma.tx);
+              return command as {
+                method: string;
+                amount: Prisma.Decimal;
+                reference: string | null;
+              };
+            },
+          );
+          expect(
+            commands.map((c) => [c.method, c.amount.toFixed(2), c.reference]),
+          ).toEqual([
+            ['CASH', '4.00', null],
+            ['YAPE', '4.00', 'OP-1'],
+            ['CARD', '2.00', 'VCH-1'],
+          ]);
+          const call = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: {
+              paymentStatus: string;
+              paidAmount: Prisma.Decimal;
+              balanceDue: Prisma.Decimal;
+            };
+          };
+          expect(call.data.paymentStatus).toBe(SalePaymentStatus.PAID);
+          expect(call.data.paidAmount.toFixed(2)).toBe('10.00');
+          expect(call.data.balanceDue.toFixed(2)).toBe('0.00');
+          expect(paymentEngine.sumActiveForSale).toHaveBeenCalledTimes(1);
+        });
+
+        it('método repetido en el lote: se admite y se registra dos veces', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await service.createDirect({
+            ...validDirectInput,
+            payments: [
+              { method: 'CASH', amount: '6.00' },
+              { method: 'CASH', amount: '4.00' },
+            ],
+          });
+          expect(paymentEngine.register).toHaveBeenCalledTimes(2);
+        });
+
+        it('lote parcial con cliente elegible: PARTIALLY_PAID', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('7.00'),
+          );
+          await service.createDirect({
+            ...validDirectInput,
+            payments: [
+              { method: 'CASH', amount: '5.00' },
+              { method: 'YAPE', amount: '2.00', reference: 'OP-2' },
+            ],
+          });
+          const call = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: { paymentStatus: string; balanceDue: Prisma.Decimal };
+          };
+          expect(call.data.paymentStatus).toBe(
+            SalePaymentStatus.PARTIALLY_PAID,
+          );
+          expect(call.data.balanceDue.toFixed(2)).toBe('3.00');
+        });
+
+        it('suma del lote > total -> 409 sin insertar la venta ni registrar pagos', async () => {
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              payments: [
+                { method: 'CASH', amount: '6.00' },
+                { method: 'CASH', amount: '4.01' },
+              ],
+            }),
+          ).rejects.toThrow(
+            new ConflictException(
+              'El monto del pago inicial no puede superar el total de la venta',
+            ),
+          );
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(paymentEngine.register).not.toHaveBeenCalled();
+        });
+
+        it('`payment` y `payments` a la vez -> 400 sin abrir transacción', async () => {
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              payment: { method: 'CASH', amount: '10.00' },
+              payments: [{ method: 'CASH', amount: '10.00' }],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.$transaction).not.toHaveBeenCalled();
+        });
+
+        it('`payments` vacío -> 400 sin abrir transacción', async () => {
+          await expect(
+            service.createDirect({ ...validDirectInput, payments: [] }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.$transaction).not.toHaveBeenCalled();
+        });
+
+        it.each([2, 3])(
+          'falla del pago #%i: la excepción se propaga, no se registran los siguientes ni se mueve stock ni se audita la venta',
+          async (failingPosition) => {
+            let calls = 0;
+            paymentEngine.register.mockImplementation(() => {
+              calls += 1;
+              if (calls === failingPosition) {
+                return Promise.reject(
+                  new ConflictException('El método de pago "X" está inactivo'),
+                );
+              }
+              return Promise.resolve(makePaymentRow());
+            });
+
+            await expect(
+              service.createDirect({
+                ...validDirectInput,
+                payments: batchFor10,
+              }),
+            ).rejects.toThrow('El método de pago "X" está inactivo');
+
+            expect(paymentEngine.register).toHaveBeenCalledTimes(
+              failingPosition,
+            );
+            expect(paymentEngine.sumActiveForSale).not.toHaveBeenCalled();
+            expect(engine.apply).not.toHaveBeenCalled();
+            const actions = auditService.record.mock.calls.map(
+              (call) => call[0].action,
+            );
+            expect(actions).not.toContain(AuditAction.SALE_CONFIRMED);
+          },
+        );
+
+        it('reconciliación SUM(ACTIVE) también aplica al lote: desajuste -> 409', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('9.99'),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              payments: batchFor10,
+            }),
+          ).rejects.toThrow(
+            'Inconsistencia interna en el resumen de pago al confirmar la venta',
+          );
+          expect(engine.apply).not.toHaveBeenCalled();
+        });
+
+        it('un único pago vía `payments` equivale al `payment` singular', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await service.createDirect({
+            ...validDirectInput,
+            payments: [{ method: 'CASH', amount: '10.00' }],
+          });
+          expect(paymentEngine.register).toHaveBeenCalledTimes(1);
+          expect(paymentEngine.register).toHaveBeenCalledWith(
+            prisma.tx,
+            expect.objectContaining({
+              saleId: SALE_ID,
+              method: 'CASH',
+              reference: null,
+              actorUserId: ACTOR_ID,
+            }),
+          );
+        });
+      });
+
       describe('Público general', () => {
         function genericInput(overrides: Record<string, unknown> = {}) {
           return {
@@ -1576,6 +1773,40 @@ describe('SalesService', () => {
               genericInput({ payment: { method: 'CASH', amount: '4.00' } }),
             ),
           ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('R1: lote incompleto -> 409 sin insertar la venta ni registrar pagos', async () => {
+          await expect(
+            service.createDirect(
+              genericInput({
+                payments: [
+                  { method: 'CASH', amount: '4.00' },
+                  { method: 'YAPE', amount: '5.00', reference: 'OP-3' },
+                ],
+              }),
+            ),
+          ).rejects.toThrow(
+            'El cliente "Público general" no puede generar una venta con saldo pendiente',
+          );
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(paymentEngine.register).not.toHaveBeenCalled();
+        });
+
+        it('R1: lote que salda el total -> éxito', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createDirect(
+              genericInput({
+                payments: [
+                  { method: 'CASH', amount: '5.00' },
+                  { method: 'YAPE', amount: '5.00', reference: 'OP-4' },
+                ],
+              }),
+            ),
+          ).resolves.toBeDefined();
+          expect(paymentEngine.register).toHaveBeenCalledTimes(2);
         });
 
         it('pago total -> éxito', async () => {
@@ -2312,6 +2543,73 @@ describe('SalesService', () => {
         expect(call.data.balanceDue.toFixed(2)).toBe('0.00');
         expect(call.data.subtotal.toFixed(2)).toBe('10.00');
         expect(call.data.total.toFixed(2)).toBe('10.00');
+      });
+
+      it('R1: lote `payments` que salda el Quote: PAID, cada pago en orden y en el mismo tx', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await service.createFromQuote({
+          ...validConvertInput,
+          payments: [
+            { method: 'CASH', amount: '6.00' },
+            { method: 'YAPE', amount: '4.00', reference: 'OP-Q' },
+          ],
+        });
+        expect(paymentEngine.register).toHaveBeenCalledTimes(2);
+        expect(
+          paymentEngine.register.mock.calls.map(
+            ([tx, command]) =>
+              tx === prisma.tx && (command as { method: string }).method,
+          ),
+        ).toEqual(['CASH', 'YAPE']);
+        const call = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { paymentStatus: string; total: Prisma.Decimal };
+        };
+        expect(call.data.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(call.data.total.toFixed(2)).toBe('10.00');
+      });
+
+      it('R1: suma del lote > total del Quote -> 409, Quote NO se convierte ni se registran pagos', async () => {
+        await expect(
+          service.createFromQuote({
+            ...validConvertInput,
+            payments: [
+              { method: 'CASH', amount: '6.00' },
+              { method: 'CASH', amount: '6.00' },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(paymentEngine.register).not.toHaveBeenCalled();
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+      });
+
+      it('R1: `payment` y `payments` a la vez -> 400 sin abrir transacción', async () => {
+        await expect(
+          service.createFromQuote({
+            ...validConvertInput,
+            payment: { method: 'CASH', amount: '10.00' },
+            payments: [{ method: 'CASH', amount: '10.00' }],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+      });
+
+      it('R1: falla del segundo pago del lote -> la excepción se propaga y la Quote no se marca CONVERTED', async () => {
+        paymentEngine.register
+          .mockResolvedValueOnce(makePaymentRow())
+          .mockRejectedValueOnce(new ConflictException('caja cerrada'));
+        await expect(
+          service.createFromQuote({
+            ...validConvertInput,
+            payments: [
+              { method: 'CASH', amount: '6.00' },
+              { method: 'YAPE', amount: '4.00', reference: 'OP-Q2' },
+            ],
+          }),
+        ).rejects.toThrow('caja cerrada');
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        expect(engine.apply).not.toHaveBeenCalled();
       });
 
       it('pago inicial > total del Quote -> 409, Quote NO se convierte', async () => {

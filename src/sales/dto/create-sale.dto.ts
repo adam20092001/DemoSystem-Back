@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsOptional,
@@ -9,6 +10,7 @@ import {
   Matches,
   ValidateNested,
 } from 'class-validator';
+import { MAX_INITIAL_PAYMENTS } from '../../payments/constants/payment.constants';
 import { InitialPaymentDto } from '../../payments/dto/initial-payment.dto';
 import { CreateSaleItemDto } from './create-sale-item.dto';
 
@@ -26,9 +28,11 @@ export const SALE_DISCOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
  * notas nunca se aceptan aquí: son valores de sistema calculados por
  * SalesService (Bloque B), nunca controlados por el llamador. sellerId se
  * deriva exclusivamente del actor autenticado. `payment` (Fase 7, Bloque C)
- * es el ÚNICO dato de pago aceptado: opcional, mismo contrato exacto que un
- * pago posterior (InitialPaymentDto == CreatePaymentDto). Sin él, el
- * comportamiento es idéntico a la Fase 6.
+ * y `payments` (R1) son los ÚNICOS datos de pago aceptados, opcionales y
+ * mutuamente excluyentes (lo valida el dominio, parseInitialPayments), con
+ * el mismo contrato por elemento que un pago posterior
+ * (InitialPaymentDto == CreatePaymentDto). Sin ninguno, el comportamiento
+ * es idéntico a la Fase 6.
  */
 export class CreateSaleDto {
   @ApiProperty({ format: 'uuid' })
@@ -65,4 +69,19 @@ export class CreateSaleDto {
   @ValidateNested()
   @Type(() => InitialPaymentDto)
   payment?: InitialPaymentDto;
+
+  @ApiPropertyOptional({
+    type: [InitialPaymentDto],
+    minItems: 1,
+    maxItems: MAX_INITIAL_PAYMENTS,
+    description:
+      'R1: lote de 1 a 10 pagos iniciales (métodos repetidos admitidos), registrados en la MISMA transacción que confirma la venta y en el orden recibido; si cualquiera falla, no se confirma nada. Excluyente con `payment` (enviar ambos responde 400). La suma no puede superar el total (409); Público general o cliente bloqueado exigen que la suma salde el total.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_INITIAL_PAYMENTS)
+  @ValidateNested({ each: true })
+  @Type(() => InitialPaymentDto)
+  payments?: InitialPaymentDto[];
 }
