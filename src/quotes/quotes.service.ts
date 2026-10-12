@@ -229,6 +229,9 @@ export class QuotesService {
           currencyCode: settings.currencyCode,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
+          // R2-B1: los montos de arriba siguen calculándose con la semántica
+          // histórica (IGV sumado sobre precios antes de impuesto).
+          pricesIncludeTax: false,
           notes,
           items: {
             create: lines.map((line, index) => ({

@@ -1108,6 +1108,7 @@ describe('Sales (e2e)', () => {
         currencyCode: 'PEN',
         taxEnabled: false,
         taxRate: new Prisma.Decimal('18.00'),
+        pricesIncludeTax: false,
         items: {
           create: itemsWithTotals.map((item) => ({
             productId: item.productId,
@@ -1189,6 +1190,7 @@ describe('Sales (e2e)', () => {
         currencyCode: 'PEN',
         taxEnabled: false,
         taxRate: new Prisma.Decimal('18.00'),
+        pricesIncludeTax: false,
         paidAmount: new Prisma.Decimal('0.00'),
         balanceDue: new Prisma.Decimal('0.00'),
         confirmedAt: new Date(),
@@ -1259,16 +1261,16 @@ describe('Sales (e2e)', () => {
          customer_is_generic, customer_type, customer_document_type,
          customer_document_number, customer_name, customer_address, seller_id,
          quote_id, subtotal, discount_amount, tax_amount, total, currency_code,
-         tax_enabled, tax_rate, paid_amount, balance_due, confirmed_at,
-         cancelled_at, cancellation_reason, cancelled_by_user_id, created_at,
-         updated_at)
+         tax_enabled, tax_rate, prices_include_tax, paid_amount, balance_due,
+         confirmed_at, cancelled_at, cancellation_reason, cancelled_by_user_id,
+         created_at, updated_at)
       VALUES
         (gen_random_uuid(), ${o.number}, ${o.status}::"SaleStatus", ${o.paymentStatus}::"SalePaymentStatus",
          ${o.deliveryStatus}::"SaleDeliveryStatus", ${o.customerId}::uuid,
          ${o.customerIsGeneric}, ${o.customerType}::"CustomerType", ${o.customerDocumentType}::"CustomerDocumentType",
          ${o.customerDocumentNumber}, ${o.customerName}, ${o.customerAddress}, ${o.sellerId}::uuid,
          ${o.quoteId}::uuid, ${o.subtotal}::numeric, ${o.discountAmount}::numeric, ${o.taxAmount}::numeric,
-         ${o.total}::numeric, 'PEN', false, 18.00, ${o.paidAmount}::numeric, ${o.balanceDue}::numeric,
+         ${o.total}::numeric, 'PEN', false, 18.00, false, ${o.paidAmount}::numeric, ${o.balanceDue}::numeric,
          now(), ${o.cancelledAt}::timestamp, ${o.cancellationReason}, ${o.cancelledByUserId}::uuid,
          now(), now())
     `;

@@ -289,6 +289,7 @@ describe('Accounts Receivable (e2e)', () => {
         currencyCode: 'PEN',
         taxEnabled: false,
         taxRate: new Prisma.Decimal('18.00'),
+        pricesIncludeTax: false,
         paidAmount: summary.paidAmount,
         balanceDue: summary.balanceDue,
         confirmedAt: overrides.confirmedAt ?? new Date(),

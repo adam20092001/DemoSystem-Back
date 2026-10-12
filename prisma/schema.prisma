@@ -539,6 +539,14 @@ model Quote {
   taxEnabled   Boolean @map("tax_enabled")
   taxRate      Decimal @map("tax_rate") @db.Decimal(5, 2)
 
+  // R2-B1: semántica de precios con la que se calcularon los montos de
+  // ESTE documento. false = semántica histórica (unitPrice/lineTotal antes
+  // de IGV, IGV sumado a nivel de documento); true = precios finales con
+  // IGV incluido cuando aplica. Toda fila previa a R2 quedó en false
+  // (relleno de la migración). Sin @default a propósito: cada escritor
+  // debe fijarla explícitamente; se copia VERBATIM a Sale en la conversión.
+  pricesIncludeTax Boolean @map("prices_include_tax")
+
   notes String?     @db.VarChar(1000)
   items QuoteItem[]
 
@@ -686,6 +694,11 @@ model Sale {
   currencyCode String  @map("currency_code") @db.VarChar(3)
   taxEnabled   Boolean @map("tax_enabled")
   taxRate      Decimal @map("tax_rate") @db.Decimal(5, 2)
+
+  // R2-B1: mismo significado que Quote.pricesIncludeTax. Venta directa: lo
+  // fija SalesService; venta desde cotización: copia VERBATIM de Quote.
+  // Sin @default a propósito (ver Quote).
+  pricesIncludeTax Boolean @map("prices_include_tax")
 
   paidAmount Decimal @default(0) @map("paid_amount") @db.Decimal(14, 2)
   balanceDue Decimal @map("balance_due") @db.Decimal(14, 2)
@@ -1353,6 +1366,11 @@ model ElectronicDocument {
   taxableBase    Decimal @map("taxable_base") @db.Decimal(14, 2)
   taxAmount      Decimal @map("tax_amount") @db.Decimal(14, 2)
   total          Decimal @db.Decimal(14, 2)
+
+  // R2-B1: copia VERBATIM de Sale.pricesIncludeTax al emitir, para que el
+  // documento fiscal sea autocontenido (sabe cómo leer sus propias líneas
+  // sin consultar la venta). Sin @default a propósito (ver Quote).
+  pricesIncludeTax Boolean @map("prices_include_tax")
 
   // Metadata de proveedor: opaca para el dominio (nunca se ramifica logica
   // de negocio sobre providerStatus/providerMessage; ver Fase 11A #21/#28).

@@ -114,6 +114,7 @@ function makeQuoteRow(overrides: Partial<Record<string, unknown>> = {}) {
     currencyCode: 'PEN',
     taxEnabled: false,
     taxRate: new Prisma.Decimal('18.00'),
+    pricesIncludeTax: false,
     ...overrides,
   };
 }
@@ -502,6 +503,17 @@ describe('SalesService', () => {
       expect(createArgs.data.taxEnabled).toBe(true);
       expect(createArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
       expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
+    });
+
+    it('R2-B1: venta directa fija pricesIncludeTax=false explícitamente, con o sin IGV activo', async () => {
+      settingsReader.getCurrent.mockResolvedValue(
+        makeSettingsSnapshot({ taxEnabled: true }),
+      );
+      await service.createDirect(validDirectInput);
+      const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(createArgs.data.pricesIncludeTax).toBe(false);
     });
 
     it('items vacíos -> 400 sin abrir transacción', async () => {
@@ -1923,6 +1935,24 @@ describe('SalesService', () => {
       // descartarlo.
       expect(settingsReader.getCurrent).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])(
+      'R2-B1: copia pricesIncludeTax=%s VERBATIM de la Quote (nunca lo decide la conversión)',
+      async (pricesIncludeTax) => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            quote: makeQuoteRow({ pricesIncludeTax }),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+          }),
+        );
+        await service.createFromQuote(validConvertInput);
+        const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        };
+        expect(createArgs.data.pricesIncludeTax).toBe(pricesIncludeTax);
+      },
+    );
 
     it('ACCEPTED: conversión exitosa', async () => {
       prisma.tx.$queryRaw.mockImplementation(

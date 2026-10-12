@@ -780,7 +780,8 @@ describe('Quotes (e2e)', () => {
         (id, number, status, customer_id, customer_type, customer_document_type,
          customer_document_number, customer_name, customer_address, seller_id,
          issue_date, expiration_date, subtotal, discount_amount, tax_amount,
-         total, currency_code, tax_enabled, tax_rate, notes, created_at, updated_at)
+         total, currency_code, tax_enabled, tax_rate, prices_include_tax, notes,
+         created_at, updated_at)
       VALUES
         (gen_random_uuid(), ${overrides.number}, 'PENDING', ${personActive.id}::uuid,
          'PERSON', ${docType}::"CustomerDocumentType", ${docNumber},
@@ -788,7 +789,7 @@ describe('Quotes (e2e)', () => {
          ${overrides.issueDate}::date, ${overrides.expirationDate}::date,
          ${overrides.subtotal}::numeric, ${overrides.discountAmount}::numeric,
          ${overrides.taxAmount}::numeric, ${overrides.total}::numeric,
-         'PEN', false, 18.00,
+         'PEN', false, 18.00, false,
          NULL, now(), now())
     `;
   }
@@ -829,6 +830,7 @@ describe('Quotes (e2e)', () => {
         currencyCode: 'PEN',
         taxEnabled: false,
         taxRate: new Prisma.Decimal('18.00'),
+        pricesIncludeTax: false,
       },
     });
     directQuoteIds.push(row.id);

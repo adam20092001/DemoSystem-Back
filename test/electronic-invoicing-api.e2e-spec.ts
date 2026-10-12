@@ -710,6 +710,13 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       });
       expect(docsForSale).toHaveLength(1);
       expect(docsForSale[0].items).toBeUndefined(); // relación no cargada por Prisma por defecto
+      // R2-B1: el documento copia VERBATIM la semántica de precios de la
+      // venta (POST /sales sigue escribiendo la semántica histórica, false).
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.pricesIncludeTax).toBe(false);
+      expect(docsForSale[0].pricesIncludeTax).toBe(saleRow.pricesIncludeTax);
 
       const items = await prisma.electronicDocumentItem.findMany({
         where: { electronicDocumentId: body.id },

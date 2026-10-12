@@ -332,6 +332,17 @@ describe('QuotesService', () => {
       expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
     });
 
+    it('R2-B1: fija pricesIncludeTax=false explícitamente (semántica histórica), con o sin IGV activo', async () => {
+      settingsReader.getCurrent.mockResolvedValue(
+        makeSettingsSnapshot({ taxEnabled: true }),
+      );
+      await service.create(validCreateInput);
+      const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(createArgs.data.pricesIncludeTax).toBe(false);
+    });
+
     it('sellerId = actorUserId (actor SELLER)', async () => {
       await service.create({
         ...validCreateInput,
@@ -1123,6 +1134,20 @@ describe('QuotesService', () => {
       expect(updateArgs.data).not.toHaveProperty('taxRate');
       expect(settingsReader.getCurrent).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['comercial (descuento)', { discountAmount: '1.00' }],
+      ['no comercial (notes)', { notes: 'solo texto' }],
+    ])(
+      'R2-B1: una edición %s nunca reescribe pricesIncludeTax (se conserva el de la cotización)',
+      async (_label, change) => {
+        await service.update({ ...baseUpdateInput, ...change });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        };
+        expect(updateArgs.data).not.toHaveProperty('pricesIncludeTax');
+      },
+    );
 
     it('items reemplazados agrega "items" a updatedFields (nunca subtotal/total)', async () => {
       await service.update({

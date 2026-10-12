@@ -153,6 +153,8 @@ interface LockedQuoteRow {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: Prisma.Decimal;
+  // R2-B1: semántica de precios de la cotización, copiada VERBATIM a Sale.
+  pricesIncludeTax: boolean;
 }
 
 interface LockedSaleRow {
@@ -320,6 +322,9 @@ export class SalesService {
           currencyCode: settings.currencyCode,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
+          // R2-B1: los montos de arriba siguen calculándose con la semántica
+          // histórica (IGV sumado sobre precios antes de impuesto).
+          pricesIncludeTax: false,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -552,6 +557,9 @@ export class SalesService {
           currencyCode: quote.currencyCode,
           taxEnabled: quote.taxEnabled,
           taxRate: quote.taxRate,
+          // R2-B1: copia VERBATIM de la semántica de precios de la
+          // cotización, igual que sus montos — nunca reinterpretada.
+          pricesIncludeTax: quote.pricesIncludeTax,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -1100,7 +1108,8 @@ export class SalesService {
         total,
         currency_code             AS "currencyCode",
         tax_enabled               AS "taxEnabled",
-        tax_rate                  AS "taxRate"
+        tax_rate                  AS "taxRate",
+        prices_include_tax        AS "pricesIncludeTax"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE

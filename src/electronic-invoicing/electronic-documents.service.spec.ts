@@ -44,6 +44,7 @@ function makeSaleRow(overrides: Partial<Record<string, unknown>> = {}) {
     taxAmount: new Prisma.Decimal('18.00'),
     total: new Prisma.Decimal('118.00'),
     currencyCode: 'PEN',
+    pricesIncludeTax: false,
     items: [makeSaleItemRow()],
     ...overrides,
   };
@@ -621,6 +622,24 @@ describe('ElectronicDocumentsService', () => {
       expect(call.data.taxAmount.toFixed(2)).toBe('36.00');
       expect(call.data.total.toFixed(2)).toBe('236.00');
     });
+
+    it.each([false, true])(
+      'R2-B1: copia pricesIncludeTax=%s VERBATIM de Sale (y lo lee en el select de la venta)',
+      async (pricesIncludeTax) => {
+        tx.sale.findUnique.mockResolvedValue(makeSaleRow({ pricesIncludeTax }));
+
+        await service.issue(makeCommand());
+
+        const findArgs = tx.sale.findUnique.mock.calls[0][0] as {
+          select: Record<string, unknown>;
+        };
+        expect(findArgs.select.pricesIncludeTax).toBe(true);
+        const call = tx.electronicDocument.create.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        };
+        expect(call.data.pricesIncludeTax).toBe(pricesIncludeTax);
+      },
+    );
 
     it('nunca recalcula desde CompanySettings: cambiar businessName/taxId/address no altera el snapshot monetario ni de cliente', async () => {
       tx.companySettings.findUnique.mockResolvedValue(
