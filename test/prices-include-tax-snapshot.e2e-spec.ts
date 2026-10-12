@@ -265,7 +265,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
       expect(row.pricesIncludeTax).toBe(true);
     });
 
-    it('R2-B1 (sin cambios hasta R2-B4): POST /sales (venta directa) persiste pricesIncludeTax=false', async () => {
+    it('R2-B4: POST /sales (venta directa) persiste pricesIncludeTax=true', async () => {
       const customerId = await createCustomer();
       const productId = await createServiceProduct('118.00');
       const response = await request(app.getHttpServer())
@@ -279,7 +279,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
       const row = await prisma.sale.findUniqueOrThrow({
         where: { id: saleId },
       });
-      expect(row.pricesIncludeTax).toBe(false);
+      expect(row.pricesIncludeTax).toBe(true);
     });
 
     it('POST /sales/from-quote copia pricesIncludeTax y los montos VERBATIM de la cotización', async () => {
@@ -309,7 +309,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
       expect(sale.taxRate.equals(quote.taxRate)).toBe(true);
     });
 
-    it('R2-B3: el detalle de cotización expone pricesIncludeTax; ventas y listados de cotizaciones todavía no', async () => {
+    it('R2-B3/R2-B4: los detalles de cotización y de venta exponen pricesIncludeTax; el listado de cotizaciones no', async () => {
       const quoteId = await createQuote();
       const detail = await request(app.getHttpServer())
         .get(`/api/v1/quotes/${quoteId}`)
@@ -331,7 +331,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
         .send({});
       expect(conversion.status).toBe(201);
       ownedSaleIds.push((conversion.body as { id: string }).id);
-      expect(conversion.body).not.toHaveProperty('pricesIncludeTax');
+      expect(conversion.body).toHaveProperty('pricesIncludeTax', true);
     });
   });
 });

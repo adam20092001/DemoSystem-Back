@@ -70,6 +70,13 @@ interface SafeSaleBody {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: string;
+  pricesIncludeTax: boolean;
+  itemsTotal: string;
+  customerDiscountAmount: string;
+  taxableBase: string;
+  paidAmount: string;
+  balanceDue: string;
+  paymentStatus: string;
 }
 
 describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
@@ -90,6 +97,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   const createdCustomerIds: string[] = [];
   const createdQuoteIds: string[] = [];
   const createdSaleIds: string[] = [];
+  const ownedCashSessionIds: string[] = [];
   const ownedConfigurationAuditLogIds: string[] = [];
 
   async function patchConfiguration(
@@ -194,6 +202,8 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
     customerId: string;
     discountAmount?: string;
     items: { productId: string; quantity: string }[];
+    payment?: { method: string; amount: string; reference?: string };
+    payments?: { method: string; amount: string; reference?: string }[];
   }): Promise<{ status: number; body: SafeSaleBody }> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/sales')
@@ -335,6 +345,44 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
 
       const allSaleIds = [...createdSaleIds];
       if (allSaleIds.length > 0) {
+        // R2-B4: pagos iniciales propios (y sus asientos ORIGINAL/REVERSAL)
+        // antes de las ventas — Payment.saleId es RESTRICT hacia Sale.
+        const ownedPayments = await prisma.payment.findMany({
+          where: { saleId: { in: allSaleIds } },
+          select: { id: true },
+        });
+        const ownedPaymentIds = ownedPayments.map((payment) => payment.id);
+        if (ownedPaymentIds.length > 0) {
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+              eventType: 'REVERSAL',
+            },
+          });
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+            },
+          });
+          await prisma.auditLog.deleteMany({
+            where: { entityType: 'Payment', entityId: { in: ownedPaymentIds } },
+          });
+          await prisma.payment.deleteMany({
+            where: { id: { in: ownedPaymentIds } },
+          });
+        }
+
+        // REVERSAL primero (self-FK reversesEntryId hacia su ORIGINAL).
+        await prisma.accountingEntry.deleteMany({
+          where: {
+            sourceType: AccountingSourceType.SALE,
+            sourceId: { in: allSaleIds },
+            eventType: 'REVERSAL',
+          },
+        });
+
         const ownedEntries = await prisma.accountingEntry.findMany({
           where: {
             sourceType: AccountingSourceType.SALE,
@@ -379,6 +427,22 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
           where: { entityType: 'Sale', entityId: { in: allSaleIds } },
         });
         await prisma.sale.deleteMany({ where: { id: { in: allSaleIds } } });
+      }
+
+      // R2-B4: caja propia del admin (después de borrar sus pagos).
+      if (ownedCashSessionIds.length > 0) {
+        await prisma.cashSessionPaymentMethodSummary.deleteMany({
+          where: { cashSessionId: { in: ownedCashSessionIds } },
+        });
+        await prisma.auditLog.deleteMany({
+          where: {
+            entityType: 'CashSession',
+            entityId: { in: ownedCashSessionIds },
+          },
+        });
+        await prisma.cashSession.deleteMany({
+          where: { id: { in: ownedCashSessionIds } },
+        });
       }
 
       const allQuoteIds = [...createdQuoteIds];
@@ -816,7 +880,48 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   });
 
   describe('§43 — IGV en venta DIRECTA + verificación de asiento contable', () => {
-    it('venta directa al 18%: monto persistido exacto y VAT_PAYABLE == taxAmount, asiento balanceado', async () => {
+    async function createTrackedProduct(salePrice: string): Promise<string> {
+      const product = await prisma.product.create({
+        data: {
+          sku: `E2ECFGTAX-P${salePrice}-${Date.now()}`,
+          name: `Producto ${salePrice} E2E Config IGV`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId,
+          salePrice: new Prisma.Decimal(salePrice),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('100.000'),
+          status: ProductStatus.ACTIVE,
+        },
+      });
+      createdProductIds.push(product.id);
+      return product.id;
+    }
+
+    async function saleEntryLines(saleId: string) {
+      const entry = await prisma.accountingEntry.findFirstOrThrow({
+        where: {
+          sourceType: AccountingSourceType.SALE,
+          sourceId: saleId,
+          eventType: 'ORIGINAL',
+        },
+        include: { lines: true },
+      });
+      const totalDebit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.debitAmount),
+        new Prisma.Decimal(0),
+      );
+      const totalCredit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.creditAmount),
+        new Prisma.Decimal(0),
+      );
+      const vatLine = entry.lines.find(
+        (line) => line.accountId === vatAccountId,
+      );
+      return { totalDebit, totalCredit, vatLine };
+    }
+
+    it('R2-B4: venta directa de un precio final 100.00 al 18%: el cliente paga 100.00 (IGV 15.25 desglosado), asiento balanceado', async () => {
       await patchConfiguration({
         taxEnabled: true,
         taxRate: '18.00',
@@ -829,37 +934,248 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         items: [{ productId, quantity: '1' }],
       });
       expect(sale.status).toBe(201);
-      expect(sale.body.subtotal).toBe('100.00');
-      expect(sale.body.taxAmount).toBe('18.00');
-      expect(sale.body.total).toBe('118.00');
+      expect(sale.body).toMatchObject({
+        pricesIncludeTax: true,
+        itemsTotal: '100.00',
+        customerDiscountAmount: '0.00',
+        taxableBase: '84.75',
+        subtotal: '84.75',
+        discountAmount: '0.00',
+        taxAmount: '15.25',
+        total: '100.00',
+      });
 
-      const entry = await prisma.accountingEntry.findFirst({
+      const { totalDebit, totalCredit, vatLine } = await saleEntryLines(
+        sale.body.id,
+      );
+      expect(vatLine?.creditAmount.toFixed(2)).toBe('15.25');
+      expect(vatLine?.debitAmount.toFixed(2)).toBe('0.00');
+      expect(totalDebit.equals(totalCredit)).toBe(true);
+      expect(totalDebit.toFixed(2)).toBe('100.00');
+    });
+
+    it('R2-B4: precio final 118.00 al 18% -> unitPrice/lineTotal 118.00, subtotal 100.00, IGV 18.00, total 118.00 (nunca 139.24)', async () => {
+      await patchConfiguration({ taxEnabled: true, taxRate: '18.00' });
+      await trackLatestConfigurationAuditRow();
+      const product118 = await createTrackedProduct('118.00');
+
+      const sale = await createDirectSale({
+        customerId,
+        items: [{ productId: product118, quantity: '1' }],
+      });
+      expect(sale.status).toBe(201);
+      expect(sale.body).toMatchObject({
+        subtotal: '100.00',
+        discountAmount: '0.00',
+        taxAmount: '18.00',
+        total: '118.00',
+      });
+      const items = (
+        sale.body as unknown as {
+          items: { unitPrice: string; lineTotal: string }[];
+        }
+      ).items;
+      expect(items[0]).toMatchObject({
+        unitPrice: '118.00',
+        lineTotal: '118.00',
+      });
+      const product = await prisma.product.findUniqueOrThrow({
+        where: { id: product118 },
+      });
+      expect(product.salePrice.toFixed(2)).toBe('118.00');
+    });
+
+    it('R2-B4: venta directa y cotización nueva en las mismas condiciones producen montos idénticos', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+      const product118 = await createTrackedProduct('118.00');
+      const body = {
+        customerId,
+        discountAmount: '11.80',
+        items: [
+          { productId: product118, quantity: '2' },
+          { productId, quantity: '1' },
+        ],
+      };
+
+      const quote = await createQuote({
+        ...body,
+        expirationDate: '2030-01-01',
+      });
+      const sale = await createDirectSale(body);
+      expect(quote.status).toBe(201);
+      expect(sale.status).toBe(201);
+
+      for (const field of [
+        'subtotal',
+        'discountAmount',
+        'taxAmount',
+        'total',
+        'itemsTotal',
+        'customerDiscountAmount',
+        'taxableBase',
+      ] as const) {
+        expect(sale.body[field]).toBe(quote.body[field]);
+      }
+      // 2 × 118.00 + 100.00 = 336.00 - 11.80 = 324.20 a pagar.
+      expect(sale.body.total).toBe('324.20');
+    });
+
+    it('R2-B4: lote R1 CASH 100 + YAPE 100 + CARD 50 sobre un total con IGV incluido de 250.00: PAID, caja y asientos correctos; la anulación revierte todo', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+      const product250 = await createTrackedProduct('250.00');
+
+      const opened = await request(app.getHttpServer())
+        .post('/api/v1/cash-sessions/open')
+        .set('Cookie', adminCookie)
+        .send({ openingAmount: '0' });
+      expect(opened.status).toBe(201);
+      const sessionId = (opened.body as { id: string }).id;
+      ownedCashSessionIds.push(sessionId);
+
+      const sale = await createDirectSale({
+        customerId,
+        items: [{ productId: product250, quantity: '1' }],
+        payments: [
+          { method: 'CASH', amount: '100.00' },
+          { method: 'YAPE', amount: '100.00', reference: 'OP-R2B4' },
+          { method: 'CARD', amount: '50.00', reference: 'VCH-R2B4' },
+        ],
+      });
+      expect(sale.status).toBe(201);
+      // 250.00 final al 18%: base 211.86, IGV 38.14.
+      expect(sale.body).toMatchObject({
+        total: '250.00',
+        subtotal: '211.86',
+        taxAmount: '38.14',
+        paidAmount: '250.00',
+        balanceDue: '0.00',
+        paymentStatus: 'PAID',
+      });
+
+      const payments = await prisma.payment.findMany({
+        where: { saleId: sale.body.id },
+      });
+      expect(payments).toHaveLength(3);
+      expect(payments.every((p) => p.cashSessionId === sessionId)).toBe(true);
+      for (const payment of payments) {
+        const entry = await prisma.accountingEntry.findFirstOrThrow({
+          where: {
+            sourceType: AccountingSourceType.PAYMENT,
+            sourceId: payment.id,
+          },
+          include: { lines: { include: { account: true } } },
+        });
+        const debit = entry.lines.find((l) => l.debitAmount.greaterThan(0));
+        expect(debit?.account.systemKey).toBe(
+          payment.paymentMethodCode === 'CASH'
+            ? AccountingSystemKey.CASH
+            : AccountingSystemKey.BANK,
+        );
+        expect(debit?.debitAmount.equals(payment.amount)).toBe(true);
+      }
+      const { totalDebit, totalCredit, vatLine } = await saleEntryLines(
+        sale.body.id,
+      );
+      expect(vatLine?.creditAmount.toFixed(2)).toBe('38.14');
+      expect(totalDebit.equals(totalCredit)).toBe(true);
+
+      const current = await request(app.getHttpServer())
+        .get('/api/v1/cash-sessions/current')
+        .set('Cookie', adminCookie);
+      expect(current.body).toMatchObject({
+        liveCollectionsTotal: '250.00',
+        liveCashCollectionsTotal: '100.00',
+        liveExpectedCashAmount: '100.00',
+      });
+
+      const stockAfterSale = await prisma.product.findUniqueOrThrow({
+        where: { id: product250 },
+      });
+      expect(stockAfterSale.stockCurrent.toFixed(3)).toBe('99.000');
+
+      const cancelled = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.body.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'R2-B4: anulación de venta con IGV incluido' });
+      expect(cancelled.status).toBe(200);
+
+      const afterCancel = await prisma.payment.findMany({
+        where: { saleId: sale.body.id },
+      });
+      expect(afterCancel.every((p) => p.status === 'CANCELLED')).toBe(true);
+      for (const payment of afterCancel) {
+        const reversal = await prisma.accountingEntry.count({
+          where: {
+            sourceType: AccountingSourceType.PAYMENT,
+            sourceId: payment.id,
+            eventType: 'REVERSAL',
+          },
+        });
+        expect(reversal).toBe(1);
+      }
+      const saleReversal = await prisma.accountingEntry.count({
         where: {
           sourceType: AccountingSourceType.SALE,
           sourceId: sale.body.id,
+          eventType: 'REVERSAL',
         },
-        include: { lines: true },
       });
-      expect(entry).not.toBeNull();
-      if (entry === null) return;
+      expect(saleReversal).toBe(1);
+      const stockAfterCancel = await prisma.product.findUniqueOrThrow({
+        where: { id: product250 },
+      });
+      expect(stockAfterCancel.stockCurrent.toFixed(3)).toBe('100.000');
+    });
 
-      const vatLine = entry.lines.find(
-        (line) => line.accountId === vatAccountId,
-      );
-      expect(vatLine).toBeDefined();
-      expect(vatLine?.creditAmount.toFixed(2)).toBe('18.00');
-      expect(vatLine?.debitAmount.toFixed(2)).toBe('0.00');
+    it('R2-B4: sobrepago contra el total con IGV incluido (100.01 sobre 100.00) -> 409; lote fallido en el pago #2 -> sin venta, correlativo, pagos ni stock', async () => {
+      await patchConfiguration({ taxEnabled: true, taxRate: '18.00' });
+      await trackLatestConfigurationAuditRow();
 
-      const totalDebit = entry.lines.reduce(
-        (sum, line) => sum.plus(line.debitAmount),
-        new Prisma.Decimal(0),
-      );
-      const totalCredit = entry.lines.reduce(
-        (sum, line) => sum.plus(line.creditAmount),
-        new Prisma.Decimal(0),
-      );
-      expect(totalDebit.toFixed(2)).toBe(totalCredit.toFixed(2));
-      expect(totalDebit.toFixed(2)).toBe('118.00');
+      async function snapshot() {
+        const [sales, payments, sequence, stock] = await Promise.all([
+          prisma.sale.count({ where: { customerId } }),
+          prisma.payment.count(),
+          prisma.documentSequence.findUniqueOrThrow({
+            where: { documentType: DocumentType.SALE },
+          }),
+          prisma.product.findUniqueOrThrow({ where: { id: productId } }),
+        ]);
+        return {
+          sales,
+          payments,
+          sequence: sequence.currentNumber,
+          stock: stock.stockCurrent.toFixed(3),
+        };
+      }
+
+      const before = await snapshot();
+      const overpay = await createDirectSale({
+        customerId,
+        items: [{ productId, quantity: '1' }],
+        payment: { method: 'CASH', amount: '100.01' },
+      });
+      expect(overpay.status).toBe(409);
+
+      const failedBatch = await createDirectSale({
+        customerId,
+        items: [{ productId, quantity: '1' }],
+        payments: [
+          { method: 'CASH', amount: '50.00' },
+          { method: 'CARD', amount: '50.00' },
+        ],
+      });
+      expect(failedBatch.status).toBe(400);
+      expect(await snapshot()).toEqual(before);
     });
   });
 
@@ -978,11 +1294,25 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         taxAmount: '16.20',
         total: '106.20',
         taxRate: '18.00',
+        // R2-B4: la respuesta de una venta HISTÓRICA conserva su semántica.
+        pricesIncludeTax: false,
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+        taxableBase: '90.00',
       });
       const saleRow = await prisma.sale.findUniqueOrThrow({
         where: { id: sale.id },
       });
       expect(saleRow.pricesIncludeTax).toBe(false);
+
+      const detail = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', adminCookie);
+      expect(detail.body).toMatchObject({
+        pricesIncludeTax: false,
+        customerDiscountAmount: '10.00',
+        total: '106.20',
+      });
     });
   });
 

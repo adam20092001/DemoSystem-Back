@@ -56,14 +56,9 @@ import {
   toSafeSaleListItem,
 } from './mappers/sale.mapper';
 import {
-  assertDiscountWithinConfiguredLimit,
-  assertDiscountWithinSubtotal,
   assertQuantityAllowedForUnit,
   calculateLineTotal,
-  calculateSubtotal,
-  calculateTaxableBase,
-  calculateTaxAmount,
-  calculateTotal,
+  calculateTaxInclusiveTotals,
   deriveDeliveryStatus,
   deriveSalePaymentSummary,
   parseDiscountAmount,
@@ -216,7 +211,8 @@ export class SalesService {
     }
     this.assertNoDuplicateProductIds(input.items.map((item) => item.productId));
 
-    const discountAmount = parseDiscountAmount(input.discountAmount);
+    // R2-B4: descuento sobre el importe FINAL que ve el cliente.
+    const customerDiscount = parseDiscountAmount(input.discountAmount);
     const parsedItems = input.items.map((item) => ({
       productId: item.productId,
       quantity: parseQuantity(item.quantity),
@@ -265,24 +261,23 @@ export class SalesService {
         };
       });
 
-      const subtotal = calculateSubtotal(lines.map((line) => line.lineTotal));
-      assertDiscountWithinSubtotal(discountAmount, subtotal);
-      assertDiscountWithinConfiguredLimit(
-        discountAmount,
-        subtotal,
-        settings.maxDiscountPercent,
-      );
-      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
-      // (subtotal - descuento), con el mismo snapshot de configuración ya
-      // leído arriba — nunca una segunda lectura de SettingsReader.
-      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
-      const taxAmount = calculateTaxAmount(
-        taxableBase,
-        settings.taxEnabled,
-        settings.taxRate,
-      );
-      const total = calculateTotal(subtotal, discountAmount, taxAmount);
+      // R2-B4: Product.salePrice es el precio FINAL al cliente (incluye IGV
+      // cuando aplica). El IGV se DESGLOSA a nivel de documento con la misma
+      // función que Cotizaciones (R2-B3), nunca se suma encima; el descuento
+      // recibido es sobre el importe final y se persiste su equivalente
+      // antes de impuesto. Mismo snapshot de configuración ya leído arriba
+      // (descuento máximo + IGV), nunca una segunda lectura.
+      const { subtotal, discountAmount, taxAmount, total } =
+        calculateTaxInclusiveTotals({
+          lineTotals: lines.map((line) => line.lineTotal),
+          customerDiscount,
+          taxEnabled: settings.taxEnabled,
+          taxRate: settings.taxRate,
+          maxDiscountPercent: settings.maxDiscountPercent,
+        });
 
+      // Pagos iniciales y reglas de deuda evaluados contra el total REAL
+      // (importe a pagar con IGV incluido).
       this.assertInitialPaymentsWithinTotal(initialPayments.totalAmount, total);
 
       const { paymentStatus, paidAmount, balanceDue } =
@@ -322,9 +317,9 @@ export class SalesService {
           currencyCode: settings.currencyCode,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
-          // R2-B1: los montos de arriba siguen calculándose con la semántica
-          // histórica (IGV sumado sobre precios antes de impuesto).
-          pricesIncludeTax: false,
+          // R2-B4: montos calculados con precios finales (IGV incluido
+          // cuando aplica). Identifica la SEMÁNTICA, no si el IGV está activo.
+          pricesIncludeTax: true,
           paidAmount,
           balanceDue,
           confirmedAt,

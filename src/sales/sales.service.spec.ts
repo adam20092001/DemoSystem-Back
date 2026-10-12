@@ -193,6 +193,7 @@ function makeSaleDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
     currencyCode: 'PEN',
     taxEnabled: false,
     taxRate: new Prisma.Decimal('18.00'),
+    pricesIncludeTax: true,
     paidAmount: new Prisma.Decimal('0.00'),
     balanceDue: new Prisma.Decimal('10.00'),
     items: [makeSaleItemRow()],
@@ -505,15 +506,95 @@ describe('SalesService', () => {
       expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
     });
 
-    it('R2-B1: venta directa fija pricesIncludeTax=false explícitamente, con o sin IGV activo', async () => {
-      settingsReader.getCurrent.mockResolvedValue(
-        makeSettingsSnapshot({ taxEnabled: true }),
-      );
-      await service.createDirect(validDirectInput);
-      const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
-        data: Record<string, unknown>;
-      };
-      expect(createArgs.data.pricesIncludeTax).toBe(false);
+    it.each([true, false])(
+      'R2-B4: toda venta directa nueva fija pricesIncludeTax=true (semántica, no si el IGV está activo) — taxEnabled=%s',
+      async (taxEnabled) => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({ taxEnabled }),
+        );
+        await service.createDirect(validDirectInput);
+        const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        };
+        expect(createArgs.data.pricesIncludeTax).toBe(true);
+      },
+    );
+
+    describe('R2-B4 — pagos iniciales y deuda contra el total con IGV incluido', () => {
+      beforeEach(() => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+      });
+
+      it('pago que cubre el total con IGV incluido (10.00): PAID; nunca exige 11.80', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await service.createDirect({
+          ...validDirectInput,
+          payments: [
+            { method: 'CASH', amount: '6.00' },
+            { method: 'YAPE', amount: '4.00', reference: 'OP-1' },
+          ],
+        });
+        const created = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { paymentStatus: string; balanceDue: Prisma.Decimal };
+        };
+        expect(created.data.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(created.data.balanceDue.toFixed(2)).toBe('0.00');
+      });
+
+      it('sobrepago evaluado contra el total real: 10.01 -> 409 sin insertar la venta', async () => {
+        await expect(
+          service.createDirect({
+            ...validDirectInput,
+            payment: { method: 'CASH', amount: '10.01' },
+          }),
+        ).rejects.toThrow(
+          'El monto del pago inicial no puede superar el total de la venta',
+        );
+        expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+      });
+
+      it('Público general paga exactamente el total con IGV incluido (10.00): éxito', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeGenericCustomerRow(),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+          }),
+        );
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('10.00'),
+        );
+        await expect(
+          service.createDirect({
+            ...validDirectInput,
+            customerId: 'generic-customer',
+            payment: { method: 'CASH', amount: '10.00' },
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('pago parcial de cliente elegible sobre el total con IGV incluido: PARTIALLY_PAID 4.00/6.00', async () => {
+        paymentEngine.sumActiveForSale.mockResolvedValue(
+          new Prisma.Decimal('4.00'),
+        );
+        await service.createDirect({
+          ...validDirectInput,
+          payment: { method: 'CASH', amount: '4.00' },
+        });
+        const created = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { paymentStatus: string; balanceDue: Prisma.Decimal };
+        };
+        expect(created.data.paymentStatus).toBe(
+          SalePaymentStatus.PARTIALLY_PAID,
+        );
+        expect(created.data.balanceDue.toFixed(2)).toBe('6.00');
+      });
     });
 
     it('items vacíos -> 400 sin abrir transacción', async () => {
@@ -956,7 +1037,7 @@ describe('SalesService', () => {
           await service.createDirect(validDirectInput);
         });
 
-        it('taxEnabled=true, 18% normal', async () => {
+        it('R2-B4: taxEnabled=true, 18%: el IGV se DESGLOSA del precio final (10.00 -> 8.47 + 1.53), nunca se suma encima', async () => {
           settingsReader.getCurrent.mockResolvedValue(
             makeSettingsSnapshot({
               taxEnabled: true,
@@ -971,15 +1052,15 @@ describe('SalesService', () => {
                 total: Prisma.Decimal;
               };
             };
-            expect(created.data.subtotal.toFixed(2)).toBe('10.00');
-            expect(created.data.taxAmount.toFixed(2)).toBe('1.80');
-            expect(created.data.total.toFixed(2)).toBe('11.80');
+            expect(created.data.subtotal.toFixed(2)).toBe('8.47');
+            expect(created.data.taxAmount.toFixed(2)).toBe('1.53');
+            expect(created.data.total.toFixed(2)).toBe('10.00');
             return Promise.resolve(makeSaleDetailRow());
           });
           await service.createDirect(validDirectInput);
         });
 
-        it('el descuento reduce la base imponible ANTES del impuesto', async () => {
+        it('R2-B4: el descuento recibido es sobre el precio FINAL; se persiste su equivalente antes de impuesto', async () => {
           settingsReader.getCurrent.mockResolvedValue(
             makeSettingsSnapshot({
               taxEnabled: true,
@@ -989,15 +1070,18 @@ describe('SalesService', () => {
           prisma.tx.sale.create.mockImplementation((args: unknown) => {
             const created = args as {
               data: {
+                subtotal: Prisma.Decimal;
                 discountAmount: Prisma.Decimal;
                 taxAmount: Prisma.Decimal;
                 total: Prisma.Decimal;
               };
             };
-            // taxableBase = 10.00 - 2.00 = 8.00; tax = 1.44.
-            expect(created.data.discountAmount.toFixed(2)).toBe('2.00');
-            expect(created.data.taxAmount.toFixed(2)).toBe('1.44');
-            expect(created.data.total.toFixed(2)).toBe('9.44');
+            // total = 10.00 - 2.00 = 8.00; base 6.78; IGV 1.22;
+            // descuento persistido = ROUND(2.00/1.18) = 1.69; subtotal 8.47.
+            expect(created.data.total.toFixed(2)).toBe('8.00');
+            expect(created.data.taxAmount.toFixed(2)).toBe('1.22');
+            expect(created.data.discountAmount.toFixed(2)).toBe('1.69');
+            expect(created.data.subtotal.toFixed(2)).toBe('8.47');
             return Promise.resolve(makeSaleDetailRow());
           });
           await service.createDirect({
@@ -1060,11 +1144,11 @@ describe('SalesService', () => {
           });
         });
 
-        it('redondeo Decimal determinista (caso exactamente en la mitad)', async () => {
+        it('R2-B4: redondeo Decimal determinista HALF_UP (base exactamente en la mitad)', async () => {
           settingsReader.getCurrent.mockResolvedValue(
             makeSettingsSnapshot({
               taxEnabled: true,
-              taxRate: new Prisma.Decimal('4.01'),
+              taxRate: new Prisma.Decimal('100.00'),
             }),
           );
           prisma.tx.$queryRaw.mockImplementation(
@@ -1075,18 +1159,172 @@ describe('SalesService', () => {
               products: new Map([
                 [
                   PRODUCT_ID,
-                  makeProductRow({ salePrice: new Prisma.Decimal('50.00') }),
+                  makeProductRow({ salePrice: new Prisma.Decimal('0.05') }),
                 ],
               ]),
             }),
           );
           prisma.tx.sale.create.mockImplementation((args: unknown) => {
-            const created = args as { data: { taxAmount: Prisma.Decimal } };
-            // 50.00 * 4.01 / 100 = 2.005 -> HALF_UP -> 2.01.
-            expect(created.data.taxAmount.toFixed(2)).toBe('2.01');
+            const created = args as {
+              data: { subtotal: Prisma.Decimal; taxAmount: Prisma.Decimal };
+            };
+            // 0.05 / 2 = 0.025 -> HALF_UP -> 0.03 (nunca 0.02 de HALF_EVEN);
+            // IGV por residuo = 0.02.
+            expect(created.data.subtotal.toFixed(2)).toBe('0.03');
+            expect(created.data.taxAmount.toFixed(2)).toBe('0.02');
             return Promise.resolve(makeSaleDetailRow());
           });
           await service.createDirect(validDirectInput);
+        });
+
+        it('R2-B4: tasa del 10%: 10.00 final -> base 9.09, IGV 0.91', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              taxEnabled: true,
+              taxRate: new Prisma.Decimal('10.00'),
+            }),
+          );
+          await service.createDirect(validDirectInput);
+          const created = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: Record<string, Prisma.Decimal>;
+          };
+          expect(created.data.subtotal.toFixed(2)).toBe('9.09');
+          expect(created.data.taxAmount.toFixed(2)).toBe('0.91');
+          expect(created.data.total.toFixed(2)).toBe('10.00');
+        });
+
+        it('R2-B4: 118.00 al 18% -> unitPrice/lineTotal 118.00, subtotal 100.00, IGV 18.00, total 118.00', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              taxEnabled: true,
+              taxRate: new Prisma.Decimal('18.00'),
+            }),
+          );
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow(),
+              quote: makeQuoteRow(),
+              sale: makeSaleLockRow(),
+              products: new Map([
+                [
+                  PRODUCT_ID,
+                  makeProductRow({ salePrice: new Prisma.Decimal('118.00') }),
+                ],
+              ]),
+            }),
+          );
+          await service.createDirect(validDirectInput);
+          const created = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: Record<string, unknown> & {
+              items: {
+                create: {
+                  unitPrice: Prisma.Decimal;
+                  lineTotal: Prisma.Decimal;
+                }[];
+              };
+            };
+          };
+          expect(created.data.items.create[0].unitPrice.toFixed(2)).toBe(
+            '118.00',
+          );
+          expect(created.data.items.create[0].lineTotal.toFixed(2)).toBe(
+            '118.00',
+          );
+          expect((created.data.subtotal as Prisma.Decimal).toFixed(2)).toBe(
+            '100.00',
+          );
+          expect(
+            (created.data.discountAmount as Prisma.Decimal).toFixed(2),
+          ).toBe('0.00');
+          expect((created.data.taxAmount as Prisma.Decimal).toFixed(2)).toBe(
+            '18.00',
+          );
+          expect((created.data.total as Prisma.Decimal).toFixed(2)).toBe(
+            '118.00',
+          );
+          expect(created.data.pricesIncludeTax).toBe(true);
+        });
+
+        it('R2-B4: 118.00 con descuento 11.80 -> subtotal 100.00, descuento 10.00, IGV 16.20, total 106.20', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              taxEnabled: true,
+              taxRate: new Prisma.Decimal('18.00'),
+            }),
+          );
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow(),
+              quote: makeQuoteRow(),
+              sale: makeSaleLockRow(),
+              products: new Map([
+                [
+                  PRODUCT_ID,
+                  makeProductRow({ salePrice: new Prisma.Decimal('118.00') }),
+                ],
+              ]),
+            }),
+          );
+          await service.createDirect({
+            ...validDirectInput,
+            discountAmount: '11.80',
+          });
+          const created = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: Record<string, Prisma.Decimal>;
+          };
+          expect(created.data.subtotal.toFixed(2)).toBe('100.00');
+          expect(created.data.discountAmount.toFixed(2)).toBe('10.00');
+          expect(created.data.taxAmount.toFixed(2)).toBe('16.20');
+          expect(created.data.total.toFixed(2)).toBe('106.20');
+        });
+
+        it('R2-B4: IGV desactivado: total = precio final, IGV 0.00, indicador true', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({ taxEnabled: false }),
+          );
+          await service.createDirect(validDirectInput);
+          const created = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: Record<string, unknown>;
+          };
+          expect((created.data.total as Prisma.Decimal).toFixed(2)).toBe(
+            '10.00',
+          );
+          expect((created.data.taxAmount as Prisma.Decimal).toFixed(2)).toBe(
+            '0.00',
+          );
+          expect(created.data.pricesIncludeTax).toBe(true);
+        });
+
+        it('R2-B4: descuento por encima del total de ítems -> 400 sin insertar la venta', async () => {
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              discountAmount: '10.01',
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+        });
+
+        it('R2-B4: invariante de cabecera (CHECK sales_total_arithmetic) en lo persistido', async () => {
+          settingsReader.getCurrent.mockResolvedValue(
+            makeSettingsSnapshot({
+              taxEnabled: true,
+              taxRate: new Prisma.Decimal('18.00'),
+            }),
+          );
+          await service.createDirect({
+            ...validDirectInput,
+            discountAmount: '3.33',
+          });
+          const created = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: Record<string, Prisma.Decimal>;
+          };
+          const { subtotal, discountAmount, taxAmount, total } = created.data;
+          expect(
+            total.equals(subtotal.minus(discountAmount).plus(taxAmount)),
+          ).toBe(true);
+          expect(discountAmount.lessThanOrEqualTo(subtotal)).toBe(true);
+          expect(taxAmount.greaterThanOrEqualTo(0)).toBe(true);
         });
 
         it('SettingsReader.getCurrent(tx) se llama exactamente una vez (mismo snapshot para descuento máximo e IGV)', async () => {
@@ -3473,9 +3711,13 @@ describe('SalesService', () => {
         taxAmount: Prisma.Decimal;
         total: Prisma.Decimal;
       };
-      expect(command.subtotal.toFixed(2)).toBe('10.00');
-      expect(command.taxAmount.toFixed(2)).toBe('1.80');
-      expect(command.total.toFixed(2)).toBe('11.80');
+      // R2-B4: montos con IGV incluido (10.00 final -> 8.47 + 1.53).
+      expect(command.subtotal.toFixed(2)).toBe('8.47');
+      expect(command.taxAmount.toFixed(2)).toBe('1.53');
+      expect(command.total.toFixed(2)).toBe('10.00');
+      expect(
+        command.total.equals(command.subtotal.plus(command.taxAmount)),
+      ).toBe(true);
     });
 
     it('postSaleRecognition usa EXACTAMENTE el mismo confirmedAt que el persistido en Sale', async () => {

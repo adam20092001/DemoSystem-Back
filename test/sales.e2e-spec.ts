@@ -77,6 +77,11 @@ const SAFE_SALE_DETAIL_KEYS = [
   'currencyCode',
   'taxEnabled',
   'taxRate',
+  // R2-B4: contrato aditivo del detalle (el listado no cambia).
+  'pricesIncludeTax',
+  'itemsTotal',
+  'customerDiscountAmount',
+  'taxableBase',
   'paidAmount',
   'balanceDue',
   'items',
