@@ -1633,4 +1633,156 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       expect(movementsAfter).toBe(movementsBefore);
     });
   });
+
+  describe('R2-B5 — semántica de precios en el comprobante MOCK', () => {
+    it('emisión con precios finales: el detalle expone pricesIncludeTax=true, el contexto de impuesto de la venta y montos idénticos a la venta; la impresión no altera ningún estado', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '2',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const docId = (issued.body as { id: string }).id;
+      createdDocumentIds.push(docId);
+
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      const detail = await getDoc(adminCookie, docId);
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({
+        pricesIncludeTax: true,
+        taxEnabled: saleRow.taxEnabled,
+        taxRate: saleRow.taxRate.toFixed(2),
+        subtotal: saleRow.subtotal.toFixed(2),
+        discountAmount: saleRow.discountAmount.toFixed(2),
+        taxAmount: saleRow.taxAmount.toFixed(2),
+        total: saleRow.total.toFixed(2),
+        itemsTotal: '100.00',
+        customerDiscountAmount: '0.00',
+      });
+
+      const statesBefore = await Promise.all([
+        prisma.sale.findUniqueOrThrow({ where: { id: sale.id } }),
+        prisma.payment.count(),
+        prisma.accountingEntry.count(),
+        prisma.inventoryMovement.count(),
+        prisma.electronicDocument.findUniqueOrThrow({ where: { id: docId } }),
+      ]);
+
+      const printed = await printDoc(adminCookie, docId);
+      expect(printed.status).toBe(200);
+      // Esta suite opera con IGV desactivado: etiqueta neutra, sin "inc. IGV".
+      expect(printed.text).toContain('Precio unitario final');
+      expect(printed.text).not.toContain('inc. IGV');
+      expect(printed.text).toContain(
+        `Total a pagar: ${saleRow.total.toFixed(2)}`,
+      );
+
+      const statesAfter = await Promise.all([
+        prisma.sale.findUniqueOrThrow({ where: { id: sale.id } }),
+        prisma.payment.count(),
+        prisma.accountingEntry.count(),
+        prisma.inventoryMovement.count(),
+        prisma.electronicDocument.findUniqueOrThrow({ where: { id: docId } }),
+      ]);
+      expect(JSON.stringify(statesAfter)).toBe(JSON.stringify(statesBefore));
+    });
+
+    it('documento HISTÓRICO (pricesIncludeTax=false): detalle y representación conservan la semántica y los montos originales', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '2',
+      });
+      const series = await prisma.fiscalSeries.findUniqueOrThrow({
+        where: {
+          documentType_series: {
+            documentType: FiscalDocumentType.FACTURA,
+            series: FACTURA_SERIES,
+          },
+        },
+      });
+      // Documento insertado tal cual lo habría persistido el código previo
+      // a R2: líneas antes de impuesto, IGV 18% sumado sobre la base.
+      const historical = await prisma.electronicDocument.create({
+        data: {
+          saleId: sale.id,
+          fiscalSeriesId: series.id,
+          documentType: FiscalDocumentType.FACTURA,
+          series: FACTURA_SERIES,
+          number: 90000000 + (Date.now() % 1000000),
+          status: ElectronicDocumentStatus.ACCEPTED,
+          providerCode: 'MOCK',
+          providerStatus: 'ACCEPTED',
+          currencyCode: 'PEN',
+          issuerTaxId: '20100000001',
+          issuerBusinessName: 'Empresa Histórica SAC',
+          customerName: 'Distribuidora API E2E SAC',
+          subtotal: new Prisma.Decimal('100.00'),
+          discountAmount: new Prisma.Decimal('10.00'),
+          taxableBase: new Prisma.Decimal('90.00'),
+          taxAmount: new Prisma.Decimal('16.20'),
+          total: new Prisma.Decimal('106.20'),
+          pricesIncludeTax: false,
+          issuedAt: new Date(),
+          items: {
+            create: [
+              {
+                lineNumber: 1,
+                productSku: 'SKU-HIST',
+                description: 'Producto histórico',
+                unitCode: 'UND',
+                unitName: 'Unidad',
+                unitAbbreviation: 'und',
+                quantity: new Prisma.Decimal('2.000'),
+                unitPrice: new Prisma.Decimal('50.00'),
+                lineTotal: new Prisma.Decimal('100.00'),
+              },
+            ],
+          },
+        },
+      });
+      createdDocumentIds.push(historical.id);
+
+      const detail = await getDoc(adminCookie, historical.id);
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({
+        pricesIncludeTax: false,
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxableBase: '90.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+      });
+
+      const printed = await printDoc(adminCookie, historical.id);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('Subtotal: 100.00');
+      expect(printed.text).toContain('Descuento: 10.00');
+      expect(printed.text).toContain('Base imponible: 90.00');
+      expect(printed.text).toContain('IGV: 16.20');
+      expect(printed.text).toContain('Total: 106.20');
+      expect(printed.text).not.toContain('Total a pagar');
+
+      const after = await prisma.electronicDocument.findUniqueOrThrow({
+        where: { id: historical.id },
+      });
+      expect(after.pricesIncludeTax).toBe(false);
+      expect(after.total.toFixed(2)).toBe('106.20');
+    });
+
+    it('el listado de comprobantes no cambia de forma (sin campos de R2-B5)', async () => {
+      const list = await listDocs(adminCookie, { limit: 5 });
+      expect(list.status).toBe(200);
+      for (const item of (list.body as { data: object[] }).data) {
+        expect(item).not.toHaveProperty('pricesIncludeTax');
+        expect(item).not.toHaveProperty('itemsTotal');
+      }
+    });
+  });
 });

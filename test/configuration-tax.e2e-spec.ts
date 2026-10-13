@@ -631,6 +631,19 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         total: '90.00',
       });
 
+      // R2-B5: el PDF/HTML de la cotización muestra el descuento al cliente
+      // (bruto) y el IGV contenido en el total.
+      const printed = await request(app.getHttpServer())
+        .get(`/api/v1/quotes/${created.body.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('Total ítems: 100.00');
+      expect(printed.text).toContain('Descuento: 10.00');
+      expect(printed.text).toContain('Op. gravada: 76.27');
+      expect(printed.text).toContain('IGV (18%) incluido: 13.73');
+      expect(printed.text).toContain('Total a pagar: 90.00');
+      expect(printed.text).not.toContain('Descuento: 8.47');
+
       // Invariantes que exigen las CHECK, sobre la fila persistida real.
       const row = await prisma.quote.findUniqueOrThrow({
         where: { id: created.body.id },
@@ -944,6 +957,17 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         taxAmount: '15.25',
         total: '100.00',
       });
+
+      // R2-B5: la nota de venta impresa rotula el IGV CONTENIDO, nunca sumado.
+      const printed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.body.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('Precio unit. (inc. IGV)');
+      expect(printed.text).toContain('Op. gravada: 84.75');
+      expect(printed.text).toContain('IGV (18%) incluido: 15.25');
+      expect(printed.text).toContain('Total a pagar: 100.00');
+      expect(printed.text).not.toContain('118.00');
 
       const { totalDebit, totalCredit, vatLine } = await saleEntryLines(
         sale.body.id,

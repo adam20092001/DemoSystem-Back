@@ -175,9 +175,22 @@ export type ElectronicDocumentListRow = Prisma.ElectronicDocumentGetPayload<{
   select: typeof ELECTRONIC_DOCUMENT_LIST_SELECT;
 }>;
 
+/**
+ * R2-B5: el snapshot fiscal persiste montos y pricesIncludeTax, pero no el
+ * contexto de impuesto (taxEnabled/taxRate). Para rotular el documento se lee
+ * el de la VENTA de origen: también es un snapshot congelado al confirmar
+ * (Sale nunca se edita) y es exactamente el contexto con el que se calcularon
+ * los montos que este documento copió VERBATIM. Nunca CompanySettings vigente.
+ */
+const SALE_TAX_CONTEXT_SELECT = {
+  select: { number: true, taxEnabled: true, taxRate: true },
+} satisfies { select: Prisma.SaleSelect };
+
 /** Select de detalle (Bloque 11D §24): un único nested select de ítems, sin N+1. */
 export const ELECTRONIC_DOCUMENT_DETAIL_SELECT = {
   ...ELECTRONIC_DOCUMENT_LIST_SELECT,
+  sale: SALE_TAX_CONTEXT_SELECT,
+  pricesIncludeTax: true,
   issuerTaxId: true,
   issuerBusinessName: true,
   issuerAddress: true,
@@ -246,8 +259,24 @@ export function toSafeElectronicDocumentListItem(
 export function toSafeElectronicDocument(
   row: ElectronicDocumentDetailRow,
 ): SafeElectronicDocument {
+  // R2-B5: montos de presentación derivados SOLO de lo persistido (mismo
+  // contrato que Venta/Cotización): con precios finales, el descuento al
+  // cliente es Σ lineTotal - total; en un documento histórico es el
+  // discountAmount persistido (aplicado antes de sumar el IGV).
+  const itemsTotal = row.items.reduce(
+    (accumulated, item) => accumulated.plus(item.lineTotal),
+    new Prisma.Decimal(0),
+  );
+  const customerDiscountAmount = row.pricesIncludeTax
+    ? itemsTotal.minus(row.total)
+    : row.discountAmount;
   return {
     ...toSafeElectronicDocumentListItem(row),
+    pricesIncludeTax: row.pricesIncludeTax,
+    taxEnabled: row.sale.taxEnabled,
+    taxRate: row.sale.taxRate.toFixed(2),
+    itemsTotal: itemsTotal.toFixed(2),
+    customerDiscountAmount: customerDiscountAmount.toFixed(2),
     issuerTaxId: row.issuerTaxId,
     issuerBusinessName: row.issuerBusinessName,
     issuerAddress: row.issuerAddress,

@@ -17,6 +17,14 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * "18.00" -> "18", "12.50" -> "12.5": solo presentación textual de la tasa
+ * ya persistida (sin aritmética de punto flotante).
+ */
+function formatRate(rate: string): string {
+  return rate.includes('.') ? rate.replace(/\.?0+$/, '') : rate;
+}
+
 /** Sin recursos remotos (fuentes/CSS/JS), sin <script>, todo inline. */
 const INLINE_CSS = `
   body { font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; margin: 24px; }
@@ -86,8 +94,8 @@ export class QuoteDocumentRenderer {
         <th>Producto</th>
         <th>Unidad</th>
         <th>Cantidad</th>
-        <th>Precio unit.</th>
-        <th>Total línea</th>
+        <th>${this.unitPriceHeader(quote)}</th>
+        <th>${this.lineTotalHeader(quote)}</th>
       </tr>
     </thead>
     <tbody>
@@ -95,16 +103,59 @@ export class QuoteDocumentRenderer {
     </tbody>
   </table>
 
-  <div class="totals">
-    <p>Subtotal: ${escapeHtml(quote.subtotal)}</p>
-    <p>Descuento: ${escapeHtml(quote.discountAmount)}</p>
-    <p>Impuesto: ${escapeHtml(quote.taxAmount)}</p>
-    <p class="total-final">Total: ${escapeHtml(quote.total)}</p>
-  </div>
+  ${this.renderTotals(quote)}
 
   ${notesSection}
 </body>
 </html>`;
+  }
+
+  /** R2-B5: solo una cotización con precios finales E IGV activo rotula "inc. IGV". */
+  private showsIncludedTax(quote: SafeQuote): boolean {
+    return quote.pricesIncludeTax && quote.taxEnabled;
+  }
+
+  private unitPriceHeader(quote: SafeQuote): string {
+    if (!quote.pricesIncludeTax) {
+      return 'Precio unit.';
+    }
+    return this.showsIncludedTax(quote)
+      ? 'Precio unit. (inc. IGV)'
+      : 'Precio unit. final';
+  }
+
+  private lineTotalHeader(quote: SafeQuote): string {
+    return this.showsIncludedTax(quote)
+      ? 'Total línea (inc. IGV)'
+      : 'Total línea';
+  }
+
+  /**
+   * R2-B5: SOLO presentación de montos ya persistidos/derivados por el
+   * backend (SafeQuote): nunca recalcula. Una cotización histórica
+   * (pricesIncludeTax=false) conserva EXACTAMENTE su formato original; una
+   * con precios finales muestra el descuento al cliente (bruto) y el IGV
+   * CONTENIDO en el total, nunca sumado encima.
+   */
+  private renderTotals(quote: SafeQuote): string {
+    if (!quote.pricesIncludeTax) {
+      return `<div class="totals">
+    <p>Subtotal: ${escapeHtml(quote.subtotal)}</p>
+    <p>Descuento: ${escapeHtml(quote.discountAmount)}</p>
+    <p>Impuesto: ${escapeHtml(quote.taxAmount)}</p>
+    <p class="total-final">Total: ${escapeHtml(quote.total)}</p>
+  </div>`;
+    }
+    const taxLines = this.showsIncludedTax(quote)
+      ? `<p>Op. gravada: ${escapeHtml(quote.taxableBase)}</p>
+    <p>IGV (${escapeHtml(formatRate(quote.taxRate))}%) incluido: ${escapeHtml(quote.taxAmount)}</p>`
+      : `<p>Impuesto: ${escapeHtml(quote.taxAmount)}</p>`;
+    return `<div class="totals">
+    <p>Total ítems: ${escapeHtml(quote.itemsTotal)}</p>
+    <p>Descuento: ${escapeHtml(quote.customerDiscountAmount)}</p>
+    ${taxLines}
+    <p class="total-final">Total a pagar: ${escapeHtml(quote.total)}</p>
+  </div>`;
   }
 
   private renderItemRow(item: SafeQuoteItem): string {

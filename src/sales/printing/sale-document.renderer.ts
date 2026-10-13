@@ -21,6 +21,16 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * "18.00" -> "18", "12.50" -> "12.5": solo presentación textual de la tasa
+ * ya persistida (sin aritmética de punto flotante). Duplicado
+ * deliberadamente respecto a QuoteDocumentRenderer, mismo criterio que
+ * escapeHtml.
+ */
+function formatRate(rate: string): string {
+  return rate.includes('.') ? rate.replace(/\.?0+$/, '') : rate;
+}
+
 /** Sin recursos remotos (fuentes/CSS/JS), sin <script>, todo inline. */
 const INLINE_CSS = `
   body { font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; margin: 24px; }
@@ -110,8 +120,8 @@ export class SaleDocumentRenderer {
         <th>Producto</th>
         <th>Unidad</th>
         <th>Cantidad</th>
-        <th>Precio unit.</th>
-        <th>Total línea</th>
+        <th>${this.unitPriceHeader(sale)}</th>
+        <th>${this.lineTotalHeader(sale)}</th>
       </tr>
     </thead>
     <tbody>
@@ -119,14 +129,57 @@ export class SaleDocumentRenderer {
     </tbody>
   </table>
 
-  <div class="totals">
+  ${this.renderTotals(sale)}
+</body>
+</html>`;
+  }
+
+  /** R2-B5: solo una venta con precios finales E IGV activo rotula "inc. IGV". */
+  private showsIncludedTax(sale: SafeSale): boolean {
+    return sale.pricesIncludeTax && sale.taxEnabled;
+  }
+
+  private unitPriceHeader(sale: SafeSale): string {
+    if (!sale.pricesIncludeTax) {
+      return 'Precio unit.';
+    }
+    return this.showsIncludedTax(sale)
+      ? 'Precio unit. (inc. IGV)'
+      : 'Precio unit. final';
+  }
+
+  private lineTotalHeader(sale: SafeSale): string {
+    return this.showsIncludedTax(sale)
+      ? 'Total línea (inc. IGV)'
+      : 'Total línea';
+  }
+
+  /**
+   * R2-B5: SOLO presentación de montos ya persistidos/derivados por el
+   * backend (SafeSale): nunca recalcula. Una venta histórica
+   * (pricesIncludeTax=false) conserva EXACTAMENTE su formato original; una
+   * con precios finales muestra el descuento al cliente (bruto) y el IGV
+   * CONTENIDO en el total, nunca sumado encima.
+   */
+  private renderTotals(sale: SafeSale): string {
+    if (!sale.pricesIncludeTax) {
+      return `<div class="totals">
     <p>Subtotal: ${escapeHtml(sale.subtotal)}</p>
     <p>Descuento: ${escapeHtml(sale.discountAmount)}</p>
     <p>Impuesto: ${escapeHtml(sale.taxAmount)}</p>
     <p class="total-final">Total: ${escapeHtml(sale.total)}</p>
-  </div>
-</body>
-</html>`;
+  </div>`;
+    }
+    const taxLines = this.showsIncludedTax(sale)
+      ? `<p>Op. gravada: ${escapeHtml(sale.taxableBase)}</p>
+    <p>IGV (${escapeHtml(formatRate(sale.taxRate))}%) incluido: ${escapeHtml(sale.taxAmount)}</p>`
+      : `<p>Impuesto: ${escapeHtml(sale.taxAmount)}</p>`;
+    return `<div class="totals">
+    <p>Total ítems: ${escapeHtml(sale.itemsTotal)}</p>
+    <p>Descuento: ${escapeHtml(sale.customerDiscountAmount)}</p>
+    ${taxLines}
+    <p class="total-final">Total a pagar: ${escapeHtml(sale.total)}</p>
+  </div>`;
   }
 
   private renderItemRow(item: SafeSaleItem): string {

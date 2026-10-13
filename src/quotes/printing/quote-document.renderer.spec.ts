@@ -29,6 +29,14 @@ function makeQuote(overrides: Partial<SafeQuote> = {}): SafeQuote {
     discountAmount: '0.00',
     taxAmount: '0.00',
     total: '10.00',
+    currencyCode: 'PEN',
+    taxEnabled: false,
+    taxRate: '18.00',
+    // Por defecto, cotización HISTÓRICA (formato original sin cambios).
+    pricesIncludeTax: false,
+    itemsTotal: '10.00',
+    customerDiscountAmount: '0.00',
+    taxableBase: '10.00',
     notes: null,
     items: [
       {
@@ -213,5 +221,123 @@ describe('QuoteDocumentRenderer', () => {
     const html = renderer.render(quote);
     expect(html).toContain('SKU-1');
     expect(html).toContain('SKU-2');
+  });
+
+  describe('R2-B5 — presentación según la semántica de precios', () => {
+    /** Cotización con precios finales al 18%: 118.00 con descuento al cliente 11.80. */
+    function taxInclusiveQuote(overrides: Partial<SafeQuote> = {}): SafeQuote {
+      const base = makeQuote();
+      return makeQuote({
+        pricesIncludeTax: true,
+        taxEnabled: true,
+        taxRate: '18.00',
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        itemsTotal: '118.00',
+        customerDiscountAmount: '11.80',
+        taxableBase: '90.00',
+        items: [{ ...base.items[0], unitPrice: '118.00', lineTotal: '118.00' }],
+        ...overrides,
+      });
+    }
+
+    it('precios finales + IGV: rotula "inc. IGV", muestra descuento BRUTO, base e IGV contenido, y el total persistido', () => {
+      const html = renderer.render(taxInclusiveQuote());
+      expect(html).toContain('Precio unit. (inc. IGV)');
+      expect(html).toContain('Total línea (inc. IGV)');
+      expect(html).toContain('Total ítems: 118.00');
+      expect(html).toContain('Descuento: 11.80');
+      expect(html).toContain('Op. gravada: 90.00');
+      expect(html).toContain('IGV (18%) incluido: 16.20');
+      expect(html).toContain('Total a pagar: 106.20');
+      // Nunca el descuento persistido antes de impuesto como si fuera el
+      // descuento al cliente, ni el formato histórico.
+      expect(html).not.toContain('Descuento: 10.00');
+      expect(html).not.toContain('Subtotal:');
+    });
+
+    it('sin doble IGV: 118.00 al 18% sin descuento muestra total 118.00 (nunca 139.24)', () => {
+      const html = renderer.render(
+        taxInclusiveQuote({
+          discountAmount: '0.00',
+          subtotal: '100.00',
+          taxAmount: '18.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+          taxableBase: '100.00',
+        }),
+      );
+      expect(html).toContain('IGV (18%) incluido: 18.00');
+      expect(html).toContain('Total a pagar: 118.00');
+      expect(html).not.toContain('139.24');
+    });
+
+    it('precios finales con IGV desactivado: etiqueta neutra, impuesto 0.00, sin base gravada ni "inc. IGV"', () => {
+      const html = renderer.render(
+        taxInclusiveQuote({
+          taxEnabled: false,
+          subtotal: '118.00',
+          discountAmount: '0.00',
+          taxAmount: '0.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+          taxableBase: '118.00',
+        }),
+      );
+      expect(html).toContain('Precio unit. final');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Op. gravada');
+      expect(html).toContain('Impuesto: 0.00');
+      expect(html).toContain('Total a pagar: 118.00');
+    });
+
+    it('tasa configurada distinta (10%) y descuento total', () => {
+      const html = renderer.render(
+        taxInclusiveQuote({
+          taxRate: '10.00',
+          subtotal: '100.00',
+          discountAmount: '100.00',
+          taxAmount: '0.00',
+          total: '0.00',
+          itemsTotal: '110.00',
+          customerDiscountAmount: '110.00',
+          taxableBase: '0.00',
+        }),
+      );
+      expect(html).toContain('IGV (10%) incluido: 0.00');
+      expect(html).toContain('Descuento: 110.00');
+      expect(html).toContain('Total a pagar: 0.00');
+    });
+
+    it('cotización HISTÓRICA: formato y montos originales sin cambios', () => {
+      const html = renderer.render(
+        makeQuote({
+          taxEnabled: true,
+          subtotal: '100.00',
+          discountAmount: '10.00',
+          taxAmount: '16.20',
+          total: '106.20',
+          itemsTotal: '100.00',
+          customerDiscountAmount: '10.00',
+          taxableBase: '90.00',
+        }),
+      );
+      expect(html).toContain('<th>Precio unit.</th>');
+      expect(html).toContain('Subtotal: 100.00');
+      expect(html).toContain('Descuento: 10.00');
+      expect(html).toContain('Impuesto: 16.20');
+      expect(html).toContain('Total: 106.20');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Total a pagar');
+    });
+
+    it('no muta el documento recibido', () => {
+      const quote = taxInclusiveQuote();
+      const before = JSON.stringify(quote);
+      renderer.render(quote);
+      expect(JSON.stringify(quote)).toBe(before);
+    });
   });
 });

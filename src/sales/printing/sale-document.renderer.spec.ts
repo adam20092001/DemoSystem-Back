@@ -33,6 +33,14 @@ function makeSale(overrides: Partial<SafeSale> = {}): SafeSale {
     discountAmount: '0.00',
     taxAmount: '0.00',
     total: '10.00',
+    currencyCode: 'PEN',
+    taxEnabled: false,
+    taxRate: '18.00',
+    // Por defecto, venta HISTÓRICA (formato original sin cambios).
+    pricesIncludeTax: false,
+    itemsTotal: '10.00',
+    customerDiscountAmount: '0.00',
+    taxableBase: '10.00',
     paidAmount: '0.00',
     balanceDue: '10.00',
     items: [
@@ -314,6 +322,142 @@ describe('SaleDocumentRenderer', () => {
       sale.items[0].unitName = '<script>u()</script>';
       const html = renderer.render(sale);
       expect(html).not.toContain('<script>u()</script>');
+    });
+  });
+
+  describe('R2-B5 — presentación según la semántica de precios', () => {
+    const renderer = new SaleDocumentRenderer();
+
+    /** Venta con precios finales al 18%: 118.00 con descuento al cliente 11.80. */
+    function taxInclusiveSale(overrides: Partial<SafeSale> = {}): SafeSale {
+      const base = makeSale();
+      return makeSale({
+        pricesIncludeTax: true,
+        taxEnabled: true,
+        taxRate: '18.00',
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        itemsTotal: '118.00',
+        customerDiscountAmount: '11.80',
+        taxableBase: '90.00',
+        items: [{ ...base.items[0], unitPrice: '118.00', lineTotal: '118.00' }],
+        ...overrides,
+      });
+    }
+
+    it('precios finales + IGV: "inc. IGV", descuento BRUTO, base, IGV contenido y total persistido', () => {
+      const html = renderer.render(taxInclusiveSale());
+      expect(html).toContain('Precio unit. (inc. IGV)');
+      expect(html).toContain('Total línea (inc. IGV)');
+      expect(html).toContain('Total ítems: 118.00');
+      expect(html).toContain('Descuento: 11.80');
+      expect(html).toContain('Op. gravada: 90.00');
+      expect(html).toContain('IGV (18%) incluido: 16.20');
+      expect(html).toContain('Total a pagar: 106.20');
+      expect(html).not.toContain('Descuento: 10.00');
+      expect(html).not.toContain('Subtotal:');
+    });
+
+    it('sin doble IGV: 118.00 al 18% sin descuento muestra total 118.00 (nunca 139.24)', () => {
+      const html = renderer.render(
+        taxInclusiveSale({
+          discountAmount: '0.00',
+          taxAmount: '18.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+          taxableBase: '100.00',
+        }),
+      );
+      expect(html).toContain('IGV (18%) incluido: 18.00');
+      expect(html).toContain('Total a pagar: 118.00');
+      expect(html).not.toContain('139.24');
+    });
+
+    it('varios ítems con cantidad fraccionaria y redondeo: imprime exactamente los montos persistidos', () => {
+      const base = makeSale();
+      const html = renderer.render(
+        taxInclusiveSale({
+          subtotal: '158.47',
+          discountAmount: '0.00',
+          taxAmount: '28.53',
+          total: '187.00',
+          itemsTotal: '187.00',
+          customerDiscountAmount: '0.00',
+          taxableBase: '158.47',
+          items: [
+            { ...base.items[0], unitPrice: '10.00', lineTotal: '10.00' },
+            {
+              ...base.items[0],
+              id: 'item-2',
+              productSku: 'SKU-2',
+              quantity: '1.500',
+              unitPrice: '118.00',
+              lineTotal: '177.00',
+            },
+          ],
+        }),
+      );
+      expect(html).toContain('177.00');
+      expect(html).toContain('Op. gravada: 158.47');
+      expect(html).toContain('IGV (18%) incluido: 28.53');
+      expect(html).toContain('Total a pagar: 187.00');
+    });
+
+    it('precios finales con IGV desactivado: etiqueta neutra, impuesto 0.00, sin base gravada ni "inc. IGV"', () => {
+      const html = renderer.render(
+        taxInclusiveSale({
+          taxEnabled: false,
+          subtotal: '118.00',
+          discountAmount: '0.00',
+          taxAmount: '0.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+          taxableBase: '118.00',
+        }),
+      );
+      expect(html).toContain('Precio unit. final');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Op. gravada');
+      expect(html).toContain('Impuesto: 0.00');
+    });
+
+    it('venta HISTÓRICA: formato y montos originales sin cambios', () => {
+      const html = renderer.render(
+        makeSale({
+          taxEnabled: true,
+          subtotal: '100.00',
+          discountAmount: '10.00',
+          taxAmount: '16.20',
+          total: '106.20',
+          itemsTotal: '100.00',
+          customerDiscountAmount: '10.00',
+          taxableBase: '90.00',
+        }),
+      );
+      expect(html).toContain('<th>Precio unit.</th>');
+      expect(html).toContain('Subtotal: 100.00');
+      expect(html).toContain('Descuento: 10.00');
+      expect(html).toContain('Impuesto: 16.20');
+      expect(html).toContain('Total: 106.20');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Total a pagar');
+    });
+
+    it('una venta con precios finales ANULADA conserva su marca y sus montos', () => {
+      const html = renderer.render(
+        taxInclusiveSale({ status: SaleStatus.CANCELLED }),
+      );
+      expect(html).toContain('ANULADA');
+      expect(html).toContain('Total a pagar: 106.20');
+    });
+
+    it('no muta el documento recibido', () => {
+      const sale = taxInclusiveSale();
+      const before = JSON.stringify(sale);
+      renderer.render(sale);
+      expect(JSON.stringify(sale)).toBe(before);
     });
   });
 });

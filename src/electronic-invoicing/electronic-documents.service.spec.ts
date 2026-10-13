@@ -1080,11 +1080,19 @@ describe('ElectronicDocumentsService', () => {
   });
 
   describe('findDetail', () => {
+    // Por defecto, documento HISTÓRICO (pricesIncludeTax=false): base 100.00
+    // + IGV 18.00 sumado = 118.00. La venta de origen aporta su contexto de
+    // impuesto congelado (R2-B5).
     function makeDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
       return {
         id: DOCUMENT_ID,
         saleId: SALE_ID,
-        sale: { number: SALE_NUMBER },
+        sale: {
+          number: SALE_NUMBER,
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        },
+        pricesIncludeTax: false,
         documentType: FiscalDocumentType.FACTURA,
         series: 'F001',
         number: 7,
@@ -1160,6 +1168,91 @@ describe('ElectronicDocumentsService', () => {
         select: { items: unknown };
       };
       expect(call.select.items).toBeDefined();
+    });
+
+    it('R2-B5: el select de detalle lee pricesIncludeTax y el contexto de impuesto congelado de la venta (nunca CompanySettings)', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetail(DOCUMENT_ID);
+
+      const call = prisma.electronicDocument.findUnique.mock.calls[0][0] as {
+        select: {
+          pricesIncludeTax: boolean;
+          sale: { select: Record<string, boolean> };
+        };
+      };
+      expect(call.select.pricesIncludeTax).toBe(true);
+      expect(call.select.sale.select).toEqual({
+        number: true,
+        taxEnabled: true,
+        taxRate: true,
+      });
+    });
+
+    it('R2-B5: documento HISTÓRICO: pricesIncludeTax=false y descuento al cliente = discountAmount persistido', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(
+        makeDetailRow({
+          subtotal: new Prisma.Decimal('100.00'),
+          discountAmount: new Prisma.Decimal('10.00'),
+          taxableBase: new Prisma.Decimal('90.00'),
+          taxAmount: new Prisma.Decimal('16.20'),
+          total: new Prisma.Decimal('106.20'),
+        }),
+      );
+
+      const result = await service.findDetail(DOCUMENT_ID);
+
+      expect(result).toMatchObject({
+        pricesIncludeTax: false,
+        taxEnabled: true,
+        taxRate: '18.00',
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+        // Campos existentes intactos.
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxableBase: '90.00',
+        taxAmount: '16.20',
+        total: '106.20',
+      });
+    });
+
+    it('R2-B5: documento con precios finales: descuento al cliente = Σ lineTotal - total (118.00 - 106.20 = 11.80)', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(
+        makeDetailRow({
+          pricesIncludeTax: true,
+          subtotal: new Prisma.Decimal('100.00'),
+          discountAmount: new Prisma.Decimal('10.00'),
+          taxableBase: new Prisma.Decimal('90.00'),
+          taxAmount: new Prisma.Decimal('16.20'),
+          total: new Prisma.Decimal('106.20'),
+          items: [
+            {
+              lineNumber: 1,
+              productSku: 'SKU-001',
+              description: 'Producto Fiscal',
+              unitCode: 'UND',
+              unitName: 'Unidad',
+              unitAbbreviation: 'und',
+              quantity: new Prisma.Decimal('1.000'),
+              unitPrice: new Prisma.Decimal('118.00'),
+              lineTotal: new Prisma.Decimal('118.00'),
+            },
+          ],
+        }),
+      );
+
+      const result = await service.findDetail(DOCUMENT_ID);
+
+      expect(result).toMatchObject({
+        pricesIncludeTax: true,
+        itemsTotal: '118.00',
+        customerDiscountAmount: '11.80',
+        discountAmount: '10.00',
+        taxableBase: '90.00',
+        taxAmount: '16.20',
+        total: '106.20',
+      });
     });
   });
 });
