@@ -4,16 +4,44 @@ import {
   assertQuantityAllowedForUnit,
   calculateLineTotal,
   calculateSubtotal,
+  calculateTaxInclusiveTotals,
   calculateTotal,
   deriveDeliveryStatus,
   deriveSalePaymentSummary,
   parseDiscountAmount,
   parseQuantity,
 } from './sale-calculator';
+import { calculateTaxInclusiveTotals as quoteCalculateTaxInclusiveTotals } from '../quotes/quote-calculator';
 
 const ZERO_TAX = new Prisma.Decimal(0);
 
 describe('sale-calculator (reexport de las primitivas Decimal de quote-calculator)', () => {
+  describe('calculateTaxInclusiveTotals (R2-B2)', () => {
+    it('es exactamente la misma función que la de quote-calculator (única fuente de verdad)', () => {
+      expect(calculateTaxInclusiveTotals).toBe(
+        quoteCalculateTaxInclusiveTotals,
+      );
+    });
+
+    it('118.00 al 18%: base 100.00, IGV 18.00, total 118.00', () => {
+      const result = calculateTaxInclusiveTotals({
+        lineTotals: [
+          calculateLineTotal(
+            new Prisma.Decimal(1),
+            new Prisma.Decimal('118.00'),
+          ),
+        ],
+        customerDiscount: new Prisma.Decimal(0),
+        taxEnabled: true,
+        taxRate: new Prisma.Decimal('18.00'),
+        maxDiscountPercent: new Prisma.Decimal('100.00'),
+      });
+      expect(result.taxableBase.toFixed(2)).toBe('100.00');
+      expect(result.taxAmount.toFixed(2)).toBe('18.00');
+      expect(result.total.toFixed(2)).toBe('118.00');
+    });
+  });
+
   describe('parseQuantity', () => {
     it('acepta un entero simple', () => {
       expect(parseQuantity('3').toString()).toBe('3');

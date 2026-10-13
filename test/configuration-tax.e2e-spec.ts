@@ -54,6 +54,10 @@ interface SafeQuoteBody {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: string;
+  pricesIncludeTax: boolean;
+  itemsTotal: string;
+  customerDiscountAmount: string;
+  taxableBase: string;
 }
 
 interface SafeSaleBody {
@@ -66,6 +70,13 @@ interface SafeSaleBody {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: string;
+  pricesIncludeTax: boolean;
+  itemsTotal: string;
+  customerDiscountAmount: string;
+  taxableBase: string;
+  paidAmount: string;
+  balanceDue: string;
+  paymentStatus: string;
 }
 
 describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
@@ -86,6 +97,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   const createdCustomerIds: string[] = [];
   const createdQuoteIds: string[] = [];
   const createdSaleIds: string[] = [];
+  const ownedCashSessionIds: string[] = [];
   const ownedConfigurationAuditLogIds: string[] = [];
 
   async function patchConfiguration(
@@ -134,10 +146,64 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
     return { status: response.status, body: response.body as SafeQuoteBody };
   }
 
+  let historicalQuoteCounter = 0;
+
+  /**
+   * R2-B3: cotización HISTÓRICA (pricesIncludeTax=false), insertada tal cual
+   * la habría persistido el código previo a R2: 1 × 100.00 antes de
+   * impuesto, descuento 10.00, IGV 18% sumado sobre 90.00 -> 16.20, total
+   * 106.20. Cumple las CHECK de cabecera y de línea.
+   */
+  async function createHistoricalQuote(): Promise<string> {
+    historicalQuoteCounter += 1;
+    const admin = await prisma.user.findUniqueOrThrow({
+      where: { username: E2E_ADMIN_USERNAME },
+      select: { id: true },
+    });
+    const row = await prisma.quote.create({
+      data: {
+        number: `COT-HIST-${Date.now()}-${historicalQuoteCounter}`,
+        customerId,
+        customerType: CustomerType.PERSON,
+        customerName: 'Cliente E2E Config IGV',
+        sellerId: admin.id,
+        issueDate: new Date('2026-01-01T00:00:00.000Z'),
+        expirationDate: new Date('2030-01-01T00:00:00.000Z'),
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('10.00'),
+        taxAmount: new Prisma.Decimal('16.20'),
+        total: new Prisma.Decimal('106.20'),
+        currencyCode: 'PEN',
+        taxEnabled: true,
+        taxRate: new Prisma.Decimal('18.00'),
+        pricesIncludeTax: false,
+        items: {
+          create: [
+            {
+              productId,
+              productSku: 'E2ECFGTAX-P1',
+              productName: 'Producto E2E Config IGV',
+              unitCode: 'E2ECFGTAXU',
+              unitName: 'Unidad E2E Config IGV',
+              unitAbbreviation: 'ecti',
+              quantity: new Prisma.Decimal('1'),
+              unitPrice: new Prisma.Decimal('100.00'),
+              lineTotal: new Prisma.Decimal('100.00'),
+            },
+          ],
+        },
+      },
+    });
+    createdQuoteIds.push(row.id);
+    return row.id;
+  }
+
   async function createDirectSale(body: {
     customerId: string;
     discountAmount?: string;
     items: { productId: string; quantity: string }[];
+    payment?: { method: string; amount: string; reference?: string };
+    payments?: { method: string; amount: string; reference?: string }[];
   }): Promise<{ status: number; body: SafeSaleBody }> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/sales')
@@ -279,6 +345,44 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
 
       const allSaleIds = [...createdSaleIds];
       if (allSaleIds.length > 0) {
+        // R2-B4: pagos iniciales propios (y sus asientos ORIGINAL/REVERSAL)
+        // antes de las ventas — Payment.saleId es RESTRICT hacia Sale.
+        const ownedPayments = await prisma.payment.findMany({
+          where: { saleId: { in: allSaleIds } },
+          select: { id: true },
+        });
+        const ownedPaymentIds = ownedPayments.map((payment) => payment.id);
+        if (ownedPaymentIds.length > 0) {
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+              eventType: 'REVERSAL',
+            },
+          });
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+            },
+          });
+          await prisma.auditLog.deleteMany({
+            where: { entityType: 'Payment', entityId: { in: ownedPaymentIds } },
+          });
+          await prisma.payment.deleteMany({
+            where: { id: { in: ownedPaymentIds } },
+          });
+        }
+
+        // REVERSAL primero (self-FK reversesEntryId hacia su ORIGINAL).
+        await prisma.accountingEntry.deleteMany({
+          where: {
+            sourceType: AccountingSourceType.SALE,
+            sourceId: { in: allSaleIds },
+            eventType: 'REVERSAL',
+          },
+        });
+
         const ownedEntries = await prisma.accountingEntry.findMany({
           where: {
             sourceType: AccountingSourceType.SALE,
@@ -323,6 +427,22 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
           where: { entityType: 'Sale', entityId: { in: allSaleIds } },
         });
         await prisma.sale.deleteMany({ where: { id: { in: allSaleIds } } });
+      }
+
+      // R2-B4: caja propia del admin (después de borrar sus pagos).
+      if (ownedCashSessionIds.length > 0) {
+        await prisma.cashSessionPaymentMethodSummary.deleteMany({
+          where: { cashSessionId: { in: ownedCashSessionIds } },
+        });
+        await prisma.auditLog.deleteMany({
+          where: {
+            entityType: 'CashSession',
+            entityId: { in: ownedCashSessionIds },
+          },
+        });
+        await prisma.cashSession.deleteMany({
+          where: { id: { in: ownedCashSessionIds } },
+        });
       }
 
       const allQuoteIds = [...createdQuoteIds];
@@ -472,7 +592,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   });
 
   describe('§40/§41 — Cálculo de IGV en cotización, incluida descuento total', () => {
-    it('subtotal 100.00, descuento 10.00 -> taxableBase 90.00, tax 16.20, total 106.20; persiste exacto', async () => {
+    it('R2-B3: precio final 100.00 con descuento al cliente 10.00 al 18% -> total 90.00, base 76.27, IGV 13.73 (desglosado, nunca sumado); persiste y responde exacto', async () => {
       await patchConfiguration({
         taxEnabled: true,
         taxRate: '18.00',
@@ -487,19 +607,150 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         items: [{ productId, quantity: '1' }],
       });
       expect(created.status).toBe(201);
-      expect(created.body.subtotal).toBe('100.00');
-      expect(created.body.discountAmount).toBe('10.00');
-      expect(created.body.taxAmount).toBe('16.20');
-      expect(created.body.total).toBe('106.20');
+      // total = 100.00 - 10.00 = 90.00; base = ROUND(90.00/1.18) = 76.27;
+      // IGV = 13.73; descuento persistido = ROUND(10.00/1.18) = 8.47;
+      // subtotal = 76.27 + 8.47 = 84.74.
+      expect(created.body).toMatchObject({
+        pricesIncludeTax: true,
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+        taxableBase: '76.27',
+        subtotal: '84.74',
+        discountAmount: '8.47',
+        taxAmount: '13.73',
+        total: '90.00',
+      });
 
       const fetched = await request(app.getHttpServer())
         .get(`/api/v1/quotes/${created.body.id}`)
         .set('Cookie', adminCookie);
-      const fetchedBody = fetched.body as SafeQuoteBody;
-      expect(fetchedBody.subtotal).toBe('100.00');
-      expect(fetchedBody.discountAmount).toBe('10.00');
-      expect(fetchedBody.taxAmount).toBe('16.20');
-      expect(fetchedBody.total).toBe('106.20');
+      expect(fetched.body).toMatchObject({
+        subtotal: '84.74',
+        discountAmount: '8.47',
+        taxAmount: '13.73',
+        total: '90.00',
+      });
+
+      // R2-B5: el PDF/HTML de la cotización muestra el descuento al cliente
+      // (bruto) y el IGV contenido en el total.
+      const printed = await request(app.getHttpServer())
+        .get(`/api/v1/quotes/${created.body.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('Total ítems: 100.00');
+      expect(printed.text).toContain('Descuento: 10.00');
+      expect(printed.text).toContain('Op. gravada: 76.27');
+      expect(printed.text).toContain('IGV (18%) incluido: 13.73');
+      expect(printed.text).toContain('Total a pagar: 90.00');
+      expect(printed.text).not.toContain('Descuento: 8.47');
+
+      // Invariantes que exigen las CHECK, sobre la fila persistida real.
+      const row = await prisma.quote.findUniqueOrThrow({
+        where: { id: created.body.id },
+      });
+      expect(
+        row.total.equals(
+          row.subtotal.minus(row.discountAmount).plus(row.taxAmount),
+        ),
+      ).toBe(true);
+      expect(row.pricesIncludeTax).toBe(true);
+    });
+
+    it('R2-B3: 118.00 al 18% -> base 100.00, IGV 18.00, total 118.00 (el cliente nunca paga 139.24)', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+      const product118 = await prisma.product.create({
+        data: {
+          sku: `E2ECFGTAX-P118-${Date.now()}`,
+          name: 'Producto 118 E2E Config IGV',
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId,
+          salePrice: new Prisma.Decimal('118.00'),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('10.000'),
+          status: ProductStatus.ACTIVE,
+        },
+      });
+      createdProductIds.push(product118.id);
+
+      const created = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        items: [{ productId: product118.id, quantity: '1' }],
+      });
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({
+        subtotal: '100.00',
+        discountAmount: '0.00',
+        taxAmount: '18.00',
+        total: '118.00',
+      });
+    });
+
+    it('R2-B3: IGV desactivado: el precio final es el total y el IGV es 0.00', async () => {
+      await patchConfiguration({ taxEnabled: false });
+      await trackLatestConfigurationAuditRow();
+
+      const created = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({
+        pricesIncludeTax: true,
+        subtotal: '100.00',
+        taxAmount: '0.00',
+        total: '100.00',
+      });
+    });
+
+    it('R2-B3: descuento máximo configurado (10%) sobre el precio final: 10.00 sobre 100.00 válido, 10.01 inválido', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '10.00',
+      });
+      await trackLatestConfigurationAuditRow();
+
+      const valid = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        discountAmount: '10.00',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(valid.status).toBe(201);
+
+      const invalid = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        discountAmount: '10.01',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(invalid.status).toBe(400);
+    });
+
+    it('cotización HISTÓRICA: GET conserva sus montos y su semántica (descuento al cliente = discountAmount)', async () => {
+      const historicalId = await createHistoricalQuote();
+      const fetched = await request(app.getHttpServer())
+        .get(`/api/v1/quotes/${historicalId}`)
+        .set('Cookie', adminCookie);
+      expect(fetched.status).toBe(200);
+      expect(fetched.body).toMatchObject({
+        pricesIncludeTax: false,
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+        taxableBase: '90.00',
+      });
     });
 
     it('descuento total (100%): taxAmount 0.00, total 0.00', async () => {
@@ -523,8 +774,12 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   });
 
   describe('§42 — Compatibilidad histórica del IGV en cotizaciones', () => {
-    it('cotización creada al 18% conserva su monto tras bajar la config a 10%; edición no comercial preserva, edición comercial recalcula', async () => {
-      await patchConfiguration({ taxEnabled: true, taxRate: '18.00' });
+    it('R2-B3 nueva: creada al 18% conserva su monto tras bajar la config a 10%; edición no comercial preserva, edición comercial recalcula al 10%', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
       await trackLatestConfigurationAuditRow();
 
       const created = await createQuote({
@@ -533,8 +788,9 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         items: [{ productId, quantity: '1' }],
       });
       expect(created.status).toBe(201);
-      expect(created.body.taxAmount).toBe('18.00');
-      expect(created.body.total).toBe('118.00');
+      // 100.00 final al 18%: base 84.75, IGV 15.25.
+      expect(created.body.taxAmount).toBe('15.25');
+      expect(created.body.total).toBe('100.00');
 
       await patchConfiguration({ taxRate: '10.00' });
       await trackLatestConfigurationAuditRow();
@@ -542,32 +798,143 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       const stillUnchanged = await request(app.getHttpServer())
         .get(`/api/v1/quotes/${created.body.id}`)
         .set('Cookie', adminCookie);
-      expect((stillUnchanged.body as SafeQuoteBody).taxAmount).toBe('18.00');
-      expect((stillUnchanged.body as SafeQuoteBody).total).toBe('118.00');
+      expect((stillUnchanged.body as SafeQuoteBody).taxAmount).toBe('15.25');
+      expect((stillUnchanged.body as SafeQuoteBody).total).toBe('100.00');
 
       const nonCommercial = await request(app.getHttpServer())
         .patch(`/api/v1/quotes/${created.body.id}`)
         .set('Cookie', adminCookie)
         .send({ notes: 'Actualización no comercial' });
       expect(nonCommercial.status).toBe(200);
-      expect((nonCommercial.body as SafeQuoteBody).taxAmount).toBe('18.00');
-      expect((nonCommercial.body as SafeQuoteBody).total).toBe('118.00');
+      expect(nonCommercial.body).toMatchObject({
+        subtotal: '84.75',
+        discountAmount: '0.00',
+        taxAmount: '15.25',
+        total: '100.00',
+      });
 
       const commercial = await request(app.getHttpServer())
         .patch(`/api/v1/quotes/${created.body.id}`)
         .set('Cookie', adminCookie)
         .send({ discountAmount: '1.00' });
       expect(commercial.status).toBe(200);
-      const commercialBody = commercial.body as SafeQuoteBody;
-      // taxableBase = 100.00 - 1.00 = 99.00; tax al 10% vigente = 9.90;
-      // total = taxableBase + tax = 99.00 + 9.90 = 108.90.
-      expect(commercialBody.taxAmount).toBe('9.90');
-      expect(commercialBody.total).toBe('108.90');
+      // total = 100.00 - 1.00 = 99.00; base al 10% vigente = 90.00; IGV 9.00;
+      // descuento persistido = ROUND(1.00/1.10) = 0.91; subtotal 90.91.
+      expect(commercial.body).toMatchObject({
+        itemsTotal: '100.00',
+        customerDiscountAmount: '1.00',
+        taxableBase: '90.00',
+        subtotal: '90.91',
+        discountAmount: '0.91',
+        taxAmount: '9.00',
+        total: '99.00',
+        taxRate: '10.00',
+      });
+    });
+
+    it('R2-B3 histórica: edición no comercial preserva EXACTO sus montos e indicador; edición comercial -> 409 sin cambios', async () => {
+      const historicalId = await createHistoricalQuote();
+      const before = await prisma.quote.findUniqueOrThrow({
+        where: { id: historicalId },
+        include: { items: true },
+      });
+
+      const nonCommercial = await request(app.getHttpServer())
+        .patch(`/api/v1/quotes/${historicalId}`)
+        .set('Cookie', adminCookie)
+        .send({ notes: 'Nota histórica', expirationDate: '2030-06-01' });
+      expect(nonCommercial.status).toBe(200);
+
+      for (const change of [
+        { discountAmount: '5.00' },
+        { items: [{ productId, quantity: '2' }] },
+      ]) {
+        const commercial = await request(app.getHttpServer())
+          .patch(`/api/v1/quotes/${historicalId}`)
+          .set('Cookie', adminCookie)
+          .send(change);
+        expect(commercial.status).toBe(409);
+        expect(JSON.stringify(commercial.body)).toContain(
+          'modelo de precios anterior',
+        );
+      }
+
+      const after = await prisma.quote.findUniqueOrThrow({
+        where: { id: historicalId },
+        include: { items: true },
+      });
+      expect(after.pricesIncludeTax).toBe(false);
+      expect(after.subtotal.equals(before.subtotal)).toBe(true);
+      expect(after.discountAmount.equals(before.discountAmount)).toBe(true);
+      expect(after.taxAmount.equals(before.taxAmount)).toBe(true);
+      expect(after.total.equals(before.total)).toBe(true);
+      expect(after.taxRate.equals(before.taxRate)).toBe(true);
+      expect(after.items.map((item) => item.lineTotal.toFixed(2))).toEqual(
+        before.items.map((item) => item.lineTotal.toFixed(2)),
+      );
+      expect(after.notes).toBe('Nota histórica');
+    });
+
+    it('R2-B3 histórica: aceptar y rechazar siguen funcionando', async () => {
+      const toAccept = await createHistoricalQuote();
+      const accepted = await request(app.getHttpServer())
+        .post(`/api/v1/quotes/${toAccept}/accept`)
+        .set('Cookie', adminCookie);
+      expect(accepted.status).toBe(200);
+      expect((accepted.body as { status: string }).status).toBe('ACCEPTED');
+
+      const toReject = await createHistoricalQuote();
+      const rejected = await request(app.getHttpServer())
+        .post(`/api/v1/quotes/${toReject}/reject`)
+        .set('Cookie', adminCookie);
+      expect(rejected.status).toBe(200);
+      expect((rejected.body as { status: string }).status).toBe('REJECTED');
     });
   });
 
   describe('§43 — IGV en venta DIRECTA + verificación de asiento contable', () => {
-    it('venta directa al 18%: monto persistido exacto y VAT_PAYABLE == taxAmount, asiento balanceado', async () => {
+    async function createTrackedProduct(salePrice: string): Promise<string> {
+      const product = await prisma.product.create({
+        data: {
+          sku: `E2ECFGTAX-P${salePrice}-${Date.now()}`,
+          name: `Producto ${salePrice} E2E Config IGV`,
+          productType: ProductType.PRODUCT,
+          categoryId,
+          unitId,
+          salePrice: new Prisma.Decimal(salePrice),
+          isInventoryTracked: true,
+          stockCurrent: new Prisma.Decimal('100.000'),
+          status: ProductStatus.ACTIVE,
+        },
+      });
+      createdProductIds.push(product.id);
+      return product.id;
+    }
+
+    async function saleEntryLines(saleId: string) {
+      const entry = await prisma.accountingEntry.findFirstOrThrow({
+        where: {
+          sourceType: AccountingSourceType.SALE,
+          sourceId: saleId,
+          eventType: 'ORIGINAL',
+        },
+        include: { lines: true },
+      });
+      const totalDebit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.debitAmount),
+        new Prisma.Decimal(0),
+      );
+      const totalCredit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.creditAmount),
+        new Prisma.Decimal(0),
+      );
+      const vatLine = entry.lines.find(
+        (line) => line.accountId === vatAccountId,
+      );
+      return { totalDebit, totalCredit, vatLine };
+    }
+
+    it('R2-B4: venta directa de un precio final 100.00 al 18%: el cliente paga 100.00 (IGV 15.25 desglosado), asiento balanceado', async () => {
       await patchConfiguration({
         taxEnabled: true,
         taxRate: '18.00',
@@ -580,37 +947,259 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         items: [{ productId, quantity: '1' }],
       });
       expect(sale.status).toBe(201);
-      expect(sale.body.subtotal).toBe('100.00');
-      expect(sale.body.taxAmount).toBe('18.00');
-      expect(sale.body.total).toBe('118.00');
+      expect(sale.body).toMatchObject({
+        pricesIncludeTax: true,
+        itemsTotal: '100.00',
+        customerDiscountAmount: '0.00',
+        taxableBase: '84.75',
+        subtotal: '84.75',
+        discountAmount: '0.00',
+        taxAmount: '15.25',
+        total: '100.00',
+      });
 
-      const entry = await prisma.accountingEntry.findFirst({
+      // R2-B5: la nota de venta impresa rotula el IGV CONTENIDO, nunca sumado.
+      const printed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.body.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(printed.status).toBe(200);
+      expect(printed.text).toContain('Precio unit. (inc. IGV)');
+      expect(printed.text).toContain('Op. gravada: 84.75');
+      expect(printed.text).toContain('IGV (18%) incluido: 15.25');
+      expect(printed.text).toContain('Total a pagar: 100.00');
+      expect(printed.text).not.toContain('118.00');
+
+      const { totalDebit, totalCredit, vatLine } = await saleEntryLines(
+        sale.body.id,
+      );
+      expect(vatLine?.creditAmount.toFixed(2)).toBe('15.25');
+      expect(vatLine?.debitAmount.toFixed(2)).toBe('0.00');
+      expect(totalDebit.equals(totalCredit)).toBe(true);
+      expect(totalDebit.toFixed(2)).toBe('100.00');
+    });
+
+    it('R2-B4: precio final 118.00 al 18% -> unitPrice/lineTotal 118.00, subtotal 100.00, IGV 18.00, total 118.00 (nunca 139.24)', async () => {
+      await patchConfiguration({ taxEnabled: true, taxRate: '18.00' });
+      await trackLatestConfigurationAuditRow();
+      const product118 = await createTrackedProduct('118.00');
+
+      const sale = await createDirectSale({
+        customerId,
+        items: [{ productId: product118, quantity: '1' }],
+      });
+      expect(sale.status).toBe(201);
+      expect(sale.body).toMatchObject({
+        subtotal: '100.00',
+        discountAmount: '0.00',
+        taxAmount: '18.00',
+        total: '118.00',
+      });
+      const items = (
+        sale.body as unknown as {
+          items: { unitPrice: string; lineTotal: string }[];
+        }
+      ).items;
+      expect(items[0]).toMatchObject({
+        unitPrice: '118.00',
+        lineTotal: '118.00',
+      });
+      const product = await prisma.product.findUniqueOrThrow({
+        where: { id: product118 },
+      });
+      expect(product.salePrice.toFixed(2)).toBe('118.00');
+    });
+
+    it('R2-B4: venta directa y cotización nueva en las mismas condiciones producen montos idénticos', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+      const product118 = await createTrackedProduct('118.00');
+      const body = {
+        customerId,
+        discountAmount: '11.80',
+        items: [
+          { productId: product118, quantity: '2' },
+          { productId, quantity: '1' },
+        ],
+      };
+
+      const quote = await createQuote({
+        ...body,
+        expirationDate: '2030-01-01',
+      });
+      const sale = await createDirectSale(body);
+      expect(quote.status).toBe(201);
+      expect(sale.status).toBe(201);
+
+      for (const field of [
+        'subtotal',
+        'discountAmount',
+        'taxAmount',
+        'total',
+        'itemsTotal',
+        'customerDiscountAmount',
+        'taxableBase',
+      ] as const) {
+        expect(sale.body[field]).toBe(quote.body[field]);
+      }
+      // 2 × 118.00 + 100.00 = 336.00 - 11.80 = 324.20 a pagar.
+      expect(sale.body.total).toBe('324.20');
+    });
+
+    it('R2-B4: lote R1 CASH 100 + YAPE 100 + CARD 50 sobre un total con IGV incluido de 250.00: PAID, caja y asientos correctos; la anulación revierte todo', async () => {
+      await patchConfiguration({
+        taxEnabled: true,
+        taxRate: '18.00',
+        maxDiscountPercent: '100.00',
+      });
+      await trackLatestConfigurationAuditRow();
+      const product250 = await createTrackedProduct('250.00');
+
+      const opened = await request(app.getHttpServer())
+        .post('/api/v1/cash-sessions/open')
+        .set('Cookie', adminCookie)
+        .send({ openingAmount: '0' });
+      expect(opened.status).toBe(201);
+      const sessionId = (opened.body as { id: string }).id;
+      ownedCashSessionIds.push(sessionId);
+
+      const sale = await createDirectSale({
+        customerId,
+        items: [{ productId: product250, quantity: '1' }],
+        payments: [
+          { method: 'CASH', amount: '100.00' },
+          { method: 'YAPE', amount: '100.00', reference: 'OP-R2B4' },
+          { method: 'CARD', amount: '50.00', reference: 'VCH-R2B4' },
+        ],
+      });
+      expect(sale.status).toBe(201);
+      // 250.00 final al 18%: base 211.86, IGV 38.14.
+      expect(sale.body).toMatchObject({
+        total: '250.00',
+        subtotal: '211.86',
+        taxAmount: '38.14',
+        paidAmount: '250.00',
+        balanceDue: '0.00',
+        paymentStatus: 'PAID',
+      });
+
+      const payments = await prisma.payment.findMany({
+        where: { saleId: sale.body.id },
+      });
+      expect(payments).toHaveLength(3);
+      expect(payments.every((p) => p.cashSessionId === sessionId)).toBe(true);
+      for (const payment of payments) {
+        const entry = await prisma.accountingEntry.findFirstOrThrow({
+          where: {
+            sourceType: AccountingSourceType.PAYMENT,
+            sourceId: payment.id,
+          },
+          include: { lines: { include: { account: true } } },
+        });
+        const debit = entry.lines.find((l) => l.debitAmount.greaterThan(0));
+        expect(debit?.account.systemKey).toBe(
+          payment.paymentMethodCode === 'CASH'
+            ? AccountingSystemKey.CASH
+            : AccountingSystemKey.BANK,
+        );
+        expect(debit?.debitAmount.equals(payment.amount)).toBe(true);
+      }
+      const { totalDebit, totalCredit, vatLine } = await saleEntryLines(
+        sale.body.id,
+      );
+      expect(vatLine?.creditAmount.toFixed(2)).toBe('38.14');
+      expect(totalDebit.equals(totalCredit)).toBe(true);
+
+      const current = await request(app.getHttpServer())
+        .get('/api/v1/cash-sessions/current')
+        .set('Cookie', adminCookie);
+      expect(current.body).toMatchObject({
+        liveCollectionsTotal: '250.00',
+        liveCashCollectionsTotal: '100.00',
+        liveExpectedCashAmount: '100.00',
+      });
+
+      const stockAfterSale = await prisma.product.findUniqueOrThrow({
+        where: { id: product250 },
+      });
+      expect(stockAfterSale.stockCurrent.toFixed(3)).toBe('99.000');
+
+      const cancelled = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.body.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'R2-B4: anulación de venta con IGV incluido' });
+      expect(cancelled.status).toBe(200);
+
+      const afterCancel = await prisma.payment.findMany({
+        where: { saleId: sale.body.id },
+      });
+      expect(afterCancel.every((p) => p.status === 'CANCELLED')).toBe(true);
+      for (const payment of afterCancel) {
+        const reversal = await prisma.accountingEntry.count({
+          where: {
+            sourceType: AccountingSourceType.PAYMENT,
+            sourceId: payment.id,
+            eventType: 'REVERSAL',
+          },
+        });
+        expect(reversal).toBe(1);
+      }
+      const saleReversal = await prisma.accountingEntry.count({
         where: {
           sourceType: AccountingSourceType.SALE,
           sourceId: sale.body.id,
+          eventType: 'REVERSAL',
         },
-        include: { lines: true },
       });
-      expect(entry).not.toBeNull();
-      if (entry === null) return;
+      expect(saleReversal).toBe(1);
+      const stockAfterCancel = await prisma.product.findUniqueOrThrow({
+        where: { id: product250 },
+      });
+      expect(stockAfterCancel.stockCurrent.toFixed(3)).toBe('100.000');
+    });
 
-      const vatLine = entry.lines.find(
-        (line) => line.accountId === vatAccountId,
-      );
-      expect(vatLine).toBeDefined();
-      expect(vatLine?.creditAmount.toFixed(2)).toBe('18.00');
-      expect(vatLine?.debitAmount.toFixed(2)).toBe('0.00');
+    it('R2-B4: sobrepago contra el total con IGV incluido (100.01 sobre 100.00) -> 409; lote fallido en el pago #2 -> sin venta, correlativo, pagos ni stock', async () => {
+      await patchConfiguration({ taxEnabled: true, taxRate: '18.00' });
+      await trackLatestConfigurationAuditRow();
 
-      const totalDebit = entry.lines.reduce(
-        (sum, line) => sum.plus(line.debitAmount),
-        new Prisma.Decimal(0),
-      );
-      const totalCredit = entry.lines.reduce(
-        (sum, line) => sum.plus(line.creditAmount),
-        new Prisma.Decimal(0),
-      );
-      expect(totalDebit.toFixed(2)).toBe(totalCredit.toFixed(2));
-      expect(totalDebit.toFixed(2)).toBe('118.00');
+      async function snapshot() {
+        const [sales, payments, sequence, stock] = await Promise.all([
+          prisma.sale.count({ where: { customerId } }),
+          prisma.payment.count(),
+          prisma.documentSequence.findUniqueOrThrow({
+            where: { documentType: DocumentType.SALE },
+          }),
+          prisma.product.findUniqueOrThrow({ where: { id: productId } }),
+        ]);
+        return {
+          sales,
+          payments,
+          sequence: sequence.currentNumber,
+          stock: stock.stockCurrent.toFixed(3),
+        };
+      }
+
+      const before = await snapshot();
+      const overpay = await createDirectSale({
+        customerId,
+        items: [{ productId, quantity: '1' }],
+        payment: { method: 'CASH', amount: '100.01' },
+      });
+      expect(overpay.status).toBe(409);
+
+      const failedBatch = await createDirectSale({
+        customerId,
+        items: [{ productId, quantity: '1' }],
+        payments: [
+          { method: 'CASH', amount: '50.00' },
+          { method: 'CARD', amount: '50.00' },
+        ],
+      });
+      expect(failedBatch.status).toBe(400);
+      expect(await snapshot()).toEqual(before);
     });
   });
 
@@ -659,10 +1248,12 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         items: [{ productId, quantity: '1' }],
       });
       expect(quote.status).toBe(201);
-      expect(quote.body.subtotal).toBe('100.00');
-      expect(quote.body.discountAmount).toBe('10.00');
-      expect(quote.body.taxAmount).toBe('16.20');
-      expect(quote.body.total).toBe('106.20');
+      expect(quote.body).toMatchObject({
+        subtotal: '84.74',
+        discountAmount: '8.47',
+        taxAmount: '13.73',
+        total: '90.00',
+      });
 
       await patchConfiguration({ taxRate: '10.00' });
       await trackLatestConfigurationAuditRow();
@@ -679,8 +1270,10 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       expect(sale.discountAmount).toBe(quote.body.discountAmount);
       expect(sale.taxAmount).toBe(quote.body.taxAmount);
       expect(sale.total).toBe(quote.body.total);
-      // Explícitamente NO el 10% vigente: 90.00*10/100 = 9.00, distinto de 16.20.
-      expect(sale.taxAmount).not.toBe('9.00');
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.pricesIncludeTax).toBe(true);
 
       const entry = await prisma.accountingEntry.findFirst({
         where: {
@@ -694,7 +1287,56 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       const vatLine = entry.lines.find(
         (line) => line.accountId === vatAccountId,
       );
-      expect(vatLine?.creditAmount.toFixed(2)).toBe('16.20');
+      expect(vatLine?.creditAmount.toFixed(2)).toBe('13.73');
+      const totalDebit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.debitAmount),
+        new Prisma.Decimal(0),
+      );
+      const totalCredit = entry.lines.reduce(
+        (sum, line) => sum.plus(line.creditAmount),
+        new Prisma.Decimal(0),
+      );
+      expect(totalDebit.equals(totalCredit)).toBe(true);
+    });
+
+    it('R2-B3 histórica: la conversión copia VERBATIM montos (16.20 al 18%) e indicador false, aunque la config sea otra', async () => {
+      await patchConfiguration({ taxEnabled: true, taxRate: '10.00' });
+      await trackLatestConfigurationAuditRow();
+      const historicalId = await createHistoricalQuote();
+
+      const conversion = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${historicalId}`)
+        .set('Cookie', adminCookie)
+        .send({});
+      expect(conversion.status).toBe(201);
+      const sale = conversion.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+
+      expect(sale).toMatchObject({
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        taxRate: '18.00',
+        // R2-B4: la respuesta de una venta HISTÓRICA conserva su semántica.
+        pricesIncludeTax: false,
+        itemsTotal: '100.00',
+        customerDiscountAmount: '10.00',
+        taxableBase: '90.00',
+      });
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.pricesIncludeTax).toBe(false);
+
+      const detail = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', adminCookie);
+      expect(detail.body).toMatchObject({
+        pricesIncludeTax: false,
+        customerDiscountAmount: '10.00',
+        total: '106.20',
+      });
     });
   });
 

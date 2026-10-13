@@ -27,6 +27,15 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * "18.00" -> "18", "12.50" -> "12.5": solo presentación textual de la tasa
+ * (sin aritmética de punto flotante). Duplicado deliberadamente, mismo
+ * criterio que escapeHtml.
+ */
+function formatRate(rate: string): string {
+  return rate.includes('.') ? rate.replace(/\.?0+$/, '') : rate;
+}
+
 const DOCUMENT_TYPE_TITLES: Record<FiscalDocumentType, string> = {
   [FiscalDocumentType.FACTURA]: 'FACTURA ELECTRÓNICA — DEMO',
   [FiscalDocumentType.BOLETA]: 'BOLETA ELECTRÓNICA — DEMO',
@@ -163,8 +172,8 @@ export class ElectronicDocumentRenderer {
         <th>Descripción</th>
         <th>Unidad</th>
         <th class="amount">Cantidad</th>
-        <th class="amount">Precio unitario</th>
-        <th class="amount">Total</th>
+        <th class="amount">${this.unitPriceHeader(doc)}</th>
+        <th class="amount">${this.lineTotalHeader(doc)}</th>
       </tr>
     </thead>
     <tbody>
@@ -172,13 +181,7 @@ export class ElectronicDocumentRenderer {
     </tbody>
   </table>
 
-  <div class="totals">
-    <p>Subtotal: ${escapeHtml(doc.subtotal)}</p>
-    <p>Descuento: ${escapeHtml(doc.discountAmount)}</p>
-    <p>Base imponible: ${escapeHtml(doc.taxableBase)}</p>
-    <p>IGV: ${escapeHtml(doc.taxAmount)}</p>
-    <p class="total-final">Total: ${escapeHtml(doc.total)}</p>
-  </div>
+  ${this.renderTotals(doc)}
 
   <h2>Proveedor electrónico</h2>
   <p><strong>Proveedor:</strong> ${escapeHtml(doc.providerCode)}</p>
@@ -186,6 +189,54 @@ export class ElectronicDocumentRenderer {
   ${providerMessageLine}
 </body>
 </html>`;
+  }
+
+  /** R2-B5: solo un documento con precios finales E IGV activo rotula "inc. IGV". */
+  private showsIncludedTax(doc: SafeElectronicDocument): boolean {
+    return doc.pricesIncludeTax && doc.taxEnabled;
+  }
+
+  private unitPriceHeader(doc: SafeElectronicDocument): string {
+    if (!doc.pricesIncludeTax) {
+      return 'Precio unitario';
+    }
+    return this.showsIncludedTax(doc)
+      ? 'Precio unitario (inc. IGV)'
+      : 'Precio unitario final';
+  }
+
+  private lineTotalHeader(doc: SafeElectronicDocument): string {
+    return this.showsIncludedTax(doc) ? 'Total (inc. IGV)' : 'Total';
+  }
+
+  /**
+   * R2-B5: SOLO presentación del snapshot fiscal persistido (y de los montos
+   * que el mapper deriva de él): nunca recalcula ni relee configuración. Un
+   * documento histórico (pricesIncludeTax=false) conserva EXACTAMENTE su
+   * formato original; uno con precios finales muestra el descuento al
+   * cliente (bruto), la base imponible persistida y el IGV CONTENIDO en el
+   * total, nunca sumado encima.
+   */
+  private renderTotals(doc: SafeElectronicDocument): string {
+    if (!doc.pricesIncludeTax) {
+      return `<div class="totals">
+    <p>Subtotal: ${escapeHtml(doc.subtotal)}</p>
+    <p>Descuento: ${escapeHtml(doc.discountAmount)}</p>
+    <p>Base imponible: ${escapeHtml(doc.taxableBase)}</p>
+    <p>IGV: ${escapeHtml(doc.taxAmount)}</p>
+    <p class="total-final">Total: ${escapeHtml(doc.total)}</p>
+  </div>`;
+    }
+    const taxLines = this.showsIncludedTax(doc)
+      ? `<p>Op. gravada: ${escapeHtml(doc.taxableBase)}</p>
+    <p>IGV (${escapeHtml(formatRate(doc.taxRate))}%) incluido: ${escapeHtml(doc.taxAmount)}</p>`
+      : `<p>Impuesto: ${escapeHtml(doc.taxAmount)}</p>`;
+    return `<div class="totals">
+    <p>Total ítems: ${escapeHtml(doc.itemsTotal)}</p>
+    <p>Descuento: ${escapeHtml(doc.customerDiscountAmount)}</p>
+    ${taxLines}
+    <p class="total-final">Total a pagar: ${escapeHtml(doc.total)}</p>
+  </div>`;
   }
 
   /**

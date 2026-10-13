@@ -138,6 +138,40 @@ export class ElectronicDocumentListItemResponseDto {
 
 /** Forma de detalle: agrega identidad del emisor, dirección del cliente, ítems y diagnóstico saneado del proveedor. */
 export class ElectronicDocumentResponseDto extends ElectronicDocumentListItemResponseDto {
+  @ApiProperty({
+    description:
+      'R2: semántica de precios del documento, copiada de la venta al emitir. true = unitPrice/lineTotal son precios FINALES al cliente y el IGV está incluido en ellos (taxableBase + taxAmount = total). false = documento histórico: unitPrice/lineTotal antes de impuesto e IGV sumado encima.',
+  })
+  pricesIncludeTax!: boolean;
+
+  @ApiProperty({
+    description:
+      'R2: si el IGV estaba activo al confirmar la venta de origen (snapshot congelado de la venta, nunca la configuración vigente). El documento fiscal no persiste este dato por sí mismo.',
+  })
+  taxEnabled!: boolean;
+
+  @ApiProperty({
+    type: String,
+    example: '18.00',
+    description:
+      'R2: tasa de IGV congelada de la venta de origen (nunca la configuración vigente).',
+  })
+  taxRate!: string;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'R2: Σ lineTotal de los ítems persistidos. Con pricesIncludeTax=true, importe a precio final antes del descuento; con false, importe antes de impuesto.',
+  })
+  itemsTotal!: string;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'R2: descuento que ve el cliente. Con pricesIncludeTax=true: itemsTotal - total. Con false (histórico): igual a discountAmount, aplicado antes de sumar el IGV. discountAmount sigue siendo el persistido antes de impuesto.',
+  })
+  customerDiscountAmount!: string;
+
   @ApiProperty({ example: '20100000001' })
   issuerTaxId!: string;
 

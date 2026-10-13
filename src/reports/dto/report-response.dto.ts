@@ -51,7 +51,8 @@ export class SalesByProductRowResponseDto {
   @ApiProperty({
     type: String,
     example: '1250.00',
-    description: 'Monto, 2 decimales fijos.',
+    description:
+      'Monto, 2 decimales fijos. Σ importe de línea AL CLIENTE (precio final), ANTES del descuento de documento (no es el total cobrado ni el ingreso contable neto). Ventas con precios finales: lineTotal tal cual. Ventas históricas sin IGV: lineTotal tal cual. Ventas históricas con IGV (líneas antes de impuesto): ROUND(lineTotal × (1 + tasa congelada de la venta / 100), 2) por línea; nunca la configuración vigente.',
   })
   totalSold!: string;
 }

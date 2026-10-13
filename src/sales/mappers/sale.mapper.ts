@@ -91,6 +91,7 @@ export const SALE_DETAIL_SELECT = {
   currencyCode: true,
   taxEnabled: true,
   taxRate: true,
+  pricesIncludeTax: true,
   paidAmount: true,
   balanceDue: true,
   items: { select: SALE_ITEM_SELECT },
@@ -211,11 +212,41 @@ export function toSafeSaleInventoryMovement(
  * inicial, así que `row.payments` estaría vacío por construcción — nunca
  * por error de estos dos únicos llamadores.
  */
+/**
+ * R2-B4: montos derivados para mostrar la venta según SU semántica de
+ * precios (mismo contrato que el detalle de Cotización, R2-B3). Nunca se
+ * persisten ni reinterpretan un documento:
+ *  - pricesIncludeTax=true: las líneas están a precio final; el descuento
+ *    al cliente es lo que se restó del total de ítems (itemsTotal - total).
+ *  - pricesIncludeTax=false (histórica): las líneas están antes de impuesto
+ *    y el descuento se aplicó antes de sumar el IGV, así que el descuento
+ *    que vio el cliente ES el discountAmount persistido.
+ * taxableBase = subtotal - discountAmount en ambos casos.
+ */
+function deriveDisplayAmounts(row: SaleDetailRow): {
+  itemsTotal: Prisma.Decimal;
+  customerDiscountAmount: Prisma.Decimal;
+  taxableBase: Prisma.Decimal;
+} {
+  const itemsTotal = row.items.reduce(
+    (accumulated, item) => accumulated.plus(item.lineTotal),
+    new Prisma.Decimal(0),
+  );
+  return {
+    itemsTotal,
+    customerDiscountAmount: row.pricesIncludeTax
+      ? itemsTotal.minus(row.total)
+      : row.discountAmount,
+    taxableBase: row.subtotal.minus(row.discountAmount),
+  };
+}
+
 export function toSafeSale(
   row: SaleDetailRow,
   movements: SaleInventoryMovementRow[],
   payments: PaymentSafeRow[] = row.payments,
 ): SafeSale {
+  const display = deriveDisplayAmounts(row);
   return {
     id: row.id,
     number: row.number,
@@ -241,6 +272,10 @@ export function toSafeSale(
     currencyCode: row.currencyCode,
     taxEnabled: row.taxEnabled,
     taxRate: row.taxRate.toFixed(2),
+    pricesIncludeTax: row.pricesIncludeTax,
+    itemsTotal: display.itemsTotal.toFixed(2),
+    customerDiscountAmount: display.customerDiscountAmount.toFixed(2),
+    taxableBase: display.taxableBase.toFixed(2),
     paidAmount: row.paidAmount.toFixed(2),
     balanceDue: row.balanceDue.toFixed(2),
 

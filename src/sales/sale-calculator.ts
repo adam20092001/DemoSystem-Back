@@ -33,6 +33,13 @@ export {
   calculateTaxableBase,
   calculateTaxAmount,
   calculateTotal,
+  // R2-B2: misma única fuente de verdad para documentos con precios
+  // finales (IGV incluido); ningún servicio la invoca todavía.
+  calculateTaxInclusiveTotals,
+} from '../quotes/quote-calculator';
+export type {
+  TaxInclusiveTotals,
+  TaxInclusiveTotalsInput,
 } from '../quotes/quote-calculator';
 
 export interface SalePaymentSummary {

@@ -35,6 +35,8 @@ export interface SaleFiscalSnapshot {
   taxAmount: Prisma.Decimal;
   total: Prisma.Decimal;
   currencyCode: string;
+  // R2-B1: semántica de precios de la venta, copiada VERBATIM al documento.
+  pricesIncludeTax: boolean;
 
   items: SaleFiscalSnapshotItem[];
 }

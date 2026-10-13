@@ -343,6 +343,8 @@ export class ElectronicDocumentsService {
         taxableBase,
         taxAmount: sale.taxAmount,
         total: sale.total,
+        // R2-B1: copia VERBATIM de la semántica de precios de la venta.
+        pricesIncludeTax: sale.pricesIncludeTax,
         issuedAt,
         items: {
           create: sale.items.map((item, index) => ({
@@ -410,6 +412,7 @@ export class ElectronicDocumentsService {
         taxAmount: true,
         total: true,
         currencyCode: true,
+        pricesIncludeTax: true,
         items: {
           select: {
             productSku: true,

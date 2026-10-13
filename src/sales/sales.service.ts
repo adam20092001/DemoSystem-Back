@@ -56,14 +56,9 @@ import {
   toSafeSaleListItem,
 } from './mappers/sale.mapper';
 import {
-  assertDiscountWithinConfiguredLimit,
-  assertDiscountWithinSubtotal,
   assertQuantityAllowedForUnit,
   calculateLineTotal,
-  calculateSubtotal,
-  calculateTaxableBase,
-  calculateTaxAmount,
-  calculateTotal,
+  calculateTaxInclusiveTotals,
   deriveDeliveryStatus,
   deriveSalePaymentSummary,
   parseDiscountAmount,
@@ -153,6 +148,8 @@ interface LockedQuoteRow {
   currencyCode: string;
   taxEnabled: boolean;
   taxRate: Prisma.Decimal;
+  // R2-B1: semántica de precios de la cotización, copiada VERBATIM a Sale.
+  pricesIncludeTax: boolean;
 }
 
 interface LockedSaleRow {
@@ -214,7 +211,8 @@ export class SalesService {
     }
     this.assertNoDuplicateProductIds(input.items.map((item) => item.productId));
 
-    const discountAmount = parseDiscountAmount(input.discountAmount);
+    // R2-B4: descuento sobre el importe FINAL que ve el cliente.
+    const customerDiscount = parseDiscountAmount(input.discountAmount);
     const parsedItems = input.items.map((item) => ({
       productId: item.productId,
       quantity: parseQuantity(item.quantity),
@@ -263,24 +261,23 @@ export class SalesService {
         };
       });
 
-      const subtotal = calculateSubtotal(lines.map((line) => line.lineTotal));
-      assertDiscountWithinSubtotal(discountAmount, subtotal);
-      assertDiscountWithinConfiguredLimit(
-        discountAmount,
-        subtotal,
-        settings.maxDiscountPercent,
-      );
-      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
-      // (subtotal - descuento), con el mismo snapshot de configuración ya
-      // leído arriba — nunca una segunda lectura de SettingsReader.
-      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
-      const taxAmount = calculateTaxAmount(
-        taxableBase,
-        settings.taxEnabled,
-        settings.taxRate,
-      );
-      const total = calculateTotal(subtotal, discountAmount, taxAmount);
+      // R2-B4: Product.salePrice es el precio FINAL al cliente (incluye IGV
+      // cuando aplica). El IGV se DESGLOSA a nivel de documento con la misma
+      // función que Cotizaciones (R2-B3), nunca se suma encima; el descuento
+      // recibido es sobre el importe final y se persiste su equivalente
+      // antes de impuesto. Mismo snapshot de configuración ya leído arriba
+      // (descuento máximo + IGV), nunca una segunda lectura.
+      const { subtotal, discountAmount, taxAmount, total } =
+        calculateTaxInclusiveTotals({
+          lineTotals: lines.map((line) => line.lineTotal),
+          customerDiscount,
+          taxEnabled: settings.taxEnabled,
+          taxRate: settings.taxRate,
+          maxDiscountPercent: settings.maxDiscountPercent,
+        });
 
+      // Pagos iniciales y reglas de deuda evaluados contra el total REAL
+      // (importe a pagar con IGV incluido).
       this.assertInitialPaymentsWithinTotal(initialPayments.totalAmount, total);
 
       const { paymentStatus, paidAmount, balanceDue } =
@@ -320,6 +317,9 @@ export class SalesService {
           currencyCode: settings.currencyCode,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
+          // R2-B4: montos calculados con precios finales (IGV incluido
+          // cuando aplica). Identifica la SEMÁNTICA, no si el IGV está activo.
+          pricesIncludeTax: true,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -552,6 +552,9 @@ export class SalesService {
           currencyCode: quote.currencyCode,
           taxEnabled: quote.taxEnabled,
           taxRate: quote.taxRate,
+          // R2-B1: copia VERBATIM de la semántica de precios de la
+          // cotización, igual que sus montos — nunca reinterpretada.
+          pricesIncludeTax: quote.pricesIncludeTax,
           paidAmount,
           balanceDue,
           confirmedAt,
@@ -1100,7 +1103,8 @@ export class SalesService {
         total,
         currency_code             AS "currencyCode",
         tax_enabled               AS "taxEnabled",
-        tax_rate                  AS "taxRate"
+        tax_rate                  AS "taxRate",
+        prices_include_tax        AS "pricesIncludeTax"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE

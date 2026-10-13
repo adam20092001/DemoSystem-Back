@@ -37,17 +37,13 @@ import {
 } from './mappers/quote.mapper';
 import {
   assertAcceptable,
-  assertDiscountWithinConfiguredLimit,
-  assertDiscountWithinSubtotal,
   assertEditable,
   assertQuantityAllowedForUnit,
   assertRejectable,
   buildEffectiveQuoteStatusCondition,
   calculateLineTotal,
   calculateSubtotal,
-  calculateTaxableBase,
-  calculateTaxAmount,
-  calculateTotal,
+  calculateTaxInclusiveTotals,
   effectiveStatus,
   parseDiscountAmount,
   parseQuantity,
@@ -91,6 +87,9 @@ interface LockedQuoteRow {
   subtotal: Prisma.Decimal;
   discountAmount: Prisma.Decimal;
   taxAmount: Prisma.Decimal;
+  total: Prisma.Decimal;
+  // R2-B3: semántica de precios con la que se calcularon los montos.
+  pricesIncludeTax: boolean;
 }
 
 /**
@@ -145,7 +144,8 @@ export class QuotesService {
       );
     }
 
-    const discountAmount = parseDiscountAmount(input.discountAmount);
+    // R2-B3: descuento sobre el importe FINAL que ve el cliente.
+    const customerDiscount = parseDiscountAmount(input.discountAmount);
     const notes = normalizeNotes(input.notes);
     const parsedItems = input.items.map((item) => ({
       productId: item.productId,
@@ -180,26 +180,22 @@ export class QuotesService {
       const customer = await this.loadAndValidateCustomer(tx, input.customerId);
       const lines = await this.loadAndValidateItems(tx, parsedItems);
 
+      // R2-B3: Product.salePrice es el precio FINAL al cliente (incluye IGV
+      // cuando aplica). lineTotal = ROUND(cantidad × precio final, 2), mismo
+      // criterio de siempre; el IGV se DESGLOSA a nivel de documento, nunca
+      // se suma encima. `discountAmount` recibido es el descuento sobre el
+      // importe final; se persiste su equivalente antes de impuesto.
       const lineTotals = lines.map((line) =>
         calculateLineTotal(line.quantity, line.salePrice),
       );
-      const subtotal = calculateSubtotal(lineTotals);
-      assertDiscountWithinSubtotal(discountAmount, subtotal);
-      assertDiscountWithinConfiguredLimit(
-        discountAmount,
-        subtotal,
-        settings.maxDiscountPercent,
-      );
-      // Fase 10, Bloque C: IGV a nivel de documento sobre la base imponible
-      // (subtotal - descuento), nunca extraído de Product.salePrice ni
-      // aplicado por ítem. taxEnabled=false -> 0.00 sin importar taxRate.
-      const taxableBase = calculateTaxableBase(subtotal, discountAmount);
-      const taxAmount = calculateTaxAmount(
-        taxableBase,
-        settings.taxEnabled,
-        settings.taxRate,
-      );
-      const total = calculateTotal(subtotal, discountAmount, taxAmount);
+      const { subtotal, discountAmount, taxAmount, total } =
+        calculateTaxInclusiveTotals({
+          lineTotals,
+          customerDiscount,
+          taxEnabled: settings.taxEnabled,
+          taxRate: settings.taxRate,
+          maxDiscountPercent: settings.maxDiscountPercent,
+        });
 
       const number = await this.documentSequenceService.next(
         tx,
@@ -229,6 +225,9 @@ export class QuotesService {
           currencyCode: settings.currencyCode,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
+          // R2-B3: montos calculados con precios finales (IGV incluido cuando
+          // aplica). Identifica la SEMÁNTICA, no si el IGV está activo.
+          pricesIncludeTax: true,
           notes,
           items: {
             create: lines.map((line, index) => ({
@@ -342,104 +341,27 @@ export class QuotesService {
         updatedFields.push('notes');
       }
 
-      let subtotal: Prisma.Decimal;
-      let itemCount: number;
-      if (parsedItems !== undefined) {
-        const lines = await this.loadAndValidateItems(tx, parsedItems);
-        const lineTotals = lines.map((line) =>
-          calculateLineTotal(line.quantity, line.salePrice),
-        );
-        subtotal = calculateSubtotal(lineTotals);
-        itemCount = lines.length;
-
-        await tx.quoteItem.deleteMany({ where: { quoteId: input.quoteId } });
-        data.items = {
-          create: lines.map((line, index) => ({
-            productId: line.productId,
-            productSku: line.productSku,
-            productName: line.productName,
-            unitCode: line.unitCode,
-            unitName: line.unitName,
-            unitAbbreviation: line.unitAbbreviation,
-            quantity: line.quantity,
-            unitPrice: line.salePrice,
-            lineTotal: lineTotals[index],
-          })),
-        };
-        updatedFields.push('items');
-      } else {
-        subtotal = existing.subtotal;
-        itemCount = await tx.quoteItem.count({
-          where: { quoteId: input.quoteId },
-        });
-      }
-
-      const effectiveDiscount = discountAmount ?? existing.discountAmount;
-      assertDiscountWithinSubtotal(effectiveDiscount, subtotal);
-
-      // Bloque 10, B (§14/§15 del plan aprobado): el máximo configurado
-      // solo se revalida cuando la actualización AFECTA realmente el par
-      // comercial — items presentes (el subtotal puede cambiar, se evalúa
-      // siempre que se reemplace el conjunto) o un discountAmount que
-      // difiere del ya persistido (reenviar el mismo valor nunca cuenta
-      // como cambio comercial nuevo). Una edición puramente no comercial
-      // (p. ej. solo notes/expirationDate) nunca vuelve a evaluar el
-      // descuento contra la configuración vigente, aunque esta se haya
-      // endurecido después de que la cotización ya existía — cero
-      // consultas a SettingsReader en ese caso.
-      const affectsCommercialTotals =
-        parsedItems !== undefined ||
-        (discountAmount !== undefined &&
-          !discountAmount.equals(existing.discountAmount));
-
-      let taxAmount: Prisma.Decimal;
-      if (affectsCommercialTotals) {
-        // Fase 10, Bloque C (§20 del plan aprobado): una modificación
-        // comercial siempre recalcula subtotal/descuento/impuesto/total con
-        // la configuración VIGENTE — nunca preserva parcialmente el
-        // impuesto histórico cuando el subtotal/descuento cambian. Una sola
-        // lectura de SettingsReader para todo (máximo configurado + IGV).
-        const settings = await this.settingsReader.getCurrent(tx);
-        assertDiscountWithinConfiguredLimit(
-          effectiveDiscount,
-          subtotal,
-          settings.maxDiscountPercent,
-        );
-        const taxableBase = calculateTaxableBase(subtotal, effectiveDiscount);
-        taxAmount = calculateTaxAmount(
-          taxableBase,
-          settings.taxEnabled,
-          settings.taxRate,
-        );
-        data.taxAmount = taxAmount;
-        updatedFields.push('taxAmount');
-        // Fase 11, Bloque B: el contexto de moneda/impuesto se actualiza EN
-        // EL MISMO momento que taxAmount, con el mismo snapshot de
-        // settings ya leído arriba — nunca por separado, nunca una
-        // segunda lectura. Sería inconsistente recalcular taxAmount con la
-        // configuración vigente pero dejar taxEnabled/taxRate desactualizados.
-        data.currencyCode = settings.currencyCode;
-        data.taxEnabled = settings.taxEnabled;
-        data.taxRate = settings.taxRate;
-        updatedFields.push('currencyCode', 'taxEnabled', 'taxRate');
-      } else {
-        // No comercial: el impuesto histórico se preserva EXACTO, sin
-        // releer configuración ni recalcular — aunque taxEnabled/taxRate
-        // hayan cambiado desde que la cotización se creó (§19 del plan
-        // aprobado, previene deriva histórica retroactiva). Por el mismo
-        // motivo, currencyCode/taxEnabled/taxRate tampoco se tocan aquí
-        // (Prisma conserva el valor ya persistido al no incluirlos en `data`).
-        taxAmount = existing.taxAmount;
-      }
-
-      const total = calculateTotal(subtotal, effectiveDiscount, taxAmount);
-
-      if (discountAmount !== undefined) {
-        data.discountAmount = discountAmount;
-        updatedFields.push('discountAmount');
-      }
-      data.subtotal = subtotal;
-      data.total = total;
+      // R2-B3: la semántica de precios de ESTA cotización decide cómo se
+      // interpreta y recalcula todo monto — nunca la configuración vigente.
+      const itemCount = existing.pricesIncludeTax
+        ? await this.applyTaxInclusiveMonetaryUpdate(
+            tx,
+            input.quoteId,
+            existing,
+            parsedItems,
+            discountAmount,
+            data,
+            updatedFields,
+          )
+        : await this.applyHistoricalMonetaryUpdate(
+            tx,
+            input.quoteId,
+            existing,
+            parsedItems,
+            discountAmount,
+            data,
+            updatedFields,
+          );
 
       const updated = await tx.quote.update({
         where: { id: input.quoteId },
@@ -637,6 +559,135 @@ export class QuotesService {
   }
 
   /**
+   * R2-B3: edición de una cotización calculada con precios FINALES
+   * (pricesIncludeTax=true). El total de ítems sale SIEMPRE de los lineTotal
+   * persistidos (o de los nuevos ítems si se reemplazan), nunca de
+   * `existing.subtotal` (que es antes de impuesto) ni del catálogo vigente
+   * para ítems no reemplazados. El descuento recibido se compara contra el
+   * descuento al cliente vigente (Σ lineTotal - total), nunca contra el
+   * `discountAmount` persistido (antes de impuesto). Sin cambio comercial
+   * real, ningún monto se recalcula ni se escribe. Retorna itemCount.
+   */
+  private async applyTaxInclusiveMonetaryUpdate(
+    tx: Prisma.TransactionClient,
+    quoteId: string,
+    existing: LockedQuoteRow,
+    parsedItems: { productId: string; quantity: Prisma.Decimal }[] | undefined,
+    requestedCustomerDiscount: Prisma.Decimal | undefined,
+    data: Prisma.QuoteUpdateInput,
+    updatedFields: string[],
+  ): Promise<number> {
+    const storedItems = await tx.quoteItem.findMany({
+      where: { quoteId },
+      select: { lineTotal: true },
+    });
+    const storedLineTotals = storedItems.map((item) => item.lineTotal);
+    const currentCustomerDiscount = calculateSubtotal(storedLineTotals).minus(
+      existing.total,
+    );
+
+    const affectsCommercialTotals =
+      parsedItems !== undefined ||
+      (requestedCustomerDiscount !== undefined &&
+        !requestedCustomerDiscount.equals(currentCustomerDiscount));
+    if (!affectsCommercialTotals) {
+      return storedItems.length;
+    }
+
+    let lineTotals = storedLineTotals;
+    let itemCount = storedItems.length;
+    if (parsedItems !== undefined) {
+      const lines = await this.loadAndValidateItems(tx, parsedItems);
+      lineTotals = lines.map((line) =>
+        calculateLineTotal(line.quantity, line.salePrice),
+      );
+      itemCount = lines.length;
+
+      await tx.quoteItem.deleteMany({ where: { quoteId } });
+      data.items = {
+        create: lines.map((line, index) => ({
+          productId: line.productId,
+          productSku: line.productSku,
+          productName: line.productName,
+          unitCode: line.unitCode,
+          unitName: line.unitName,
+          unitAbbreviation: line.unitAbbreviation,
+          quantity: line.quantity,
+          unitPrice: line.salePrice,
+          lineTotal: lineTotals[index],
+        })),
+      };
+      updatedFields.push('items');
+    }
+
+    // Mismo criterio que la Fase 10 (§20) y la Fase 11B: un cambio comercial
+    // recalcula con la configuración VIGENTE, una sola lectura para todo.
+    const settings = await this.settingsReader.getCurrent(tx);
+    const totals = calculateTaxInclusiveTotals({
+      lineTotals,
+      customerDiscount: requestedCustomerDiscount ?? currentCustomerDiscount,
+      taxEnabled: settings.taxEnabled,
+      taxRate: settings.taxRate,
+      maxDiscountPercent: settings.maxDiscountPercent,
+    });
+
+    data.subtotal = totals.subtotal;
+    data.discountAmount = totals.discountAmount;
+    data.taxAmount = totals.taxAmount;
+    data.total = totals.total;
+    data.currencyCode = settings.currencyCode;
+    data.taxEnabled = settings.taxEnabled;
+    data.taxRate = settings.taxRate;
+    if (requestedCustomerDiscount !== undefined) {
+      updatedFields.push('discountAmount');
+    }
+    updatedFields.push('taxAmount', 'currencyCode', 'taxEnabled', 'taxRate');
+    return itemCount;
+  }
+
+  /**
+   * R2-B3: edición de una cotización HISTÓRICA (pricesIncludeTax=false,
+   * calculada con IGV sumado sobre precios antes de impuesto). Sus montos
+   * nunca se recalculan ni se reinterpretan: cualquier cambio comercial
+   * (ítems, o un descuento distinto del persistido — en esta semántica el
+   * descuento recibido y el persistido significan lo mismo) responde 409.
+   * Solo se admiten las ediciones no comerciales (notes/expirationDate, o
+   * reenviar el mismo descuento), que preservan EXACTAMENTE los montos, el
+   * contexto de impuesto y el indicador. Retorna itemCount.
+   */
+  private async applyHistoricalMonetaryUpdate(
+    tx: Prisma.TransactionClient,
+    quoteId: string,
+    existing: LockedQuoteRow,
+    parsedItems: { productId: string; quantity: Prisma.Decimal }[] | undefined,
+    discountAmount: Prisma.Decimal | undefined,
+    data: Prisma.QuoteUpdateInput,
+    updatedFields: string[],
+  ): Promise<number> {
+    const affectsCommercialTotals =
+      parsedItems !== undefined ||
+      (discountAmount !== undefined &&
+        !discountAmount.equals(existing.discountAmount));
+    if (affectsCommercialTotals) {
+      throw new ConflictException(
+        'La cotización fue calculada con el modelo de precios anterior y sus montos no pueden modificarse; cree una nueva cotización',
+      );
+    }
+
+    // Mismo comportamiento previo de una edición no comercial: el descuento
+    // reenviado (idéntico) se reescribe tal cual y subtotal/total se
+    // reescriben con sus valores persistidos exactos.
+    if (discountAmount !== undefined) {
+      data.discountAmount = discountAmount;
+      updatedFields.push('discountAmount');
+    }
+    data.subtotal = existing.subtotal;
+    data.total = existing.total;
+
+    return tx.quoteItem.count({ where: { quoteId } });
+  }
+
+  /**
    * Único lock de la fila Quote (SELECT ... FOR UPDATE) usado por update(),
    * accept() y reject(): evita que una edición y una transición de estado
    * concurrentes sobre la misma cotización se pisen entre sí. Sin bloquear
@@ -655,7 +706,9 @@ export class QuotesService {
         expiration_date  AS "expirationDate",
         subtotal,
         discount_amount  AS "discountAmount",
-        tax_amount       AS "taxAmount"
+        tax_amount       AS "taxAmount",
+        total,
+        prices_include_tax AS "pricesIncludeTax"
       FROM quotes
       WHERE id = ${quoteId}::uuid
       FOR UPDATE

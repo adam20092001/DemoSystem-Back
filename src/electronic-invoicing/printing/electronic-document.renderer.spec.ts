@@ -27,6 +27,12 @@ function makeDoc(
     taxableBase: '100.00',
     taxAmount: '18.00',
     total: '118.00',
+    // Por defecto, documento HISTÓRICO (formato original sin cambios).
+    pricesIncludeTax: false,
+    taxEnabled: true,
+    taxRate: '18.00',
+    itemsTotal: '100.00',
+    customerDiscountAmount: '0.00',
     providerCode: 'MOCK',
     providerStatus: 'ACCEPTED',
     issuedAt: new Date('2026-03-15T15:30:00.000Z'),
@@ -434,6 +440,118 @@ describe('ElectronicDocumentRenderer', () => {
         makeDoc({ customerName: "Cliente O'Brien" }),
       );
       expect(html).toContain('Cliente O&#39;Brien');
+    });
+  });
+
+  describe('R2-B5 — presentación según la semántica de precios', () => {
+    /** Documento con precios finales al 18%: 118.00 con descuento al cliente 11.80. */
+    function taxInclusiveDoc(
+      overrides: Partial<SafeElectronicDocument> = {},
+    ): SafeElectronicDocument {
+      const base = makeDoc();
+      return makeDoc({
+        pricesIncludeTax: true,
+        taxEnabled: true,
+        taxRate: '18.00',
+        subtotal: '100.00',
+        discountAmount: '10.00',
+        taxableBase: '90.00',
+        taxAmount: '16.20',
+        total: '106.20',
+        itemsTotal: '118.00',
+        customerDiscountAmount: '11.80',
+        items: [
+          {
+            ...base.items[0],
+            quantity: '1.000',
+            unitPrice: '118.00',
+            lineTotal: '118.00',
+          },
+        ],
+        ...overrides,
+      });
+    }
+
+    it('precios finales + IGV: "inc. IGV", descuento BRUTO, base persistida, IGV contenido y total persistido', () => {
+      const html = renderer.render(taxInclusiveDoc());
+      expect(html).toContain('Precio unitario (inc. IGV)');
+      expect(html).toContain('Total (inc. IGV)');
+      expect(html).toContain('Total ítems: 118.00');
+      expect(html).toContain('Descuento: 11.80');
+      expect(html).toContain('Op. gravada: 90.00');
+      expect(html).toContain('IGV (18%) incluido: 16.20');
+      expect(html).toContain('Total a pagar: 106.20');
+      expect(html).not.toContain('Descuento: 10.00');
+      expect(html).not.toContain('Subtotal:');
+      // El aviso de demostración sigue siempre visible.
+      expect(html).toContain('NO ES UN COMPROBANTE FISCAL VÁLIDO');
+    });
+
+    it('sin doble IGV: 118.00 al 18% sin descuento muestra total 118.00 (nunca 139.24)', () => {
+      const html = renderer.render(
+        taxInclusiveDoc({
+          discountAmount: '0.00',
+          taxableBase: '100.00',
+          taxAmount: '18.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+        }),
+      );
+      expect(html).toContain('IGV (18%) incluido: 18.00');
+      expect(html).toContain('Total a pagar: 118.00');
+      expect(html).not.toContain('139.24');
+    });
+
+    it('precios finales con IGV desactivado: etiqueta neutra, impuesto 0.00, sin base gravada', () => {
+      const html = renderer.render(
+        taxInclusiveDoc({
+          taxEnabled: false,
+          subtotal: '118.00',
+          discountAmount: '0.00',
+          taxableBase: '118.00',
+          taxAmount: '0.00',
+          total: '118.00',
+          customerDiscountAmount: '0.00',
+        }),
+      );
+      expect(html).toContain('Precio unitario final');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Op. gravada');
+      expect(html).toContain('Impuesto: 0.00');
+    });
+
+    it('tasa con decimales (12.5%)', () => {
+      const html = renderer.render(
+        taxInclusiveDoc({
+          taxRate: '12.50',
+          subtotal: '100.00',
+          discountAmount: '0.00',
+          taxableBase: '100.00',
+          taxAmount: '12.50',
+          total: '112.50',
+          itemsTotal: '112.50',
+          customerDiscountAmount: '0.00',
+        }),
+      );
+      expect(html).toContain('IGV (12.5%) incluido: 12.50');
+    });
+
+    it('documento HISTÓRICO: formato y montos originales sin cambios', () => {
+      const html = renderer.render(makeDoc());
+      expect(html).toContain('Precio unitario</th>');
+      expect(html).toContain('Subtotal: 100.00');
+      expect(html).toContain('Base imponible: 100.00');
+      expect(html).toContain('IGV: 18.00');
+      expect(html).toContain('Total: 118.00');
+      expect(html).not.toContain('inc. IGV');
+      expect(html).not.toContain('Total a pagar');
+    });
+
+    it('no muta el documento recibido', () => {
+      const doc = taxInclusiveDoc();
+      const before = JSON.stringify(doc);
+      renderer.render(doc);
+      expect(JSON.stringify(doc)).toBe(before);
     });
   });
 });

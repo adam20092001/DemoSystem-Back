@@ -57,6 +57,16 @@ export interface SafeElectronicDocumentItem {
  * interna futura), ni ningún campo crudo del proveedor.
  */
 export interface SafeElectronicDocument extends SafeElectronicDocumentListItem {
+  /** R2-B5: false = histórico (IGV sumado); true = precios finales con IGV incluido. */
+  pricesIncludeTax: boolean;
+  /** R2-B5: contexto de impuesto congelado de la venta de origen (nunca CompanySettings vigente). */
+  taxEnabled: boolean;
+  taxRate: string;
+  /** R2-B5: Σ lineTotal de los ítems persistidos. */
+  itemsTotal: string;
+  /** R2-B5: descuento que vio el cliente (itemsTotal - total si pricesIncludeTax; = discountAmount si es histórico). */
+  customerDiscountAmount: string;
+
   issuerTaxId: string;
   issuerBusinessName: string;
   issuerAddress: string | null;
