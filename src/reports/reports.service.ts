@@ -181,6 +181,24 @@ export class ReportsService {
     }
     const whereClause = Prisma.join(conditions, ' AND ');
 
+    // R2-B6: totalSold = Σ importe de línea AL CLIENTE (precio final), ANTES
+    // del descuento de documento — una sola interpretación para documentos
+    // nuevos e históricos, evaluada línea por línea y luego agregada:
+    //  - pricesIncludeTax=true: line_total ya es precio final (nunca se le
+    //    vuelve a sumar IGV).
+    //  - histórico sin IGV: line_total ya era lo que vio el cliente.
+    //  - histórico con IGV (line_total antes de impuesto): se deriva el
+    //    importe bruto con la tasa CONGELADA de esa venta (nunca la
+    //    configuración vigente), ROUND(line_total × (1 + tasa/100), 2) —
+    //    mismo redondeo HALF_UP a 2 decimales que la CHECK de línea
+    //    (ROUND de NUMERIC). Derivación de reporte: nada se persiste.
+    // Aritmética NUMERIC exacta de PostgreSQL, sin punto flotante.
+    const customerFacingLineTotal = Prisma.sql`
+      CASE
+        WHEN s.prices_include_tax OR NOT s.tax_enabled THEN si.line_total
+        ELSE ROUND(si.line_total * (1 + s.tax_rate / 100), 2)
+      END`;
+
     const rows = await this.prisma.$queryRaw<SalesByProductRawRow[]>(Prisma.sql`
       SELECT
         p.id   AS "productId",
@@ -189,14 +207,14 @@ export class ReportsService {
         c.id   AS "categoryId",
         c.name AS "categoryName",
         SUM(si.quantity)   AS "quantitySold",
-        SUM(si.line_total) AS "totalSold"
+        SUM(${customerFacingLineTotal}) AS "totalSold"
       FROM sale_items si
       JOIN sales s ON s.id = si.sale_id
       JOIN products p ON p.id = si.product_id
       JOIN categories c ON c.id = p.category_id
       WHERE ${whereClause}
       GROUP BY p.id, p.sku, p.name, c.id, c.name
-      ORDER BY SUM(si.line_total) DESC, p.id ASC
+      ORDER BY SUM(${customerFacingLineTotal}) DESC, p.id ASC
       LIMIT ${limit} OFFSET ${skip}
     `);
 

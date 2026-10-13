@@ -554,6 +554,15 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
             },
           });
         }
+        // REVERSAL primero (self-FK reversesEntryId RESTRICT hacia su
+        // ORIGINAL): una venta anulada en la suite (R2-B6) tiene ambos.
+        await prisma.accountingEntry.deleteMany({
+          where: {
+            sourceType: AccountingSourceType.SALE,
+            sourceId: { in: createdSaleIds },
+            eventType: 'REVERSAL',
+          },
+        });
         await prisma.accountingEntry.deleteMany({
           where: {
             sourceType: AccountingSourceType.SALE,
@@ -1774,6 +1783,70 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       });
       expect(after.pricesIncludeTax).toBe(false);
       expect(after.total.toFixed(2)).toBe('106.20');
+    });
+
+    it('R2-B6: con la venta ANULADA después de emitir, el comprobante se lee e imprime con el contexto fiscal congelado de la venta (nunca CompanySettings vigente)', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(issued.status).toBe(201);
+      const docId = (issued.body as { id: string }).id;
+      createdDocumentIds.push(docId);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+
+      const cancelled = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'R2-B6: anulación posterior a la emisión' });
+      expect(cancelled.status).toBe(200);
+
+      // Cambiar la configuración vigente no debe alterar el contexto fiscal
+      // del documento (la suite restaura su configuración en afterAll).
+      const settingsBefore = await prisma.companySettings.findUniqueOrThrow({
+        where: { id: companySettingsId },
+      });
+      await prisma.companySettings.update({
+        where: { id: companySettingsId },
+        data: { taxEnabled: true, taxRate: new Prisma.Decimal('10.00') },
+      });
+      try {
+        const detail = await getDoc(adminCookie, docId);
+        expect(detail.status).toBe(200);
+        expect(detail.body).toMatchObject({
+          pricesIncludeTax: saleRow.pricesIncludeTax,
+          taxEnabled: saleRow.taxEnabled,
+          taxRate: saleRow.taxRate.toFixed(2),
+          total: saleRow.total.toFixed(2),
+        });
+        const printed = await printDoc(adminCookie, docId);
+        expect(printed.status).toBe(200);
+        expect(printed.text).not.toContain('10%');
+        expect(printed.text).toContain(
+          `Total a pagar: ${saleRow.total.toFixed(2)}`,
+        );
+      } finally {
+        await prisma.companySettings.update({
+          where: { id: companySettingsId },
+          data: {
+            taxEnabled: settingsBefore.taxEnabled,
+            taxRate: settingsBefore.taxRate,
+          },
+        });
+      }
+
+      const saleAfter = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleAfter.status).toBe('CANCELLED');
+      expect(saleAfter.taxEnabled).toBe(saleRow.taxEnabled);
+      expect(saleAfter.taxRate.equals(saleRow.taxRate)).toBe(true);
     });
 
     it('el listado de comprobantes no cambia de forma (sin campos de R2-B5)', async () => {

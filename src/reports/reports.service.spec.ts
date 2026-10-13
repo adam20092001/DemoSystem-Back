@@ -176,12 +176,33 @@ describe('ReportsService', () => {
       await service.salesByProduct({}, RoleName.MANAGEMENT);
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
-      expect(rowsSql.text).toContain(
-        'ORDER BY SUM(si.line_total) DESC, p.id ASC',
-      );
+      const text = rowsSql.text.replace(/\s+/g, ' ');
+      expect(text).toMatch(/ORDER BY SUM\( CASE .* END\) DESC, p\.id ASC/);
       expect(rowsSql.text).toContain(
         'GROUP BY p.id, p.sku, p.name, c.id, c.name',
       );
+    });
+
+    it('R2-B6: totalSold usa el importe de línea AL CLIENTE con la tasa CONGELADA de cada venta (mismo CASE en SUM y ORDER BY)', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0 }]);
+
+      await service.salesByProduct({}, RoleName.ADMIN);
+
+      const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+      const text = rowsSql.text.replace(/\s+/g, ' ');
+      const lineExpression =
+        'CASE WHEN s.prices_include_tax OR NOT s.tax_enabled THEN si.line_total ELSE ROUND(si.line_total * (1 + s.tax_rate / 100), 2) END';
+      expect(text).toContain(`SUM( ${lineExpression}) AS "totalSold"`);
+      expect(text).toContain(`ORDER BY SUM( ${lineExpression}) DESC`);
+      // Nunca la configuración vigente ni un SUM directo de line_total.
+      expect(text).not.toContain('company_settings');
+      expect(text).not.toContain('SUM(si.line_total)');
+      // quantitySold no cambia.
+      expect(text).toContain('SUM(si.quantity) AS "quantitySold"');
+      // Sin join a pagos: varios pagos por venta nunca multiplican líneas.
+      expect(text).not.toContain('payments');
     });
 
     it('serializa quantitySold a 3 decimales y totalSold a 2, total como número de grupos', async () => {
