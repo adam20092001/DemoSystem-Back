@@ -17,6 +17,13 @@ Pagos (métodos de pago administrables por ADMIN) y cuentas por cobrar ·
 cobrar) · Contabilidad básica · Reportes y dashboard · Configuración y
 correlativos · Auditoría · **Facturación electrónica (demostración)**.
 
+Requerimientos post-MVP ya integrados: **pagos iniciales múltiples** al
+confirmar una venta (R1), **precios de catálogo con IGV incluido** (R2) y
+**lookup de usuarios** para los filtros de vendedor/cobrador (R3). Ver
+[Pagos iniciales](#pagos-iniciales-al-confirmar-una-venta),
+[Precios con IGV incluido](#precios-con-igv-incluido) y
+[Filtros de vendedor y cobrador](#filtros-de-vendedor-y-cobrador).
+
 > ⚠️ **Facturación electrónica = demostración, no SUNAT real.** El único
 > proveedor implementado es `MockElectronicInvoicingProvider`
 > (`ELECTRONIC_INVOICING_PROVIDER=mock`). Un documento en estado `ACCEPTED`
@@ -193,26 +200,32 @@ Swagger.
    (`GET /api/v1/products`, `GET /api/v1/customers`,
    `GET /api/v1/inventory/products/:productId/stock`).
 6. **Crear una cotización** (`POST /api/v1/quotes`) usando el cliente
-   `DEMO-CUST-COMPANY` y algunos de los productos sembrados.
-7. **Convertir la cotización en venta**
+   `DEMO-CUST-COMPANY` y algunos de los productos sembrados. Los precios del
+   catálogo son finales (IGV incluido): el detalle devuelve `total`,
+   `taxableBase`, `taxAmount` y `customerDiscountAmount` ya calculados.
+7. **Abrir la caja del usuario** (`POST /api/v1/cash-sessions/open`, con
+   `openingAmount`) — sin una caja `OPEN` propia, todo cobro responde 409.
+8. **Convertir la cotización en venta**
    (`POST /api/v1/sales/from-quote/:quoteId`) — la cotización nunca
-   descuenta stock; la venta confirmada sí.
-8. **Registrar un pago** (`POST /api/v1/sales/:saleId/payments`).
-9. **Revisar contabilidad y cuentas por cobrar**
-   (`GET /api/v1/accounting/entries`, `GET /api/v1/accounts-receivable`) —
-   los asientos se generan automáticamente al confirmar la venta/pago.
-10. **Revisar dashboard y reportes**
+   descuenta stock; la venta confirmada sí. Opcionalmente con un pago inicial
+   (`payment`) o varios (`payments[]`).
+9. **Registrar un pago** sobre el saldo pendiente
+   (`POST /api/v1/sales/:saleId/payments`).
+10. **Revisar contabilidad y cuentas por cobrar**
+    (`GET /api/v1/accounting/entries`, `GET /api/v1/accounts-receivable`) —
+    los asientos se generan automáticamente al confirmar la venta/pago.
+11. **Revisar dashboard y reportes**
     (`GET /api/v1/dashboard`, `GET /api/v1/reports/...`).
-11. **Emitir FACTURA** sobre esa venta
+12. **Emitir FACTURA** sobre esa venta
     (`POST /api/v1/sales/:saleId/electronic-documents` con
     `documentType: "FACTURA"`, `series: "F001"` — la serie sembrada por
     `npm run db:seed`). Requiere un cliente identificado con RUC: por eso el
     paso 6 usa `DEMO-CUST-COMPANY`, no "Público general".
-12. **Abrir la representación imprimible**
+13. **Abrir la representación imprimible**
     (`GET /api/v1/electronic-documents/:id/print`) — incluye el aviso
     obligatorio de que es una simulación (MOCK/DEMO), nunca un comprobante
     fiscal real.
-13. Opcionalmente, **cambiar el rol activo a SELLER, WAREHOUSE o MANAGEMENT**
+14. Opcionalmente, **cambiar el rol activo a SELLER, WAREHOUSE o MANAGEMENT**
     (mismo usuario, mismo `POST /api/v1/auth/switch-role`) para comprobar en
     vivo las diferencias de autorización — por ejemplo, `WAREHOUSE` no puede
     ver reportes/dashboard, y solo `ADMIN` puede reintentar un documento
@@ -269,6 +282,64 @@ fijo del backend:
   método, no una regla fija por código — el backend la valida al momento del
   cobro contra la configuración vigente de ese método.
 
+## Pagos iniciales al confirmar una venta
+
+`POST /api/v1/sales` y `POST /api/v1/sales/from-quote/:quoteId` aceptan,
+de forma opcional y **excluyente**:
+
+- `payment`: un único pago inicial (`method`, `amount`, `reference`
+  opcional), o
+- `payments`: un lote de **1 a 10** pagos iniciales (se admiten métodos
+  repetidos).
+
+Enviar ambos responde `400`. El lote se registra en la **misma transacción**
+que confirma la venta y en el orden recibido: si cualquier pago falla (método
+inactivo, referencia faltante, caja no abierta, etc.), no se confirma nada.
+La suma de los pagos no puede superar el total (`409`); una venta a "Público
+general" o a un cliente bloqueado exige que la suma salde el total. Cada pago
+exige la caja `OPEN` del cobrador (ver [Caja](#caja--cash-sessions)).
+
+## Precios con IGV incluido
+
+- El `salePrice` de cada producto es el **precio final al cliente**: incluye
+  el IGV cuando `taxEnabled=true` en la configuración. El backend nunca suma
+  IGV encima del precio de catálogo.
+- Ejemplo con IGV 18 %: precio `118.00` → `total` 118.00, `taxableBase`
+  100.00, `taxAmount` 18.00.
+- El `discountAmount` que se **envía** al crear o editar una cotización o
+  venta es el descuento **al cliente** sobre el precio final. El
+  `discountAmount` que se **devuelve/persiste** en documentos nuevos es ese
+  descuento sin IGV; el descuento que vio el cliente se expone en
+  `customerDiscountAmount`.
+- Los detalles de cotización, venta y comprobante incluyen los campos
+  aditivos `pricesIncludeTax`, `itemsTotal`, `customerDiscountAmount` y
+  `taxableBase` (los listados no cambian de forma).
+- **Documentos históricos** (`pricesIncludeTax=false`, anteriores a la
+  migración `20261012020000_add_prices_include_tax_snapshot`) conservan su
+  semántica original: líneas antes de impuesto e IGV sumado al final. Sus
+  montos nunca se reescriben; una cotización histórica solo admite cambios no
+  comerciales (vigencia, notas) — cambiar ítems o descuento responde `409`.
+  Convertir una cotización en venta conserva sus montos y su
+  `pricesIncludeTax` originales.
+- Reporte `GET /api/v1/reports/sales-by-product`: `totalSold` es el importe
+  de línea al cliente **antes** del descuento de documento; para ventas
+  históricas con IGV se deriva con la tasa congelada de cada venta, nunca con
+  la configuración vigente.
+
+## Filtros de vendedor y cobrador
+
+`GET /api/v1/users/lookup` (rol activo `ADMIN`, `SELLER` o `MANAGEMENT`)
+devuelve la identidad mínima de **todos** los usuarios (`id`, `username`,
+`firstName`, `lastName`, `status`, incluidos inactivos/bloqueados), sin
+paginación ni datos sensibles. Sirve para alimentar los filtros que el
+backend ya aplica:
+
+- `sellerId` en `GET /api/v1/sales`, `GET /api/v1/quotes`,
+  `GET /api/v1/accounts-receivable` y en los reportes `sales-by-seller` y
+  `quotes-by-status`.
+- `createdByUserId` (cobrador) en `GET /api/v1/payments` y en el reporte
+  `payments-by-method`.
+
 ## Caja / Cash Sessions
 
 Cada cobrador (ADMIN o SELLER) opera con su propia caja (`CashSession`),
@@ -317,6 +388,14 @@ npm run db:logs    # Logs en vivo de pos_db
 npm run db:seed        # Seed de infraestructura (seguro en cualquier entorno)
 npm run db:seed:demo   # Seed OPCIONAL de demostración (nunca en producción)
 ```
+
+El historial tiene **15 migraciones**; la última,
+`20261012020000_add_prices_include_tax_snapshot` (R2), agrega
+`prices_include_tax` a `quotes`, `sales` y `electronic_documents` (filas
+existentes en `false`, sin DEFAULT final). La versión actual de la
+aplicación **requiere** esa migración: en una base existente, aplicarla con
+`npm run prisma:deploy` (tras un backup) antes de arrancar. Para verificar el
+estado sin modificar nada: `npx prisma migrate status`.
 
 ### Base de datos de pruebas (pos_db_test)
 

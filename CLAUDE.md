@@ -76,8 +76,8 @@ Reglas de capas:
 6. **Productos** — bienes inventariables y servicios no inventariables.
 7. **Inventario** — movimientos de stock (entradas, salidas, ajustes) y saldo actual.
 8. **Clientes** — incluye el cliente especial **Público general**.
-9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock.
-10. **Ventas / POS** — registro y confirmación de ventas.
+9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
+10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código.
 12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar.
@@ -117,6 +117,15 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - Las **ventas confirmadas no se editan**: se **anulan**.
 - Los **pagos no se editan**: se **anulan con motivo** obligatorio.
 - La **anulación de una venta debe revertir stock y contabilidad**.
+- **Pagos iniciales (R1)**: `payment` y `payments[]` son excluyentes (enviar ambos → 400); `payments[]` admite de 1 a 10 elementos (`MAX_INITIAL_PAYMENTS`), con métodos repetidos. Todo el lote pasa por `PaymentEngine` en la misma transacción que confirma la venta y en el orden recibido: si un pago falla, no se confirma nada. La suma no puede superar el total (409); Público general o cliente bloqueado exigen que la suma salde el total.
+
+**Precios e IGV (R2)**
+- El `salePrice` del catálogo es el **precio final al cliente** (IGV incluido cuando el IGV está activo). Nunca se suma IGV encima.
+- Cada `Quote`, `Sale` y `ElectronicDocument` guarda `pricesIncludeTax` (snapshot, sin `@default`): `true` en documentos nuevos; `false` en todo documento previo a R2 (semántica histórica: líneas antes de impuesto, IGV sumado a nivel de documento).
+- Cálculo con precios finales (`calculateTaxInclusiveTotals`, `Prisma.Decimal`, HALF_UP a 2 decimales): `total = Σ lineTotal − descuento al cliente`; `taxableBase = ROUND(total / (1 + tasa/100), 2)`; `taxAmount = total − taxableBase` (residual); `discountAmount` persistido = descuento al cliente sin IGV. Las CHECK de base de datos no cambian.
+- El descuento enviado al crear/editar es el **descuento al cliente** sobre el precio final; sus límites (≤ total de ítems y ≤ `maxDiscountPercent`) se evalúan sobre ese importe.
+- **Documentos históricos**: sus montos nunca se reescriben ni se reinterpretan. Una cotización histórica solo admite ediciones no comerciales (vigencia, notas); cambiar ítems o descuento responde 409. La conversión de cotización a venta copia `pricesIncludeTax` y los montos tal cual.
+- Los detalles de cotización, venta y comprobante exponen campos aditivos derivados: `pricesIncludeTax`, `itemsTotal`, `customerDiscountAmount` y `taxableBase`.
 
 **Documentos y datos**
 - Los **correlativos se generan en el backend, dentro de una transacción** (nunca en el cliente, nunca fuera de transacción).
@@ -252,7 +261,27 @@ automáticamente). Máquina de 3 estados exacta: `OPEN` → `CLOSED` (sin
 descuadre) o `OPEN` → `PENDING_APPROVAL` → `CLOSED`/`OPEN` (aprobación/rechazo
 de un descuadre) — nunca `REJECTED`/`CANCELLED`/`APPROVED` como estado, ni
 reapertura desde `CLOSED`. Ver §6 para las reglas críticas exactas.
-Migraciones totales: **14**.
+
+Requerimientos post-MVP integrados en `main` después de Caja:
+
+- **R3** (PR #19) — `GET /api/v1/users/lookup` (roles activos `ADMIN`,
+  `SELLER`, `MANAGEMENT`): identidad mínima (`id`, `username`, `firstName`,
+  `lastName`, `status`) de todos los usuarios, incluidos inactivos/bloqueados,
+  sin paginación y sin email/roles, para alimentar los filtros backend ya
+  existentes de vendedor (`sellerId` en ventas, cotizaciones, cuentas por
+  cobrar y reportes) y de cobrador (`createdByUserId` en pagos y en el reporte
+  de pagos por método).
+- **R1** (PR #20) — pagos iniciales múltiples (`payments[]`) al confirmar una
+  venta directa o desde cotización; ver §4 punto 10 y §6.
+- **R2** (PR #21) — precios de catálogo con IGV incluido, snapshot
+  `pricesIncludeTax`, impresos y reporte de ventas por producto
+  (`totalSold` = importe de línea al cliente antes del descuento de documento,
+  con la tasa congelada de cada venta histórica); ver §6 "Precios e IGV".
+  Migración `20261012020000_add_prices_include_tax_snapshot` (aditiva; filas
+  históricas en `false`, sin DEFAULT final). La aplicación actual **requiere**
+  esta migración aplicada antes de arrancar.
+
+Migraciones totales: **15**.
 
 ---
 
