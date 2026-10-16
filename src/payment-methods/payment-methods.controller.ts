@@ -81,7 +81,7 @@ export class PaymentMethodsController {
   @ApiOperation({
     summary: 'Crear un método de pago personalizado (ADMIN)',
     description:
-      'Nace `active: true` y queda utilizable de inmediato para registrar cobros nuevos (POST /sales/:saleId/payments y el pago inicial embebido de Sales), sin redeploy: PaymentEngine resuelve el método dinámicamente en cada cobro. `code` es la identidad estable e inmutable (formato ^[A-Z][A-Z0-9_]{1,29}$ tras normalizar a mayúsculas) — nunca editable después de creado. `accountingDestination` decide la cuenta contable de cobro (CASH -> Caja, BANK -> Bancos, Fase 8 sin cuentas nuevas); `affectsCashDrawer` decide si el monto cuenta como efectivo físico para el futuro arqueo de caja (Ticket B); ambos son conceptos independientes entre sí y de `requiresReference`.',
+      'Nace `active: true` y queda utilizable de inmediato para registrar cobros nuevos (POST /sales/:saleId/payments y el pago inicial embebido de Sales), sin redeploy: PaymentEngine resuelve el método dinámicamente en cada cobro. `code` es la identidad estable e inmutable (formato ^[A-Z][A-Z0-9_]{1,29}$ tras normalizar a mayúsculas) — nunca editable después de creado. `accountingDestination` decide la cuenta contable de cobro (CASH -> Caja, BANK -> Bancos, Fase 8 sin cuentas nuevas); `affectsCashDrawer` se conserva por compatibilidad (atributo del método y snapshot histórico de cada Payment) y ya no controla ninguna caja (módulo de Caja retirado); ambos son conceptos independientes entre sí y de `requiresReference`.',
   })
   @ApiCreatedResponse({ type: PaymentMethodResponseDto })
   @ApiBadRequestResponse({

@@ -3,6 +3,7 @@ import {
   AccountingEventType,
   AccountingSourceType,
   AccountingSystemKey,
+  CashSessionStatus,
   CustomerStage,
   CustomerStatus,
   CustomerType,
@@ -26,7 +27,7 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { createE2eApp } from './helpers/e2e-app';
-import { openCashSessionFixture, upsertFixtureUser } from './helpers/fixtures';
+import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -167,20 +168,12 @@ describe('Payments (e2e)', () => {
   // probar el cutover dinámico — eliminados por su ID exacto en afterAll,
   // nunca se toca ninguno de los 9 baseline.
   const ownedPaymentMethodIds: string[] = [];
-  // Ticket B, Bloque B4: desde este bloque, PaymentEngine.register() exige
-  // que el cobrador tenga su propia caja (CashSession) abierta. Este spec
-  // registra pagos reales vía HTTP con admin/seller/fkCreator — cada uno
-  // necesita una caja OPEN propia, abierta directamente en BD (§29 del plan
-  // aprobado: suite no relacionada con CashSessions, sin ejercer el
-  // endpoint HTTP real de apertura) y eliminada por su ID exacto en
-  // afterAll. adminCashSessionId usa al admin GLOBAL compartido
-  // (E2E_ADMIN_USERNAME): es seguro porque Jest corre en serie
-  // (--runInBand) y esta suite elimina su propia fila antes de que
-  // cualquier otra suite posterior intente abrir la suya para ese mismo
-  // usuario (mismo criterio de propiedad exacta que el resto del repo).
-  let adminCashSessionId: string;
-  let sellerCashSessionId: string;
-  let fkCreatorCashSessionId: string;
+  // Eliminación de Caja (C3-A): los cobros ya no requieren ninguna
+  // CashSession. Las únicas filas de caja que crea este spec son las de la
+  // prueba de compatibilidad histórica (un Payment antiguo vinculado a una
+  // caja CLOSED), eliminadas por su ID exacto en afterAll DESPUÉS de los
+  // Payment propios (Payment.cashSessionId es RESTRICT hacia CashSession).
+  const ownedHistoricalCashSessionIds: string[] = [];
 
   const RUN_ID = Date.now();
   let counter = 0;
@@ -275,14 +268,6 @@ describe('Payments (e2e)', () => {
         where: { username: FK_CANCELLER_USERNAME },
       })
     ).id;
-
-    // Ticket B, Bloque B4: caja abierta para cada actor que registra pagos
-    // reales vía HTTP en este spec (fkCancellerCookie nunca registra pagos,
-    // solo anula — la anulación no exige caja abierta, ver §19/§20).
-    adminCashSessionId = (await openCashSessionFixture(prisma, adminId)).id;
-    sellerCashSessionId = (await openCashSessionFixture(prisma, sellerId)).id;
-    fkCreatorCashSessionId = (await openCashSessionFixture(prisma, fkCreatorId))
-      .id;
 
     // ---------------------------------------------------------------
     // Clientes fixture. Sale no requiere SaleItem/Product/Category/Unit:
@@ -402,23 +387,15 @@ describe('Payments (e2e)', () => {
         await prisma.sale.deleteMany({ where: { id: { in: ownedSaleIds } } });
       }
 
-      // Ticket B, Bloque B4: cajas fixture de admin/seller/fkCreator — SIEMPRE
-      // después de borrar los Payment propios de arriba (Payment.cashSessionId
-      // es RESTRICT hacia CashSession). adminCashSessionId pertenece al admin
-      // GLOBAL compartido: se elimina aquí para que ninguna otra suite
-      // posterior encuentre una caja sin resolver ya abierta para ese mismo
-      // usuario.
-      await prisma.cashSession.deleteMany({
-        where: {
-          id: {
-            in: [
-              adminCashSessionId,
-              sellerCashSessionId,
-              fkCreatorCashSessionId,
-            ],
-          },
-        },
-      });
+      // Eliminación de Caja (C3-A): solo las cajas históricas fixture de la
+      // prueba de compatibilidad, por su ID exacto y SIEMPRE después de
+      // borrar los Payment propios de arriba (Payment.cashSessionId es
+      // RESTRICT hacia CashSession; su desglose se va por CASCADE).
+      if (ownedHistoricalCashSessionIds.length > 0) {
+        await prisma.cashSession.deleteMany({
+          where: { id: { in: ownedHistoricalCashSessionIds } },
+        });
+      }
 
       // Ticket C, Bloque C3: custom PaymentMethod propios de este spec.
       // Toda Payment que los referenciaba ya se eliminó arriba
@@ -1706,10 +1683,220 @@ describe('Payments (e2e)', () => {
   });
 
   // ==================================================================
+  // Cobro directo sin caja (Eliminación de Caja, C3-A) — escenarios
+  // trasladados desde las suites retiradas de CashSessions
+  // ==================================================================
+  describe('cobro directo sin caja (Eliminación de Caja)', () => {
+    it('SELLER sin ninguna caja cobra una venta de otro vendedor -> 201; sin vínculo a caja; createdBy = cobrador real; sellerId de la venta intacto; asiento ORIGINAL', async () => {
+      const sale = await createFixtureSale({ total: '80.00' });
+      const sessionsBefore = await prisma.cashSession.count({
+        where: { userId: sellerId },
+      });
+
+      const result = await registerPaymentOrThrow(sellerCookie, sale.id, {
+        method: 'CASH',
+        amount: '30.00',
+      });
+
+      const row = await prisma.payment.findUniqueOrThrow({
+        where: { id: result.payment.id },
+      });
+      expect(row.cashSessionId).toBeNull();
+      expect(row.createdByUserId).toBe(sellerId);
+      expect(result.payment.createdBy.id).toBe(sellerId);
+      expect(result.sale.paymentStatus).toBe(SalePaymentStatus.PARTIALLY_PAID);
+      expect(result.sale.balanceDue).toBe('50.00');
+
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.sellerId).toBe(adminId);
+
+      // Nunca se crea una caja automática, ficticia ni oculta.
+      expect(
+        await prisma.cashSession.count({ where: { userId: sellerId } }),
+      ).toBe(sessionsBefore);
+
+      const original = await prisma.accountingEntry.findFirst({
+        where: {
+          sourceType: AccountingSourceType.PAYMENT,
+          sourceId: result.payment.id,
+          eventType: AccountingEventType.ORIGINAL,
+        },
+      });
+      expect(original).not.toBeNull();
+    });
+
+    it('40+60 concurrentes sin caja sobre saldo 100: ambas 201; PAID; ningún Payment queda vinculado a una caja', async () => {
+      const sale = await createFixtureSale({ total: '100.00' });
+      const [first, second] = await Promise.all([
+        registerPayment(adminCookie, sale.id, {
+          method: 'CASH',
+          amount: '40.00',
+        }),
+        registerPayment(sellerCookie, sale.id, {
+          method: 'CARD',
+          amount: '60.00',
+          // CARD exige referencia en el baseline (requiresReference=true).
+          reference: 'VCH-C3-60',
+        }),
+      ]);
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+
+      const rows = await prisma.payment.findMany({
+        where: { saleId: sale.id, status: PaymentStatus.ACTIVE },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.every((p) => p.cashSessionId === null)).toBe(true);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(saleRow.balanceDue.toFixed(2)).toBe('0.00');
+    });
+
+    it('70+70 concurrentes sin caja sobre saldo 100: el sobrepago sigue bloqueado (una 201, otra 409); 1 Payment ACTIVE sin caja', async () => {
+      const sale = await createFixtureSale({ total: '100.00' });
+      const responses = await Promise.all([
+        registerPayment(adminCookie, sale.id, {
+          method: 'CASH',
+          amount: '70.00',
+        }),
+        registerPayment(sellerCookie, sale.id, {
+          method: 'CASH',
+          amount: '70.00',
+        }),
+      ]);
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses).toEqual([201, 409]);
+
+      const rows = await prisma.payment.findMany({
+        where: { saleId: sale.id, status: PaymentStatus.ACTIVE },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].cashSessionId).toBeNull();
+      expect(
+        await prisma.auditLog.count({
+          where: {
+            action: AuditAction.PAYMENT_REGISTERED,
+            entityType: 'Payment',
+            entityId: { in: rows.map((p) => p.id) },
+          },
+        }),
+      ).toBe(1);
+    });
+
+    it('las rutas del módulo de Caja retirado ya no existen (404)', async () => {
+      const server = app.getHttpServer();
+      const open = await request(server)
+        .post('/api/v1/cash-sessions/open')
+        .set('Cookie', adminCookie)
+        .send({ openingAmount: '0' });
+      expect(open.status).toBe(404);
+      const current = await request(server)
+        .get('/api/v1/cash-sessions/current')
+        .set('Cookie', adminCookie);
+      expect(current.status).toBe(404);
+      const list = await request(server)
+        .get('/api/v1/cash-sessions')
+        .set('Cookie', adminCookie);
+      expect(list.status).toBe(404);
+    });
+  });
+
+  // ==================================================================
+  // Compatibilidad histórica: Payment vinculado a una caja antigua
+  // ==================================================================
+  describe('compatibilidad histórica de Caja', () => {
+    it('un Payment histórico vinculado a una caja CLOSED sigue legible y anulable con REVERSAL; la caja y el vínculo no cambian', async () => {
+      const sale = await createFixtureSale({ total: '45.00' });
+      const result = await registerPaymentOrThrow(adminCookie, sale.id, {
+        method: 'CASH',
+        amount: '45.00',
+      });
+
+      // Caja histórica CLOSED sin descuadre (consistente con
+      // cash_sessions_status_consistency), creada directamente en BD: el
+      // módulo que la producía ya no existe.
+      const closedAt = new Date();
+      const session = await prisma.cashSession.create({
+        data: {
+          userId: adminId,
+          status: CashSessionStatus.CLOSED,
+          openingAmount: new Prisma.Decimal('0.00'),
+          closeRequestedAt: closedAt,
+          expectedCashAmount: new Prisma.Decimal('45.00'),
+          countedCashAmount: new Prisma.Decimal('45.00'),
+          differenceAmount: new Prisma.Decimal('0.00'),
+          closedAt,
+        },
+      });
+      ownedHistoricalCashSessionIds.push(session.id);
+      // Simula el vínculo que PaymentEngine asignaba antes de la eliminación.
+      await prisma.payment.update({
+        where: { id: result.payment.id },
+        data: { cashSessionId: session.id },
+      });
+
+      const list = await request(app.getHttpServer())
+        .get('/api/v1/payments')
+        .query({ createdByUserId: adminId, page: 1, limit: 100 })
+        .set('Cookie', adminCookie);
+      expect(list.status).toBe(200);
+      const listed = (list.body as PaginatedBody<SafePaymentBody>).data.find(
+        (p) => p.id === result.payment.id,
+      );
+      expect(listed).toBeDefined();
+      expect(listed?.amount).toBe('45.00');
+      expect(listed).not.toHaveProperty('cashSessionId');
+
+      const cancelResponse = await cancelPayment(
+        adminCookie,
+        sale.id,
+        result.payment.id,
+        { reason: 'Anulación de un cobro histórico con caja' },
+      );
+      expect(cancelResponse.status).toBe(200);
+
+      const original = await prisma.accountingEntry.findFirstOrThrow({
+        where: {
+          sourceType: AccountingSourceType.PAYMENT,
+          sourceId: result.payment.id,
+          eventType: AccountingEventType.ORIGINAL,
+        },
+      });
+      const reversal = await prisma.accountingEntry.findFirstOrThrow({
+        where: {
+          sourceType: AccountingSourceType.PAYMENT,
+          sourceId: result.payment.id,
+          eventType: AccountingEventType.REVERSAL,
+        },
+      });
+      expect(reversal.reversesEntryId).toBe(original.id);
+
+      const paymentAfter = await prisma.payment.findUniqueOrThrow({
+        where: { id: result.payment.id },
+      });
+      expect(paymentAfter.status).toBe(PaymentStatus.CANCELLED);
+      expect(paymentAfter.cashSessionId).toBe(session.id);
+
+      const sessionAfter = await prisma.cashSession.findUniqueOrThrow({
+        where: { id: session.id },
+      });
+      expect(sessionAfter.status).toBe(CashSessionStatus.CLOSED);
+      expect(sessionAfter.expectedCashAmount?.toFixed(2)).toBe('45.00');
+      expect(sessionAfter.countedCashAmount?.toFixed(2)).toBe('45.00');
+      expect(sessionAfter.differenceAmount?.toFixed(2)).toBe('0.00');
+      expect(sessionAfter.closedAt?.getTime()).toBe(closedAt.getTime());
+    });
+  });
+
+  // ==================================================================
   // Auditoría — registro
   // ==================================================================
   describe('auditoría — PAYMENT_REGISTERED', () => {
-    it('exactamente 1 auditoría, module PAYMENTS, entityType Payment; whitelist exacta {saleId, saleNumber, method, cashSessionId}', async () => {
+    it('exactamente 1 auditoría, module PAYMENTS, entityType Payment; whitelist exacta {saleId, saleNumber, method} (sin cashSessionId desde la eliminación de Caja); userId = cobrador autenticado', async () => {
       const sale = await createFixtureSale({ total: '25.00' });
       const result = await registerPaymentOrThrow(adminCookie, sale.id, {
         method: 'TRANSFER',
@@ -1728,13 +1915,13 @@ describe('Payments (e2e)', () => {
       expect(row.module).toBe('PAYMENTS');
       const metadata = row.metadata as Record<string, unknown>;
       expect(Object.keys(metadata).sort()).toEqual(
-        ['saleId', 'saleNumber', 'method', 'cashSessionId'].sort(),
+        ['saleId', 'saleNumber', 'method'].sort(),
       );
       expect(metadata.saleId).toBe(sale.id);
       expect(metadata.saleNumber).toBe(sale.number);
       expect(metadata.method).toBe('TRANSFER');
-      // Ticket B, Bloque B4: la caja del cobrador (admin, en este caso).
-      expect(metadata.cashSessionId).toBe(adminCashSessionId);
+      expect(metadata).not.toHaveProperty('cashSessionId');
+      expect(row.userId).toBe(adminId);
       expect(metadata).not.toHaveProperty('amount');
       expect(metadata).not.toHaveProperty('reference');
       expect(metadata).not.toHaveProperty('customerName');

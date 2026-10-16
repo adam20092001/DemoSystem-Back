@@ -3,7 +3,6 @@ import { ConfigModule } from '@nestjs/config';
 import { AccountingModule } from './accounting/accounting.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
-import { CashSessionsModule } from './cash-sessions/cash-sessions.module';
 import { CategoriesModule } from './categories/categories.module';
 import { validateEnv } from './config/env.validation';
 import { ConfigurationModule } from './configuration/configuration.module';
@@ -42,7 +41,6 @@ import { UsersModule } from './users/users.module';
     SalesModule,
     PaymentMethodsModule,
     PaymentsModule,
-    CashSessionsModule,
     AccountingModule,
     ReportsModule,
     ConfigurationModule,

@@ -350,17 +350,19 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'oldValues',
     'newValues',
   ],
-  // Ticket B post-MVP, Bloque B2. CashSessionsService.open() es su único
-  // emisor. Solo campos seguros y ya conocidos por el actor que abrió la
-  // caja: nunca el actor completo, la request cruda, el JWT ni nada
-  // sensible.
+  // Ticket B post-MVP (Caja). HISTÓRICAS: el módulo de Caja fue retirado
+  // (Eliminación de Caja, Bloque C2) y ya nada emite las 5 acciones
+  // CASH_SESSION_*; sus whitelists se conservan sin cambios para las filas
+  // de auditoría existentes. Bloque B2 (apertura): solo campos seguros y ya
+  // conocidos por el actor que abrió la caja: nunca el actor completo, la
+  // request cruda, el JWT ni nada sensible.
   [AuditAction.CASH_SESSION_OPENED]: [
     'cashSessionId',
     'userId',
     'openingAmount',
   ],
-  // Ticket B post-MVP, Bloque B3. CashSessionsService.close() es su único
-  // emisor para estas dos primeras. Nunca el actor completo/IP cruda: eso
+  // Ticket B post-MVP, Bloque B3 (cierre, histórico). Nunca el actor
+  // completo/IP cruda: eso
   // ya lo registra RecordAuditLogInput.ipAddress por separado.
   [AuditAction.CASH_SESSION_CLOSED]: [
     'cashSessionId',
@@ -377,7 +379,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'differenceAmount',
     'closingObservation',
   ],
-  // CashSessionsService.approve()/reject() son sus únicos emisores.
+  // Aprobación/rechazo de descuadre (histórico).
   // ownerUserId (dueño de la caja) y reviewerUserId (quien aprueba/
   // rechaza) SIEMPRE son personas distintas — la propia autorización lo
   // exige antes de llegar aquí.
@@ -390,7 +392,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'differenceAmount',
     'comment',
   ],
-  // Único emisor de reject(): captura el snapshot PREVIO a limpiarlo de
+  // Rechazo de descuadre (histórico): capturaba el snapshot PREVIO a limpiarlo de
   // CashSession (Ticket B, Bloque B3 §20) — esta fila es la única
   // evidencia histórica que sobrevive de ese intento de cierre rechazado.
   [AuditAction.CASH_SESSION_DISCREPANCY_REJECTED]: [

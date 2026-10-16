@@ -17,8 +17,9 @@ export const PAYMENT_SAFE_SELECT = {
   saleId: true,
   // Snapshot histórico (Ticket C, Bloque C3): jamás el PaymentMethod
   // dinámico actual (no se incluye ninguna relación/join aquí).
-  // paymentMethodAffectsCashDrawer deliberadamente NO se selecciona: nada
-  // en este mapper/DTO lo expone todavía (uso interno futuro de Ticket B).
+  // paymentMethodAffectsCashDrawer deliberadamente NO se selecciona: es un
+  // snapshot histórico que este mapper/DTO no expone (el módulo de Caja que
+  // lo consumía fue retirado).
   paymentMethodCode: true,
   paymentMethodName: true,
   amount: true,

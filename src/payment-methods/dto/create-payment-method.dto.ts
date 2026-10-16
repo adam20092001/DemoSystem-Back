@@ -71,7 +71,7 @@ export class CreatePaymentMethodDto {
 
   @ApiProperty({
     description:
-      'Si es true, el monto cobrado con este método cuenta como efectivo físico en el futuro arqueo de caja (Ticket B).',
+      'Atributo conservado por compatibilidad: indica si el método representa efectivo físico. Se guarda en el método y como snapshot histórico de cada Payment, pero ya no controla apertura, cierre ni arqueo de caja (módulo de Caja retirado). Independiente de accountingDestination (CASH/BANK).',
   })
   @IsBoolean()
   affectsCashDrawer!: boolean;

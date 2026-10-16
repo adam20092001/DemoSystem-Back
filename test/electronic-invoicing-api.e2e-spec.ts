@@ -32,7 +32,6 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { createE2eApp } from './helpers/e2e-app';
-import { openCashSessionFixture } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 
@@ -63,8 +62,6 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   let prisma: PrismaClient;
 
   let adminCookie: string;
-  // Ticket B, Bloque B4: caja fixture abierta para admin (§29).
-  let adminCashSessionId: string;
   let sellerCookie: string;
   let managementCookie: string;
   let warehouseCookie: string;
@@ -329,14 +326,6 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       orderBy: { createdAt: 'desc' },
     });
     ownedAdminLoginAuditIds.push(adminLoginAudit.id);
-
-    // Ticket B, Bloque B4: PaymentEngine.register() exige que el cobrador
-    // tenga su propia caja (CashSession) abierta. Esta suite registra
-    // pagos reales exclusivamente con adminCookie (admin GLOBAL
-    // compartido) — abierta directamente en BD (§29 del plan aprobado) y
-    // eliminada por su ID exacto en afterAll.
-    adminCashSessionId = (await openCashSessionFixture(prisma, adminUser.id))
-      .id;
 
     const sellerUser = await upsertSingleRoleUser(
       SELLER_USERNAME,
@@ -605,6 +594,22 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
               entityId: { in: ownedPaymentIds },
             },
           });
+          // Asientos de cobro de los Payment propios (sin FK hacia Payment:
+          // no borrarlos dejaba asientos PAYMENT huérfanos en pos_db_test).
+          // REVERSAL primero (self-FK reversesEntryId hacia su ORIGINAL).
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+              eventType: 'REVERSAL',
+            },
+          });
+          await prisma.accountingEntry.deleteMany({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: { in: ownedPaymentIds },
+            },
+          });
           await prisma.payment.deleteMany({
             where: { id: { in: ownedPaymentIds } },
           });
@@ -615,13 +620,6 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         });
         await prisma.sale.deleteMany({ where: { id: { in: createdSaleIds } } });
       }
-
-      // Ticket B, Bloque B4: caja fixture del admin GLOBAL compartido —
-      // SIEMPRE después de borrar los Payment propios de arriba
-      // (Payment.cashSessionId es RESTRICT hacia CashSession).
-      await prisma.cashSession.deleteMany({
-        where: { id: adminCashSessionId },
-      });
 
       // Guarda explícita: un `id: undefined` (si beforeAll lanzó antes de
       // asignar) haría que Prisma omita la condición y deleteMany({})

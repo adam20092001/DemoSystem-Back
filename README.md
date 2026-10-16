@@ -12,10 +12,14 @@ El contexto de trabajo y las reglas de negocio del proyecto están en
 Autenticación multi-rol (JWT en cookie HttpOnly) · Usuarios y roles ·
 Catálogo (categorías, unidades, productos) · Inventario (movimientos y
 saldo) · Clientes (incluye "Público general") · Cotizaciones · Ventas / POS ·
-Pagos (métodos de pago administrables por ADMIN) y cuentas por cobrar ·
-**Caja / arqueo de caja** (una caja abierta por cobrador, obligatoria para
-cobrar) · Contabilidad básica · Reportes y dashboard · Configuración y
-correlativos · Auditoría · **Facturación electrónica (demostración)**.
+Pagos directos (métodos de pago administrables por ADMIN, sin sesión de
+caja) y cuentas por cobrar · Contabilidad básica · Reportes y dashboard ·
+Configuración y correlativos · Auditoría · **Facturación electrónica
+(demostración)**.
+
+El antiguo módulo de **Caja / arqueo** fue retirado por decisión del cliente:
+ya no hay apertura, cierre ni arqueo, y los cobros se registran directamente.
+Ver [Caja retirada](#caja-retirada).
 
 Requerimientos post-MVP ya integrados: **pagos iniciales múltiples** al
 confirmar una venta (R1), **precios de catálogo con IGV incluido** (R2) y
@@ -203,29 +207,29 @@ Swagger.
    `DEMO-CUST-COMPANY` y algunos de los productos sembrados. Los precios del
    catálogo son finales (IGV incluido): el detalle devuelve `total`,
    `taxableBase`, `taxAmount` y `customerDiscountAmount` ya calculados.
-7. **Abrir la caja del usuario** (`POST /api/v1/cash-sessions/open`, con
-   `openingAmount`) — sin una caja `OPEN` propia, todo cobro responde 409.
-8. **Convertir la cotización en venta**
+7. **Convertir la cotización en venta**
    (`POST /api/v1/sales/from-quote/:quoteId`) — la cotización nunca
    descuenta stock; la venta confirmada sí. Opcionalmente con un pago inicial
-   (`payment`) o varios (`payments[]`).
-9. **Registrar un pago** sobre el saldo pendiente
-   (`POST /api/v1/sales/:saleId/payments`).
-10. **Revisar contabilidad y cuentas por cobrar**
-    (`GET /api/v1/accounting/entries`, `GET /api/v1/accounts-receivable`) —
-    los asientos se generan automáticamente al confirmar la venta/pago.
-11. **Revisar dashboard y reportes**
+   (`payment`) o varios (`payments[]`). Alternativamente, **venta directa**
+   con `POST /api/v1/sales`. No hace falta abrir ninguna caja.
+8. **Registrar un pago directo** sobre el saldo pendiente
+   (`POST /api/v1/sales/:saleId/payments`), con cualquier método activo
+   (incluido `CASH`).
+9. **Revisar contabilidad y cuentas por cobrar**
+   (`GET /api/v1/accounting/entries`, `GET /api/v1/accounts-receivable`) —
+   los asientos se generan automáticamente al confirmar la venta/pago.
+10. **Revisar dashboard y reportes**
     (`GET /api/v1/dashboard`, `GET /api/v1/reports/...`).
-12. **Emitir FACTURA** sobre esa venta
+11. **Emitir FACTURA** sobre esa venta
     (`POST /api/v1/sales/:saleId/electronic-documents` con
     `documentType: "FACTURA"`, `series: "F001"` — la serie sembrada por
     `npm run db:seed`). Requiere un cliente identificado con RUC: por eso el
     paso 6 usa `DEMO-CUST-COMPANY`, no "Público general".
-13. **Abrir la representación imprimible**
+12. **Abrir la representación imprimible**
     (`GET /api/v1/electronic-documents/:id/print`) — incluye el aviso
     obligatorio de que es una simulación (MOCK/DEMO), nunca un comprobante
     fiscal real.
-14. Opcionalmente, **cambiar el rol activo a SELLER, WAREHOUSE o MANAGEMENT**
+13. Opcionalmente, **cambiar el rol activo a SELLER, WAREHOUSE o MANAGEMENT**
     (mismo usuario, mismo `POST /api/v1/auth/switch-role`) para comprobar en
     vivo las diferencias de autorización — por ejemplo, `WAREHOUSE` no puede
     ver reportes/dashboard, y solo `ADMIN` puede reintentar un documento
@@ -294,10 +298,12 @@ de forma opcional y **excluyente**:
 
 Enviar ambos responde `400`. El lote se registra en la **misma transacción**
 que confirma la venta y en el orden recibido: si cualquier pago falla (método
-inactivo, referencia faltante, caja no abierta, etc.), no se confirma nada.
-La suma de los pagos no puede superar el total (`409`); una venta a "Público
-general" o a un cliente bloqueado exige que la suma salde el total. Cada pago
-exige la caja `OPEN` del cobrador (ver [Caja](#caja--cash-sessions)).
+inactivo, referencia faltante, etc.), no se confirma nada. La suma de los
+pagos no puede superar el total (`409`); una venta a "Público general" o a un
+cliente bloqueado exige que la suma salde el total. Los pagos se registran
+directamente, sin caja. Un pago parcial deja saldo pendiente sujeto a las
+reglas de crédito vigentes, y el saldo se cobra después con
+`POST /api/v1/sales/:saleId/payments`.
 
 ## Precios con IGV incluido
 
@@ -340,44 +346,56 @@ backend ya aplica:
 - `createdByUserId` (cobrador) en `GET /api/v1/payments` y en el reporte
   `payments-by-method`.
 
-## Caja / Cash Sessions
+## Caja retirada
 
-Cada cobrador (ADMIN o SELLER) opera con su propia caja (`CashSession`),
-abierta manualmente — nunca automática al iniciar sesión:
+Por decisión del cliente, el módulo operativo de **Caja / arqueo** fue
+eliminado:
 
-- `POST /api/v1/cash-sessions/open` (`openingAmount`, admite 0, nunca
-  negativo). Como máximo **una** caja sin resolver (`OPEN` o
-  `PENDING_APPROVAL`) por usuario a la vez, protegido por un índice único
-  parcial en base de datos — no solo por una validación de aplicación.
-- **Todo cobro nuevo exige que el cobrador tenga su propia caja `OPEN`**:
-  sin caja abierta, o con la caja en `PENDING_APPROVAL`, `POST
-  /api/v1/sales/:saleId/payments` (y el pago inicial embebido en `POST
-  /api/v1/sales` / `POST /api/v1/sales/from-quote/:quoteId`) responde 409.
-  La regla es la misma para **cualquier** método de pago (incluido uno
-  dinámico creado por ADMIN): `affectsCashDrawer` decide si un cobro cuenta
-  como efectivo físico, nunca si exige caja abierta. El vínculo
-  (`Payment.cashSessionId`) lo asigna el servidor; el cliente nunca lo
-  controla.
-- Efectivo esperado: `expectedCashAmount = openingAmount + SUM(Payment ACTIVE
-  vinculado con paymentMethodAffectsCashDrawer=true)` — siempre a partir del
-  **snapshot** del método en el instante del cobro, nunca del
-  `PaymentMethod` actual (un método renombrado o cuya `affectsCashDrawer`
-  cambie después no altera un cobro ya registrado).
-- Cierre (`POST /api/v1/cash-sessions/current/close`, `countedCashAmount`):
-  si `countedCashAmount - expectedCashAmount = 0`, la caja pasa a `CLOSED`
-  directamente. Si hay descuadre, `closingObservation` es obligatoria y la
-  caja pasa a `PENDING_APPROVAL` — no admite nuevos cobros ni un segundo
-  intento de cierre hasta resolverse.
-- Un descuadre pendiente lo resuelve ADMIN o MANAGEMENT:
-  `POST /api/v1/cash-sessions/:id/approve` (→ `CLOSED`, acepta el snapshot
-  tal cual fue enviado, sin recalcular) o
-  `POST /api/v1/cash-sessions/:id/reject` (`reason` obligatorio → vuelve a
-  `OPEN`, con el snapshot de cierre limpiado; el operador puede cerrar de
-  nuevo con datos frescos). **Nadie puede aprobar ni rechazar su propia
-  caja**, sin importar su rol activo.
-- Una caja `CLOSED` es inmutable: si un Payment vinculado se anula después,
-  el snapshot de esa caja (montos esperado/contado/diferencia y el desglose
-  por método) no se recalcula ni cambia.
+- No existe apertura, cierre, arqueo ni aprobación/rechazo de descuadres.
+  Los 7 endpoints `/api/v1/cash-sessions/*` ya no están registrados (responden
+  `404`) y no aparecen en Swagger.
+- Los cobros se registran **directamente**: pago único o lote de pagos al
+  confirmar una venta, y pagos posteriores con
+  `POST /api/v1/sales/:saleId/payments`. La ausencia de caja nunca produce un
+  error.
+- Siguen vigentes todas las demás reglas de cobro: método dinámico activo,
+  `requiresReference` por método, prohibición de sobrepago, atomicidad de los
+  pagos iniciales, asientos ORIGINAL/REVERSAL según `accountingDestination`
+  (CASH → Caja contable, BANK → Bancos) y auditoría del usuario que cobra.
+- `CASH` (efectivo) sigue existiendo como **método de pago**; lo retirado es
+  la sesión de caja, no el efectivo.
+- `affectsCashDrawer` se conserva en los métodos de pago y como snapshot de
+  cada `Payment` por compatibilidad; ya no controla ninguna caja.
+- **Historial conservado**: las tablas `cash_sessions` y
+  `cash_session_payment_method_summaries`, sus restricciones y la columna
+  `Payment.cashSessionId` siguen en el esquema (sin migración nueva; siguen
+  siendo 15). Los pagos antiguos conservan su vínculo y siguen siendo
+  legibles y anulables; los pagos nuevos quedan con `cashSessionId` nulo.
+
+### Nota de integración para el frontend (Angular)
+
+- Retirar la pantalla y el menú de Caja.
+- Retirar todas las llamadas a `/api/v1/cash-sessions/*` (ahora responden
+  `404`).
+- Retirar las validaciones locales `hasOpenSession()` y permitir registrar
+  pagos sin abrir caja.
+- Los contratos de venta y pago (`POST /api/v1/sales`,
+  `POST /api/v1/sales/from-quote/:quoteId`,
+  `POST /api/v1/sales/:saleId/payments`) mantienen sus solicitudes y
+  respuestas; solo desaparecen los errores `409` relacionados con caja.
+- Quedan además **otros cambios de frontend pendientes**, entre ellos mostrar
+  los precios finales con IGV incluido (ver
+  [Precios con IGV incluido](#precios-con-igv-incluido)).
+
+### Decisiones del cliente pendientes (no implementadas)
+
+- El vendedor solo puede ver sus ventas; el administrador ve todas.
+- El vendedor no puede cobrar ni marcar como entregadas ventas ajenas. Hoy
+  todavía puede cobrarlas: es comportamiento heredado, no una regla aprobada.
+- Crédito opcional.
+- Referencias de pago no obligatorias.
+- Descuentos por producto, y descuentos en soles o en porcentaje.
+- Cambios solicitados en inventario, contabilidad e importaciones.
 
 ## Base de datos
 
@@ -440,11 +458,18 @@ archivo). Las suites e2e validan en su propio arranque que `DATABASE_URL`
 apunte a `pos_db_test` — si no es así, fallan explícitamente en vez de
 arriesgar otra base.
 
+Limitaciones conocidas: la suite e2e pasa en ejecuciones consecutivas sin
+reset, pero varias suites dejan residuos en `products` y `audit_logs`, y el
+cliente genérico sembrado no se conserva al terminar (cada suite lo recrea);
+el aislamiento global entre suites no está completamente resuelto. Hay 11
+errores preexistentes en `tsc --noEmit` (no afectan `build` ni las pruebas) y
+el repositorio no tiene CI configurado en GitHub.
+
 ## Arquitectura (resumen)
 
 Monolito modular en NestJS: un solo despliegue, un módulo por dominio bajo
 `src/` (`auth`, `users`, `categories`, `units`, `products`, `inventory`,
-`customers`, `quotes`, `sales`, `payments`, `payment-methods`, `cash-sessions`,
+`customers`, `quotes`, `sales`, `payments`, `payment-methods`,
 `accounting`, `reports`, `configuration`, `audit`, `electronic-invoicing`, más
 soporte interno como `document-sequences`). Cada módulo separa controller (HTTP/roles/Swagger),
 service (reglas de negocio y transacciones) y DTOs (validación de entrada);

@@ -97,7 +97,6 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
   const createdCustomerIds: string[] = [];
   const createdQuoteIds: string[] = [];
   const createdSaleIds: string[] = [];
-  const ownedCashSessionIds: string[] = [];
   const ownedConfigurationAuditLogIds: string[] = [];
 
   async function patchConfiguration(
@@ -427,22 +426,6 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
           where: { entityType: 'Sale', entityId: { in: allSaleIds } },
         });
         await prisma.sale.deleteMany({ where: { id: { in: allSaleIds } } });
-      }
-
-      // R2-B4: caja propia del admin (después de borrar sus pagos).
-      if (ownedCashSessionIds.length > 0) {
-        await prisma.cashSessionPaymentMethodSummary.deleteMany({
-          where: { cashSessionId: { in: ownedCashSessionIds } },
-        });
-        await prisma.auditLog.deleteMany({
-          where: {
-            entityType: 'CashSession',
-            entityId: { in: ownedCashSessionIds },
-          },
-        });
-        await prisma.cashSession.deleteMany({
-          where: { id: { in: ownedCashSessionIds } },
-        });
       }
 
       const allQuoteIds = [...createdQuoteIds];
@@ -1049,7 +1032,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       expect(sale.body.total).toBe('324.20');
     });
 
-    it('R2-B4: lote R1 CASH 100 + YAPE 100 + CARD 50 sobre un total con IGV incluido de 250.00: PAID, caja y asientos correctos; la anulación revierte todo', async () => {
+    it('R2-B4: lote R1 CASH 100 + YAPE 100 + CARD 50 sobre un total con IGV incluido de 250.00: PAID sin caja, asientos correctos; la anulación revierte todo', async () => {
       await patchConfiguration({
         taxEnabled: true,
         taxRate: '18.00',
@@ -1057,14 +1040,6 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       });
       await trackLatestConfigurationAuditRow();
       const product250 = await createTrackedProduct('250.00');
-
-      const opened = await request(app.getHttpServer())
-        .post('/api/v1/cash-sessions/open')
-        .set('Cookie', adminCookie)
-        .send({ openingAmount: '0' });
-      expect(opened.status).toBe(201);
-      const sessionId = (opened.body as { id: string }).id;
-      ownedCashSessionIds.push(sessionId);
 
       const sale = await createDirectSale({
         customerId,
@@ -1090,7 +1065,13 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         where: { saleId: sale.body.id },
       });
       expect(payments).toHaveLength(3);
-      expect(payments.every((p) => p.cashSessionId === sessionId)).toBe(true);
+      expect(payments.every((p) => p.cashSessionId === null)).toBe(true);
+      // El snapshot affectsCashDrawer se conserva tal cual (solo CASH).
+      expect(
+        payments
+          .filter((p) => p.paymentMethodAffectsCashDrawer)
+          .map((p) => p.paymentMethodCode),
+      ).toEqual(['CASH']);
       for (const payment of payments) {
         const entry = await prisma.accountingEntry.findFirstOrThrow({
           where: {
@@ -1112,15 +1093,6 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       );
       expect(vatLine?.creditAmount.toFixed(2)).toBe('38.14');
       expect(totalDebit.equals(totalCredit)).toBe(true);
-
-      const current = await request(app.getHttpServer())
-        .get('/api/v1/cash-sessions/current')
-        .set('Cookie', adminCookie);
-      expect(current.body).toMatchObject({
-        liveCollectionsTotal: '250.00',
-        liveCashCollectionsTotal: '100.00',
-        liveExpectedCashAmount: '100.00',
-      });
 
       const stockAfterSale = await prisma.product.findUniqueOrThrow({
         where: { id: product250 },
