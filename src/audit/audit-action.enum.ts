@@ -145,11 +145,13 @@ export enum AuditAction {
   PAYMENT_METHOD_UPDATED = 'PAYMENT_METHOD_UPDATED',
   PAYMENT_METHOD_ACTIVATED = 'PAYMENT_METHOD_ACTIVATED',
   PAYMENT_METHOD_DEACTIVATED = 'PAYMENT_METHOD_DEACTIVATED',
-  // Ticket B post-MVP, Bloque B2: única acción de ese bloque.
-  // CashSessionsService.open() es su único emisor.
+  // Ticket B post-MVP (Caja). HISTÓRICAS: el módulo de Caja fue retirado
+  // (Eliminación de Caja, Bloque C2) y ya nada emite estas 5 acciones; se
+  // conservan solo para leer/filtrar las filas de auditoría existentes.
+  // Bloque B2: apertura de caja.
   CASH_SESSION_OPENED = 'CASH_SESSION_OPENED',
   // Ticket B post-MVP, Bloque B3 — flujo de cierre/descuadre/aprobación/
-  // rechazo, todas emitidas por CashSessionsService. CASH_SESSION_CLOSED:
+  // rechazo. CASH_SESSION_CLOSED:
   // cierre exacto (differenceAmount=0), directo, sin revisor.
   // CASH_SESSION_CLOSING_REQUESTED: cierre con descuadre, transición a
   // PENDING_APPROVAL. CASH_SESSION_DISCREPANCY_APPROVED:

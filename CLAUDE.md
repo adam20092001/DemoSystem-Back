@@ -84,7 +84,7 @@ Reglas de capas:
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
 16. **Facturación electrónica (demostración)** — emisión de FACTURA/BOLETA sobre ventas confirmadas mediante una abstracción de proveedor (`ElectronicInvoicingProvider`), con `MockElectronicInvoicingProvider` como única implementación existente. Un documento `ACCEPTED` por el proveedor MOCK no tiene validez fiscal ante SUNAT (ver §7). Series fiscales (`FiscalSeries`) separadas de los correlativos comerciales (`DocumentSequence`).
-17. **Caja / arqueo de caja (Ticket B post-MVP)** — cada cobrador (`ADMIN`/`SELLER`) opera su propia `CashSession` (`CashSessionsModule`, `POST/GET /api/v1/cash-sessions/*`), abierta siempre manualmente; como máximo una sin resolver (`OPEN`/`PENDING_APPROVAL`) por usuario. Todo `Payment` nuevo exige que el cobrador tenga su caja `OPEN` (`PaymentEngine.register()`, vía `CashSessionReader` compartido) y se vincula a ella automáticamente — la exigencia es por acción, nunca por rol fijo ni por si el método afecta el cajón físico. Ver §6 para las reglas críticas exactas del cierre/aprobación/rechazo.
+17. **Caja / arqueo de caja — RETIRADO** (decisión del cliente, rama `feat/remove-cash-sessions`). El módulo operativo `CashSessionsModule` y sus 7 endpoints (`/api/v1/cash-sessions/*`) ya no existen: no hay apertura, cierre, arqueo ni aprobación/rechazo de descuadres. Los cobros se registran directamente (ver §6 "Cobros"). Se conservan en el esquema, solo por historial, las tablas `cash_sessions` y `cash_session_payment_method_summaries`, el enum `CashSessionStatus`, la columna nullable `Payment.cashSessionId` (vínculos antiguos intactos) y las acciones de auditoría `CASH_SESSION_*`.
 
 ---
 
@@ -132,12 +132,13 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - Se guardan **snapshots del producto** (código, nombre, precio, unidad, impuestos) en cotizaciones y ventas: los cambios posteriores del catálogo no alteran documentos emitidos.
 - **No se eliminan físicamente** registros con historial; se desactivan o anulan (borrado lógico).
 
-**Caja (arqueo)**
-- Todo **`Payment` nuevo exige que el cobrador tenga su propia `CashSession` `OPEN`** (regla por acción, evaluada en `PaymentEngine.register()`), sin importar el método de pago ni si `affectsCashDrawer` es `true` o `false`; sin caja abierta, o con la caja en `PENDING_APPROVAL`, el cobro falla (409) y `Payment.cashSessionId` nunca lo controla el cliente.
-- `expectedCashAmount = openingAmount + SUM(Payment ACTIVE vinculado con paymentMethodAffectsCashDrawer=true)`, siempre a partir del **snapshot** del método al momento del cobro, nunca del `PaymentMethod` actual.
-- Un cierre sin descuadre pasa a `CLOSED` directo; un cierre con descuadre exige `closingObservation` y pasa a `PENDING_APPROVAL` (no admite nuevos cobros ni un segundo cierre) hasta que `ADMIN` o `MANAGEMENT` lo apruebe (acepta el snapshot tal cual, sin recalcular) o lo rechace (vuelve a `OPEN`, snapshot limpiado; el operador puede cerrar de nuevo con datos frescos).
-- **Nadie puede aprobar ni rechazar el descuadre de su propia caja**, sin importar su rol activo (regla de identidad, no de rol).
-- Una caja `CLOSED` es **inmutable**: anular un `Payment` ya vinculado después no recalcula ni altera su snapshot (montos ni desglose por método).
+**Cobros (sin Caja)**
+- Un **`Payment` se registra directamente, sin sesión de caja**: no existe apertura, cierre ni arqueo, y la ausencia de caja nunca produce 409. No se crean sesiones automáticas ni ficticias.
+- `PaymentEngine.register()` sigue siendo el único escritor de `Payment`: resuelve el método dinámico en la misma transacción (inexistente → 404, inactivo → 409), aplica `requiresReference` del método, snapshotea código/nombre/`affectsCashDrawer` y postea el asiento ORIGINAL según `accountingDestination` (CASH/BANK). La anulación postea el REVERSAL.
+- El sobrepago sigue bloqueado bajo `Sale FOR UPDATE`; los pagos iniciales de R1 siguen siendo atómicos con la venta.
+- `createdByUserId` y la auditoría `PAYMENT_REGISTERED` identifican al usuario autenticado que cobra (puede diferir del `sellerId` de la venta).
+- Los pagos nuevos quedan con `cashSessionId = NULL`; los pagos históricos conservan su vínculo y siguen siendo legibles y anulables. Las cajas históricas no se recalculan ni modifican.
+- `affectsCashDrawer` se conserva por compatibilidad como atributo del método y snapshot histórico; ya no controla ninguna caja.
 
 **Transversales**
 - Los **roles y permisos se validan desde el backend**.
@@ -235,7 +236,8 @@ autenticación multi-rol (KAN-18: un usuario puede tener varios roles
 asignados; la sesión elige uno activo) y la facturación electrónica de
 demostración (Fase 11, proveedor MOCK). Prisma, Swagger, Docker Compose,
 `.env.example` y el esquema completo existen y están en uso. El módulo 17
-(Caja) es una incorporación post-MVP posterior, detallada más abajo.
+(Caja) fue una incorporación post-MVP posterior, hoy retirada funcionalmente
+(detalle más abajo).
 
 El repositorio está en **Fase 12 (estabilización de demo)**: auditoría de
 todo lo anterior, mejoras de tooling de bajo riesgo (`lint:check`, reset
@@ -260,7 +262,9 @@ rechazo, y finalmente la integración obligatoria con `PaymentEngine.register()`
 automáticamente). Máquina de 3 estados exacta: `OPEN` → `CLOSED` (sin
 descuadre) o `OPEN` → `PENDING_APPROVAL` → `CLOSED`/`OPEN` (aprobación/rechazo
 de un descuadre) — nunca `REJECTED`/`CANCELLED`/`APPROVED` como estado, ni
-reapertura desde `CLOSED`. Ver §6 para las reglas críticas exactas.
+reapertura desde `CLOSED`. **Este módulo fue retirado después** (ver
+"Eliminación de Caja" más abajo); el párrafo se mantiene solo para explicar el
+origen de las tablas históricas.
 
 Requerimientos post-MVP integrados en `main` después de Caja:
 
@@ -280,6 +284,34 @@ Requerimientos post-MVP integrados en `main` después de Caja:
   Migración `20261012020000_add_prices_include_tax_snapshot` (aditiva; filas
   históricas en `false`, sin DEFAULT final). La aplicación actual **requiere**
   esta migración aplicada antes de arrancar.
+
+**Eliminación de Caja** (rama `feat/remove-cash-sessions`, bloques C1–C4, por
+decisión del cliente):
+
+- C1: `PaymentEngine` ya no exige, bloquea ni vincula una `CashSession`;
+  `PaymentsModule` ya no importa `CashSessionsModule`.
+- C2: retirado `src/cash-sessions/` completo (controller con sus 7 endpoints,
+  servicio, lector, calculadora, DTOs y specs) y su registro en `AppModule`.
+- C3: pruebas E2E adaptadas (cobro directo, concurrencia, compatibilidad
+  histórica, rutas retiradas → 404); suites de Caja eliminadas.
+- C4: documentación y Swagger.
+- Sin cambios de esquema ni migración nueva: las tablas, FK, CHECK, índices y
+  el enum de Caja se conservan solo por historial.
+- R1 (pagos múltiples), R2 (IGV incluido) y R3 (lookup y filtros) no cambian.
+
+**Decisiones del cliente pendientes (NO implementadas):** vendedor solo ve
+sus ventas; vendedor no puede cobrar ni marcar entregadas ventas ajenas;
+administrador ve todas las ventas; crédito opcional; referencias de pago no
+obligatorias; descuentos por producto; descuentos en soles o porcentaje;
+cambios de inventario, contabilidad e importaciones. Hoy un vendedor todavía
+puede cobrar ventas ajenas: la prueba E2E que lo ejercita describe
+comportamiento heredado, no una regla aprobada.
+
+**Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
+`products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
+conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
+aislamiento global no está completamente resuelto); 11 errores preexistentes
+en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
 Migraciones totales: **15**.
 

@@ -2,7 +2,6 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import {
   AccountingEventType,
   AccountingSourceType,
-  CashSessionStatus,
   PaymentCancellationSource,
   PaymentMethodAccountingDestination,
   PaymentStatus,
@@ -11,7 +10,6 @@ import {
 import { AccountingEngine } from '../accounting/accounting.engine';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
-import { CashSessionReader } from '../cash-sessions/cash-session-reader.service';
 import { PaymentMethodReader } from '../payment-methods/payment-method-reader.service';
 import { SafePaymentMethod } from '../payment-methods/types/safe-payment-method';
 import { PAYMENT_SAFE_SELECT } from './mappers/payment.mapper';
@@ -26,21 +24,8 @@ const SALE_ID = '11111111-1111-4111-8111-111111111111';
 const ACTOR_ID = '22222222-2222-4222-8222-222222222222';
 const PAYMENT_ID = '33333333-3333-4333-8333-333333333333';
 const METHOD_ID = '44444444-4444-4444-8444-444444444444';
-const CASH_SESSION_ID = '55555555-5555-4555-8555-555555555555';
 const SALE_NUMBER = 'NV-000001';
 const CANCELLED_AT = new Date('2026-04-01T09:30:00.000Z');
-
-/** Caja del cobrador ya bloqueada por CashSessionReader.lockUnresolvedForUser() (Ticket B, Bloque B4): OPEN por defecto en todo el describe('register') salvo que un test la sobrescriba. */
-function makeLockedCashSession(
-  overrides: Partial<Record<string, unknown>> = {},
-) {
-  return {
-    id: CASH_SESSION_ID,
-    status: CashSessionStatus.OPEN,
-    openingAmount: new Prisma.Decimal('0.00'),
-    ...overrides,
-  };
-}
 
 /** Método dinámico resuelto por defecto: equivalente al baseline CASH (Ticket C, Bloque C1). */
 function makeResolvedMethod(
@@ -163,22 +148,11 @@ function createPaymentMethodReaderMock() {
   };
 }
 
-/** Ticket B, Bloque B4: mock del lector/bloqueador compartido de CashSession, mismo que consume CashSessionsService.close(). */
-function createCashSessionReaderMock() {
-  return {
-    lockUnresolvedForUser: jest.fn<
-      Promise<Record<string, unknown> | null>,
-      [unknown, string]
-    >(),
-  };
-}
-
 describe('PaymentEngine', () => {
   let tx: ReturnType<typeof createTxMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
   let paymentMethodReader: ReturnType<typeof createPaymentMethodReaderMock>;
-  let cashSessionReader: ReturnType<typeof createCashSessionReaderMock>;
   let engine: PaymentEngine;
 
   beforeEach(() => {
@@ -200,17 +174,10 @@ describe('PaymentEngine', () => {
     });
     paymentMethodReader = createPaymentMethodReaderMock();
     paymentMethodReader.findByCode.mockResolvedValue(makeResolvedMethod());
-    // Ticket B, Bloque B4: OPEN por defecto — los tests de la sección
-    // dedicada ("caja del cobrador") sobrescriben esto caso por caso.
-    cashSessionReader = createCashSessionReaderMock();
-    cashSessionReader.lockUnresolvedForUser.mockResolvedValue(
-      makeLockedCashSession(),
-    );
     engine = new PaymentEngine(
       auditService as unknown as AuditService,
       accountingEngine as unknown as AccountingEngine,
       paymentMethodReader as unknown as PaymentMethodReader,
-      cashSessionReader as unknown as CashSessionReader,
     );
 
     tx.payment.create.mockResolvedValue(makePaymentRow());
@@ -376,7 +343,6 @@ describe('PaymentEngine', () => {
         saleId: SALE_ID,
         saleNumber: SALE_NUMBER,
         method: 'CASH',
-        cashSessionId: CASH_SESSION_ID,
       });
       expect(call.client).toBe(tx);
     });
@@ -416,108 +382,128 @@ describe('PaymentEngine', () => {
       expect(tx.sale.update).not.toHaveBeenCalled();
     });
 
-    describe('caja del cobrador (Ticket B, Bloque B4)', () => {
-      it('sin caja sin resolver -> 409, nunca crea el Payment, nunca postea contabilidad, nunca audita', async () => {
-        cashSessionReader.lockUnresolvedForUser.mockResolvedValue(null);
-        await expect(
-          engine.register(
-            tx as unknown as Prisma.TransactionClient,
-            makeRegisterCommand(),
-          ),
-        ).rejects.toBeInstanceOf(ConflictException);
-        expect(tx.payment.create).not.toHaveBeenCalled();
-        expect(accountingEngine.postPaymentCollection).not.toHaveBeenCalled();
-        expect(auditService.record).not.toHaveBeenCalled();
-      });
-
-      it('caja PENDING_APPROVAL -> 409, nunca crea el Payment', async () => {
-        cashSessionReader.lockUnresolvedForUser.mockResolvedValue(
-          makeLockedCashSession({
-            status: CashSessionStatus.PENDING_APPROVAL,
-          }),
+    describe('cobro directo sin caja (Eliminación de Caja, Bloque C1)', () => {
+      it('registra el Payment sin ninguna CashSession: el motor no recibe ni consulta un lector de caja', async () => {
+        const result = await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand(),
         );
-        await expect(
-          engine.register(
-            tx as unknown as Prisma.TransactionClient,
-            makeRegisterCommand(),
-          ),
-        ).rejects.toBeInstanceOf(ConflictException);
-        expect(tx.payment.create).not.toHaveBeenCalled();
-        expect(accountingEngine.postPaymentCollection).not.toHaveBeenCalled();
-        expect(auditService.record).not.toHaveBeenCalled();
+        expect(result.id).toBe(PAYMENT_ID);
+        expect(tx.payment.create).toHaveBeenCalledTimes(1);
+        expect(
+          (engine as unknown as { cashSessionReader?: unknown })
+            .cashSessionReader,
+        ).toBeUndefined();
+        // Ningún SELECT ... FOR UPDATE propio en register(): el único lock
+        // sigue siendo `Sale FOR UPDATE`, que sostiene el llamador.
+        expect(tx.$queryRaw).not.toHaveBeenCalled();
       });
 
-      it('caja OPEN -> aceptado, tx.payment.create recibe cashSessionId de la fila ya bloqueada', async () => {
+      it('el INSERT nunca incluye cashSessionId: la columna nullable queda en NULL', async () => {
         await engine.register(
           tx as unknown as Prisma.TransactionClient,
           makeRegisterCommand(),
         );
         const call = tx.payment.create.mock.calls[0][0] as {
-          data: { cashSessionId: string };
+          data: Record<string, unknown>;
         };
-        expect(call.data.cashSessionId).toBe(CASH_SESSION_ID);
+        expect(call.data).not.toHaveProperty('cashSessionId');
       });
 
-      it('CashSessionReader.lockUnresolvedForUser recibe el MISMO tx y el actorUserId del comando', async () => {
-        await engine.register(
-          tx as unknown as Prisma.TransactionClient,
-          makeRegisterCommand({ actorUserId: ACTOR_ID }),
-        );
-        expect(cashSessionReader.lockUnresolvedForUser).toHaveBeenCalledWith(
-          tx,
-          ACTOR_ID,
-        );
-      });
-
-      it('se bloquea la caja ANTES de resolver el método de pago (orden determinista, §11)', async () => {
+      it('la metadata de PAYMENT_REGISTERED nunca incluye cashSessionId', async () => {
         await engine.register(
           tx as unknown as Prisma.TransactionClient,
           makeRegisterCommand(),
         );
-        const lockOrder =
-          cashSessionReader.lockUnresolvedForUser.mock.invocationCallOrder[0];
-        const resolveOrder =
-          paymentMethodReader.findByCode.mock.invocationCallOrder[0];
-        expect(lockOrder).toBeLessThan(resolveOrder);
+        const call = auditService.record.mock.calls[0][0] as {
+          metadata: Record<string, unknown>;
+        };
+        expect(call.metadata).not.toHaveProperty('cashSessionId');
       });
 
-      it('CASH (affectsCashDrawer=true) también exige caja abierta', async () => {
-        cashSessionReader.lockUnresolvedForUser.mockResolvedValue(null);
-        await expect(
-          engine.register(
+      it.each([
+        ['CASH', true, PaymentMethodAccountingDestination.CASH],
+        ['CARD', false, PaymentMethodAccountingDestination.BANK],
+        ['CUSTOM_WALLET', false, PaymentMethodAccountingDestination.BANK],
+      ])(
+        'método %s (affectsCashDrawer=%s) se registra directamente y postea al destino %s',
+        async (code, affectsCashDrawer, accountingDestination) => {
+          paymentMethodReader.findByCode.mockResolvedValue(
+            makeResolvedMethod({
+              code,
+              affectsCashDrawer,
+              accountingDestination,
+            }),
+          );
+          await engine.register(
             tx as unknown as Prisma.TransactionClient,
-            makeRegisterCommand({ method: 'CASH' }),
-          ),
-        ).rejects.toBeInstanceOf(ConflictException);
-      });
+            makeRegisterCommand({ method: code }),
+          );
+          const createCall = tx.payment.create.mock.calls[0][0] as {
+            data: Record<string, unknown>;
+          };
+          expect(createCall.data.paymentMethodCode).toBe(code);
+          expect(createCall.data.paymentMethodAffectsCashDrawer).toBe(
+            affectsCashDrawer,
+          );
+          expect(accountingEngine.postPaymentCollection).toHaveBeenCalledWith(
+            tx,
+            expect.objectContaining({ accountingDestination }),
+          );
+        },
+      );
 
-      it('CARD (affectsCashDrawer=false) también exige caja abierta — la exigencia nunca depende de affectsCashDrawer', async () => {
-        paymentMethodReader.findByCode.mockResolvedValue(
-          makeResolvedMethod({ code: 'CARD', affectsCashDrawer: false }),
+      it('auditoría del cobrador real: createdByUserId y userId de auditoría = actorUserId del comando', async () => {
+        const OTHER_ACTOR = '66666666-6666-4666-8666-666666666666';
+        await engine.register(
+          tx as unknown as Prisma.TransactionClient,
+          makeRegisterCommand({ actorUserId: OTHER_ACTOR }),
         );
-        cashSessionReader.lockUnresolvedForUser.mockResolvedValue(null);
-        await expect(
-          engine.register(
-            tx as unknown as Prisma.TransactionClient,
-            makeRegisterCommand({ method: 'CARD' }),
-          ),
-        ).rejects.toBeInstanceOf(ConflictException);
+        const createCall = tx.payment.create.mock.calls[0][0] as {
+          data: { createdByUserId: string };
+        };
+        const auditCall = auditService.record.mock.calls[0][0] as {
+          userId: string;
+        };
+        expect(createCall.data.createdByUserId).toBe(OTHER_ACTOR);
+        expect(auditCall.userId).toBe(OTHER_ACTOR);
       });
 
-      it('un método dinámico custom también exige caja abierta', async () => {
+      it('método inactivo sigue respondiendo 409 sin crear el Payment, sin contabilidad ni auditoría', async () => {
         paymentMethodReader.findByCode.mockResolvedValue(
-          makeResolvedMethod({
-            code: 'CUSTOM_WALLET',
-            affectsCashDrawer: false,
-          }),
+          makeResolvedMethod({ active: false }),
         );
-        cashSessionReader.lockUnresolvedForUser.mockResolvedValue(null);
         await expect(
           engine.register(
             tx as unknown as Prisma.TransactionClient,
-            makeRegisterCommand({ method: 'CUSTOM_WALLET' }),
+            makeRegisterCommand(),
           ),
         ).rejects.toBeInstanceOf(ConflictException);
+        expect(tx.payment.create).not.toHaveBeenCalled();
+        expect(accountingEngine.postPaymentCollection).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+
+      it('si la creación del Payment falla, el error se propaga sin postear contabilidad ni auditar (el llamador revierte su transacción)', async () => {
+        tx.payment.create.mockRejectedValue(new Error('fallo de INSERT'));
+        await expect(
+          engine.register(
+            tx as unknown as Prisma.TransactionClient,
+            makeRegisterCommand(),
+          ),
+        ).rejects.toThrow('fallo de INSERT');
+        expect(accountingEngine.postPaymentCollection).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+
+      it('si la auditoría falla, el error se propaga (nunca se traga dentro del motor)', async () => {
+        auditService.record.mockRejectedValue(new Error('fallo de auditoría'));
+        await expect(
+          engine.register(
+            tx as unknown as Prisma.TransactionClient,
+            makeRegisterCommand(),
+          ),
+        ).rejects.toThrow('fallo de auditoría');
       });
 
       it('cashSessionId nunca es controlable por el llamador: RegisterPaymentCommand no expone ese campo', () => {

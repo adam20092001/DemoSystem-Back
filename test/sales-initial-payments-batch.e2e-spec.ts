@@ -34,10 +34,10 @@ import { createTestPrismaClient } from './helpers/prisma-test-client';
  * PostgreSQL real) de que todos los pagos del lote se registran vía
  * PaymentEngine en la MISMA transacción que confirma la venta, o que nada
  * persiste si cualquiera falla (venta, correlativo, pagos, asientos, stock,
- * auditoría). Archivo dedicado, mismo criterio de propiedad de fixtures que
- * cash-sessions-payment-integration.e2e-spec.ts: usuarios exclusivos de
- * esta suite, secuencias NV/COT y "Público general" upserteados en
- * beforeAll y retirados en afterAll.
+ * auditoría). Archivo dedicado con fixtures de propiedad exacta: usuarios
+ * exclusivos de esta suite, secuencias NV/COT y "Público general"
+ * upserteados en beforeAll y retirados en afterAll. Desde la eliminación de
+ * Caja, ningún cobro exige ni crea una CashSession.
  */
 describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
   let app: INestApplication<App>;
@@ -48,12 +48,14 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
   const SELLER_NO_SESSION_USERNAME = 'e2e_seller_r1_nosession';
   const SELLER_NO_SESSION_PASSWORD = 'SellerR1NoSession123';
   const TEST_GENERIC_CODE = 'PUBLIC_GENERAL';
-  const OPENING_AMOUNT = '100.00';
+  // Valor UUID arbitrario: solo se usa para probar que `cashSessionId` es
+  // un campo NO declarado en el DTO (400), nunca como caja real.
+  const UNDECLARED_CASH_SESSION_ID = '00000000-0000-4000-8000-000000000000';
 
   let adminCookie: string;
   let sellerCookie: string;
   let noSessionCookie: string;
-  let sellerSessionId: string;
+  let noSessionUserId: string;
 
   let categoryId: string;
   let unitId: string;
@@ -65,7 +67,6 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
   const ownedProductIds: string[] = [];
   const ownedSaleIds: string[] = [];
   const ownedQuoteIds: string[] = [];
-  const ownedSessionIds: string[] = [];
   const ownedPaymentMethodIds: string[] = [];
 
   const RUN_ID = Date.now();
@@ -130,6 +131,11 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         SELLER_NO_SESSION_PASSWORD,
       )
     ).cookie;
+    noSessionUserId = (
+      await prisma.user.findUniqueOrThrow({
+        where: { username: SELLER_NO_SESSION_USERNAME },
+      })
+    ).id;
 
     await prisma.documentSequence.upsert({
       where: { documentType: DocumentType.SALE },
@@ -232,18 +238,6 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         `No se pudo desactivar el método fixture: ${JSON.stringify(deactivated.body)}`,
       );
     }
-
-    const opened = await request(app.getHttpServer())
-      .post('/api/v1/cash-sessions/open')
-      .set('Cookie', sellerCookie)
-      .send({ openingAmount: OPENING_AMOUNT });
-    if (opened.status !== 201) {
-      throw new Error(
-        `No se pudo abrir la caja fixture: ${JSON.stringify(opened.body)}`,
-      );
-    }
-    sellerSessionId = (opened.body as { id: string }).id;
-    ownedSessionIds.push(sellerSessionId);
   }, 120000);
 
   afterAll(async () => {
@@ -299,20 +293,6 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
           where: { entityType: 'Quote', entityId: { in: ownedQuoteIds } },
         });
         await prisma.quote.deleteMany({ where: { id: { in: ownedQuoteIds } } });
-      }
-      if (ownedSessionIds.length > 0) {
-        await prisma.cashSessionPaymentMethodSummary.deleteMany({
-          where: { cashSessionId: { in: ownedSessionIds } },
-        });
-        await prisma.auditLog.deleteMany({
-          where: {
-            entityType: 'CashSession',
-            entityId: { in: ownedSessionIds },
-          },
-        });
-        await prisma.cashSession.deleteMany({
-          where: { id: { in: ownedSessionIds } },
-        });
       }
       await prisma.documentSequence.deleteMany({
         where: {
@@ -423,27 +403,6 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
     return id;
   }
 
-  async function getLiveTotals(): Promise<{
-    collections: Prisma.Decimal;
-    cash: Prisma.Decimal;
-    expected: Prisma.Decimal;
-  }> {
-    const response = await request(app.getHttpServer())
-      .get('/api/v1/cash-sessions/current')
-      .set('Cookie', sellerCookie);
-    expect(response.status).toBe(200);
-    const body = response.body as {
-      liveCollectionsTotal: string;
-      liveCashCollectionsTotal: string;
-      liveExpectedCashAmount: string;
-    };
-    return {
-      collections: new Prisma.Decimal(body.liveCollectionsTotal),
-      cash: new Prisma.Decimal(body.liveCashCollectionsTotal),
-      expected: new Prisma.Decimal(body.liveExpectedCashAmount),
-    };
-  }
-
   async function saleSequenceNumber(): Promise<number> {
     const row = await prisma.documentSequence.findUniqueOrThrow({
       where: { documentType: DocumentType.SALE },
@@ -504,10 +463,9 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
   // Éxito — venta directa y conversión
   // ====================================================================
   describe('lote exitoso', () => {
-    it('venta directa 250 = CASH 100 + YAPE 100 + CARD 50: PAID, 3 Payments ACTIVE en la caja del cobrador, asientos por destino, totales de caja separados', async () => {
+    it('venta directa 250 = CASH 100 + YAPE 100 + CARD 50: PAID, 3 Payments ACTIVE sin caja, snapshot affectsCashDrawer, asientos por destino', async () => {
       const customerId = await createCustomer();
       const productId = await createServiceProduct('250.00');
-      const before = await getLiveTotals();
 
       const response = await postSale(sellerCookie, {
         customerId,
@@ -530,7 +488,7 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         where: { saleId: sale.id },
       });
       expect(rows).toHaveLength(3);
-      expect(rows.every((p) => p.cashSessionId === sellerSessionId)).toBe(true);
+      expect(rows.every((p) => p.cashSessionId === null)).toBe(true);
       expect(
         rows.map((p) => `${p.paymentMethodCode}:${p.amount.toFixed(2)}`).sort(),
       ).toEqual(['CARD:50.00', 'CASH:100.00', 'YAPE:100.00']);
@@ -578,16 +536,9 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         where: { action: AuditAction.SALE_CONFIRMED, entityId: sale.id },
       });
       expect(confirmedAudits).toBe(1);
-
-      const after = await getLiveTotals();
-      expect(after.collections.minus(before.collections).toFixed(2)).toBe(
-        '250.00',
-      );
-      expect(after.cash.minus(before.cash).toFixed(2)).toBe('100.00');
-      expect(after.expected.minus(before.expected).toFixed(2)).toBe('100.00');
     });
 
-    it('conversión de cotización con el mismo lote: PAID, Quote CONVERTED, 3 Payments en la caja del cobrador', async () => {
+    it('conversión de cotización con el mismo lote: PAID, Quote CONVERTED, 3 Payments sin caja', async () => {
       const customerId = await createCustomer();
       const productId = await createServiceProduct('250.00');
       const quoteId = await createQuote(customerId, productId);
@@ -606,7 +557,7 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         where: { saleId: sale.id },
       });
       expect(rows).toHaveLength(3);
-      expect(rows.every((p) => p.cashSessionId === sellerSessionId)).toBe(true);
+      expect(rows.every((p) => p.cashSessionId === null)).toBe(true);
       const quote = await prisma.quote.findUniqueOrThrow({
         where: { id: quoteId },
       });
@@ -681,13 +632,45 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
       expect(sale.balanceDue).toBe('0.00');
       expect(sale.payments).toHaveLength(2);
     });
+
+    it('cobrador que nunca tuvo una caja: lote -> 201 (antes 409); pagos sin caja; createdBy = ese cobrador; no se crea ninguna caja', async () => {
+      const customerId = await createCustomer();
+      const productId = await createServiceProduct('50.00');
+      const sessionsBefore = await prisma.cashSession.count({
+        where: { userId: noSessionUserId },
+      });
+
+      const response = await postSale(noSessionCookie, {
+        customerId,
+        items: [{ productId, quantity: '1' }],
+        payments: [
+          { method: 'CASH', amount: '25.00' },
+          { method: 'CASH', amount: '25.00' },
+        ],
+      });
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+
+      const rows = await prisma.payment.findMany({
+        where: { saleId: sale.id },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.every((p) => p.cashSessionId === null)).toBe(true);
+      expect(rows.every((p) => p.createdByUserId === noSessionUserId)).toBe(
+        true,
+      );
+      expect(
+        await prisma.cashSession.count({ where: { userId: noSessionUserId } }),
+      ).toBe(sessionsBefore);
+    });
   });
 
   // ====================================================================
   // Compatibilidad
   // ====================================================================
   describe('compatibilidad con el contrato existente', () => {
-    it('`payment` singular sigue funcionando: un Payment en la caja del cobrador', async () => {
+    it('`payment` singular sigue funcionando: un Payment sin caja', async () => {
       const customerId = await createCustomer();
       const productId = await createServiceProduct('60.00');
 
@@ -703,7 +686,7 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
       const row = await prisma.payment.findUniqueOrThrow({
         where: { id: sale.payments[0].id },
       });
-      expect(row.cashSessionId).toBe(sellerSessionId);
+      expect(row.cashSessionId).toBeNull();
     });
 
     it('sin `payment` ni `payments`: UNPAID, sin Payments (comportamiento previo)', async () => {
@@ -813,7 +796,11 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
           customerId,
           items: [{ productId, quantity: '1' }],
           payments: [
-            { method: 'CASH', amount: '50.00', cashSessionId: sellerSessionId },
+            {
+              method: 'CASH',
+              amount: '50.00',
+              cashSessionId: UNDECLARED_CASH_SESSION_ID,
+            },
           ],
         }),
         400,
@@ -846,21 +833,6 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
       });
       expect(response.status).toBe(409);
       expect(await persistenceSnapshot(genericCustomerId)).toEqual(before);
-    });
-
-    it('cobrador sin caja OPEN -> 409, ninguna venta persiste', async () => {
-      await expectRejectedWithoutEffects(
-        (customerId, productId) => ({
-          customerId,
-          items: [{ productId, quantity: '1' }],
-          payments: [
-            { method: 'CASH', amount: '25.00' },
-            { method: 'CASH', amount: '25.00' },
-          ],
-        }),
-        409,
-        noSessionCookie,
-      );
     });
   });
 
