@@ -78,7 +78,7 @@ Reglas de capas:
 8. **Clientes** — incluye el cliente especial **Público general**.
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
-11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código.
+11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código. Desde NR-01, los 5 métodos activos nacen con `requiresReference=false` en el baseline (`prisma/seed.ts`): la referencia es opcional por defecto en todos ellos, sin dejar de ser editable por ADMIN vía `PATCH /payment-methods/:id` (ver §11).
 12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
@@ -369,9 +369,30 @@ Evidencia de la última validación completa: **84 suites / 2939 pruebas
 unitarias**; **31 suites / 1250 pruebas E2E en dos ejecuciones consecutivas**
 (exit code 0 ambas); `lint:check` y `build` correctos.
 
+**NR-01 — referencia de pago opcional por defecto** (rama
+`feat/optional-payment-references`, base `main` en `ab280a9`, **en curso,
+sin PR ni merge todavía**): los 5 métodos de pago activos (`CASH`, `CARD`,
+`TRANSFER`, `YAPE`, `PLIN`) nacen con `requiresReference=false` en el
+baseline (`SEED_PAYMENT_METHODS`, `prisma/seed.ts`) — antes solo `CASH` lo
+tenía así; los 4 métodos legacy inactivos no cambian. La referencia sigue
+siendo editable por método en cualquier momento vía ADMIN (`PATCH
+/api/v1/payment-methods/:id`), y el motor (`PaymentEngine.register()`,
+`assertReferenceRequiredForMethod()`) sigue exigiéndola sin excepción
+cuando `requiresReference=true` para cualquier método (baseline o
+personalizado) — ningún archivo de dominio fue modificado, solo el dato
+baseline. `seedPaymentMethods()` sigue usando `upsert` con `update: {}`:
+este cambio de seed **nunca actualiza automáticamente** una base ya
+seedeada (incluida `pos_db`, demo o producción); para una instalación
+existente, aplicar el nuevo baseline requiere una acción ADMIN separada
+(el mismo `PATCH` por método) — no ocurre por desplegar este cambio ni por
+reejecutar el seed. No se modificó ningún dato histórico (`Payment.reference`
+de pagos ya registrados queda intacto). Pendiente: ejecución E2E completa
+(no realizada en la sesión de implementación, que fue sin acceso a base de
+datos) y autorización para commit/push/PR.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
-opcional; referencias de pago no obligatorias; descuentos por producto;
+opcional; descuentos por producto;
 descuentos en soles o porcentaje; umbral mínimo de stock configurable por
 producto (alertas); exportaciones a Excel; Libro Diario y Libro Mayor como
 reportes contables terminados (hoy solo existen los asientos básicos de

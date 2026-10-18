@@ -1017,26 +1017,155 @@ describe('Payments (e2e)', () => {
   // Método de pago y referencia
   // ==================================================================
   describe('método de pago y referencia', () => {
-    // CARD/TRANSFER/YAPE/PLIN: baseline dinámico activo con
-    // requiresReference=true (Ticket C, Bloque C1 seed). BANK_TRANSFER y
-    // BANK_DEPOSIT ya no sirven para este propósito: son baseline legacy
-    // INACTIVO desde C1/C2 (solo existen para preservar historial), así que
-    // registrar un Payment NUEVO contra ellos ahora es 409, no 400/201 — ver
-    // el describe "resolución dinámica de método" para esa aserción.
+    // NR-01: CARD/TRANSFER/YAPE/PLIN pasan a requiresReference=false en el
+    // baseline (antes true, Ticket C Bloque C1) — la referencia es ahora
+    // opcional por defecto en los 5 métodos activos, igual que CASH. Omitida
+    // o de solo espacios se normaliza a null y el pago se acepta igual. El
+    // mecanismo genérico requiresReference=true sigue probado por separado
+    // con un método personalizado (ver "custom methods creados por ADMIN son
+    // usables de inmediato" más abajo: CUSTOM_BANK). BANK_TRANSFER y
+    // BANK_DEPOSIT siguen sin servir para este propósito: son baseline
+    // legacy INACTIVO desde C1/C2 (solo existen para preservar historial),
+    // así que registrar un Payment NUEVO contra ellos sigue siendo 409, no
+    // 400/201 — ver el describe "resolución dinámica de método" para esa
+    // aserción.
+    //
+    // NR-01B1: esta suite NO asume el valor real de requiresReference para
+    // CARD/TRANSFER/YAPE/PLIN en pos_db_test. seedPaymentMethods() usa
+    // upsert con `update: {}` (ver prisma/seed.ts), así que una base de
+    // pruebas inicializada ANTES de NR-01 podría conservar
+    // requiresReference=true para estos 4 métodos indefinidamente — el
+    // cambio de seed nunca la actualiza. Snapshot-y-restauración exacta
+    // (mismo criterio que configuration.e2e-spec.ts/
+    // configuration-tax.e2e-spec.ts): se lee el valor REAL de cada método
+    // antes de cualquier PATCH, se fuerza explícitamente
+    // requiresReference=false solo si no lo tenía ya (para que los casos
+    // de este describe sean deterministas sin depender del historial de la
+    // base), y se restaura el valor original exacto en el afterAll — nunca
+    // se asume "false" como valor a restaurar. Un PATCH que no cambia nada
+    // es un no-op verificado sin escritura ni auditoría
+    // (PaymentMethodsService.updatePaymentMethod(), `changedFields.length
+    // === 0`), así que esta suite solo llama a setRequiresReference()
+    // cuando el valor REALMENTE necesita cambiar — cada llamada genera
+    // como máximo una fila PAYMENT_METHOD_UPDATED, rastreada por su
+    // AuditLog.id propio (nunca por entityId: estos 4 métodos son filas
+    // reales y compartidas, con posible auditoría ajena a esta suite) y
+    // eliminada en el afterAll. `maxWorkers: 1` en jest-e2e.json garantiza
+    // que ningún otro archivo e2e corre en paralelo mientras este describe
+    // mantiene el valor forzado, así que ninguna otra suite puede
+    // observarlo.
+    const REFERENCE_BASELINE_CODES = [
+      'CARD',
+      'TRANSFER',
+      'YAPE',
+      'PLIN',
+    ] as const;
+    const referenceMethodSnapshots: Record<
+      string,
+      { id: string; requiresReference: boolean }
+    > = {};
+    const ownedReferenceBaselineAuditLogIds: string[] = [];
+
+    async function fetchPaymentMethods(): Promise<
+      Array<{ id: string; code: string; requiresReference: boolean }>
+    > {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/payment-methods')
+        .set('Cookie', adminCookie);
+      if (response.status !== 200) {
+        throw new Error(
+          `No se pudo leer GET /payment-methods: ${JSON.stringify(response.body)}`,
+        );
+      }
+      return response.body as Array<{
+        id: string;
+        code: string;
+        requiresReference: boolean;
+      }>;
+    }
+
+    async function setRequiresReference(
+      id: string,
+      requiresReference: boolean,
+    ): Promise<void> {
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/payment-methods/${id}`)
+        .set('Cookie', adminCookie)
+        .send({ requiresReference });
+      if (response.status !== 200) {
+        throw new Error(
+          `No se pudo fijar requiresReference=${requiresReference} en ${id}: ${JSON.stringify(response.body)}`,
+        );
+      }
+      const latest = await prisma.auditLog.findFirst({
+        where: {
+          action: AuditAction.PAYMENT_METHOD_UPDATED,
+          entityType: 'PaymentMethod',
+          entityId: id,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        latest !== null &&
+        !ownedReferenceBaselineAuditLogIds.includes(latest.id)
+      ) {
+        ownedReferenceBaselineAuditLogIds.push(latest.id);
+      }
+    }
+
+    beforeAll(async () => {
+      const methods = await fetchPaymentMethods();
+      for (const code of REFERENCE_BASELINE_CODES) {
+        const method = methods.find((m) => m.code === code);
+        if (method === undefined) {
+          throw new Error(
+            `No se encontró el método de pago baseline "${code}" en GET /payment-methods`,
+          );
+        }
+        referenceMethodSnapshots[code] = {
+          id: method.id,
+          requiresReference: method.requiresReference,
+        };
+        if (method.requiresReference !== false) {
+          await setRequiresReference(method.id, false);
+        }
+      }
+    });
+
+    afterAll(async () => {
+      for (const code of REFERENCE_BASELINE_CODES) {
+        const snapshot = referenceMethodSnapshots[code];
+        if (snapshot === undefined) {
+          continue;
+        }
+        if (snapshot.requiresReference !== false) {
+          await setRequiresReference(snapshot.id, snapshot.requiresReference);
+        }
+      }
+      if (ownedReferenceBaselineAuditLogIds.length > 0) {
+        await prisma.auditLog.deleteMany({
+          where: { id: { in: ownedReferenceBaselineAuditLogIds } },
+        });
+      }
+    });
+
     it.each(['CARD', 'TRANSFER', 'YAPE', 'PLIN'])(
-      '%s sin referencia (ausente) → 400',
+      '%s sin referencia (ausente) → 201, reference persiste null (NR-01: requiresReference=false)',
       async (method) => {
         const sale = await createFixtureSale({ total: '100.00' });
         const response = await registerPayment(adminCookie, sale.id, {
           method,
           amount: '10.00',
         });
-        expect(response.status).toBe(400);
+        expect(response.status).toBe(201);
+        expect(
+          (response.body as PaymentMutationBody).payment.reference,
+        ).toBeNull();
       },
     );
 
     it.each(['CARD', 'TRANSFER', 'YAPE', 'PLIN'])(
-      '%s con referencia solo espacios → 400',
+      '%s con referencia solo espacios → 201, se normaliza a null (trim)',
       async (method) => {
         const sale = await createFixtureSale({ total: '100.00' });
         const response = await registerPayment(adminCookie, sale.id, {
@@ -1044,7 +1173,10 @@ describe('Payments (e2e)', () => {
           amount: '10.00',
           reference: '    ',
         });
-        expect(response.status).toBe(400);
+        expect(response.status).toBe(201);
+        expect(
+          (response.body as PaymentMutationBody).payment.reference,
+        ).toBeNull();
       },
     );
 
@@ -1121,6 +1253,66 @@ describe('Payments (e2e)', () => {
         reference: ref101,
       });
       expect(bad.status).toBe(400);
+    });
+
+    it('NR-01B1: ADMIN reconfigura CARD (método baseline real, no uno personalizado) a requiresReference=true -> se exige la referencia; vuelve a false -> opcional de nuevo, sin inconsistencia de saldo ni de auditoría', async () => {
+      const cardId = referenceMethodSnapshots['CARD'].id;
+
+      // G: true -> se exige.
+      await setRequiresReference(cardId, true);
+      const sale = await createFixtureSale({ total: '100.00' });
+      const withoutRef = await registerPayment(adminCookie, sale.id, {
+        method: 'CARD',
+        amount: '40.00',
+      });
+      expect(withoutRef.status).toBe(400);
+      const afterRejected = await prisma.payment.count({
+        where: { saleId: sale.id },
+      });
+      expect(afterRejected).toBe(0);
+
+      const withRef = await registerPayment(adminCookie, sale.id, {
+        method: 'CARD',
+        amount: '40.00',
+        reference: 'OP-NR01B1-TOGGLE',
+      });
+      expect(withRef.status).toBe(201);
+      const withRefBody = withRef.body as PaymentMutationBody;
+      expect(withRefBody.payment.reference).toBe('OP-NR01B1-TOGGLE');
+      expect(withRefBody.sale.paidAmount).toBe('40.00');
+      expect(withRefBody.sale.balanceDue).toBe('60.00');
+
+      // K: ningún inconsistencia de saldo/auditoría para el pago aceptado.
+      const saleRowAfterFirst = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRowAfterFirst.paidAmount.toFixed(2)).toBe('40.00');
+      const auditRows = await prisma.auditLog.findMany({
+        where: {
+          action: AuditAction.PAYMENT_REGISTERED,
+          entityType: 'Payment',
+          entityId: withRefBody.payment.id,
+        },
+      });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].metadata).not.toHaveProperty('reference');
+
+      // H: false -> opcional de nuevo, sobre el mismo método real.
+      await setRequiresReference(cardId, false);
+      const secondWithoutRef = await registerPayment(adminCookie, sale.id, {
+        method: 'CARD',
+        amount: '60.00',
+      });
+      expect(secondWithoutRef.status).toBe(201);
+      const secondBody = secondWithoutRef.body as PaymentMutationBody;
+      expect(secondBody.payment.reference).toBeNull();
+      expect(secondBody.sale.paidAmount).toBe('100.00');
+      expect(secondBody.sale.balanceDue).toBe('0.00');
+
+      const finalCount = await prisma.payment.count({
+        where: { saleId: sale.id, status: PaymentStatus.ACTIVE },
+      });
+      expect(finalCount).toBe(2);
     });
   });
 
@@ -1744,7 +1936,8 @@ describe('Payments (e2e)', () => {
         registerPayment(sellerCookie, sale.id, {
           method: 'CARD',
           amount: '60.00',
-          // CARD exige referencia en el baseline (requiresReference=true).
+          // Referencia opcional desde NR-01 (CARD requiresReference=false);
+          // se provee igual para cubrir el camino "referencia presente".
           reference: 'VCH-C3-60',
         }),
       ]);

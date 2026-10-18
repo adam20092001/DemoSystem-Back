@@ -5373,6 +5373,35 @@ describe('Sales (e2e)', () => {
     let productDMultiB: FixtureProduct;
     let prospectInitialPayment: FixtureCustomer;
     let prospectOverpayRollback: FixtureCustomer;
+    let cardMethodId: string;
+    let cardRequiresReferenceOriginal: boolean;
+    const ownedCardReferenceAuditLogIds: string[] = [];
+
+    async function setCardRequiresReference(value: boolean): Promise<void> {
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/payment-methods/${cardMethodId}`)
+        .set('Cookie', adminCookie)
+        .send({ requiresReference: value });
+      if (response.status !== 200) {
+        throw new Error(
+          `No se pudo fijar CARD.requiresReference=${value}: ${JSON.stringify(response.body)}`,
+        );
+      }
+      const latest = await prisma.auditLog.findFirst({
+        where: {
+          action: AuditAction.PAYMENT_METHOD_UPDATED,
+          entityType: 'PaymentMethod',
+          entityId: cardMethodId,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        latest !== null &&
+        !ownedCardReferenceAuditLogIds.includes(latest.id)
+      ) {
+        ownedCardReferenceAuditLogIds.push(latest.id);
+      }
+    }
 
     async function createDedicatedProduct(
       data: Partial<Prisma.ProductUncheckedCreateInput>,
@@ -5440,6 +5469,50 @@ describe('Sales (e2e)', () => {
       });
       createdCustomerIds.push(prospectB.id);
       prospectOverpayRollback = { id: prospectB.id, name: prospectB.name };
+
+      // NR-01B1: igual criterio de snapshot-y-restauración que
+      // payments.e2e-spec.ts -- esta suite no asume el valor real de
+      // CARD.requiresReference en pos_db_test (seedPaymentMethods() usa
+      // update: {}; una base inicializada ANTES de NR-01 podría
+      // conservarlo en true). Acotado a CARD (representativo de los 4
+      // métodos baseline no-efectivo: la ruta de validación del pago
+      // inicial es la misma parseInitialPayments() ->
+      // PaymentEngine.register() para los 4, ya probada exhaustivamente
+      // por método en payments.e2e-spec.ts).
+      const methodsResponse = await request(app.getHttpServer())
+        .get('/api/v1/payment-methods')
+        .set('Cookie', adminCookie);
+      if (methodsResponse.status !== 200) {
+        throw new Error(
+          `No se pudo leer GET /payment-methods: ${JSON.stringify(methodsResponse.body)}`,
+        );
+      }
+      const cardMethod = (
+        methodsResponse.body as Array<{
+          id: string;
+          code: string;
+          requiresReference: boolean;
+        }>
+      ).find((m) => m.code === 'CARD');
+      if (cardMethod === undefined) {
+        throw new Error('No se encontró el método de pago baseline "CARD"');
+      }
+      cardMethodId = cardMethod.id;
+      cardRequiresReferenceOriginal = cardMethod.requiresReference;
+      if (cardMethod.requiresReference !== false) {
+        await setCardRequiresReference(false);
+      }
+    });
+
+    afterAll(async () => {
+      if (cardRequiresReferenceOriginal !== false) {
+        await setCardRequiresReference(cardRequiresReferenceOriginal);
+      }
+      if (ownedCardReferenceAuditLogIds.length > 0) {
+        await prisma.auditLog.deleteMany({
+          where: { id: { in: ownedCardReferenceAuditLogIds } },
+        });
+      }
     });
 
     it('sin pago inicial: UNPAID, paidAmount 0.00, balanceDue = total, payments=[]', async () => {
@@ -5711,6 +5784,42 @@ describe('Sales (e2e)', () => {
         stockBBefore.stockCurrent.toFixed(3),
       );
     });
+
+    it('NR-01B1: pago inicial único con CARD sin referencia (requiresReference=false): 201, PAID, reference null', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payment: { method: 'CARD', amount: '100.00' },
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.paidAmount).toBe('100.00');
+      expect(sale.balanceDue).toBe('0.00');
+      expect(sale.payments).toHaveLength(1);
+      const payment = sale.payments[0] as SafeSalePaymentItem;
+      expect(payment.reference).toBeNull();
+    });
+
+    it('NR-01B1: lote payments[] con dos pagos CARD, ambos sin referencia: 201, PAID, los dos Payment con reference null, ningún inconsistencia de saldo', async () => {
+      const sale = await createDirectSale(adminCookie, {
+        items: [{ productId: productD100.id, quantity: '1.000' }],
+        payments: [
+          { method: 'CARD', amount: '40.00' },
+          { method: 'CARD', amount: '60.00' },
+        ],
+      });
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.paidAmount).toBe('100.00');
+      expect(sale.balanceDue).toBe('0.00');
+      expect(sale.payments).toHaveLength(2);
+      for (const payment of sale.payments as SafeSalePaymentItem[]) {
+        expect(payment.status).toBe(PaymentStatus.ACTIVE);
+        expect(payment.reference).toBeNull();
+      }
+      const sumActive = (sale.payments as SafeSalePaymentItem[]).reduce(
+        (total, payment) => total + Number(payment.amount),
+        0,
+      );
+      expect(sumActive.toFixed(2)).toBe(sale.paidAmount);
+    });
   });
 
   // ==================================================================
@@ -5719,8 +5828,65 @@ describe('Sales (e2e)', () => {
   describe('Fase 7, Bloque D — pago inicial en conversión de cotización', () => {
     let productQD: FixtureProduct;
     let productQDInsufficient: FixtureProduct;
+    let cardMethodIdQ: string;
+    let cardRequiresReferenceOriginalQ: boolean;
+    const ownedCardReferenceAuditLogIdsQ: string[] = [];
+
+    // NR-01B1: mismo criterio de snapshot-y-restauración acotado a CARD que
+    // el describe "pago inicial en venta directa" (no se comparte estado
+    // entre describes: cada uno restaura en su propio afterAll antes de que
+    // el siguiente empiece).
+    async function setCardRequiresReferenceQ(value: boolean): Promise<void> {
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/payment-methods/${cardMethodIdQ}`)
+        .set('Cookie', adminCookie)
+        .send({ requiresReference: value });
+      if (response.status !== 200) {
+        throw new Error(
+          `No se pudo fijar CARD.requiresReference=${value}: ${JSON.stringify(response.body)}`,
+        );
+      }
+      const latest = await prisma.auditLog.findFirst({
+        where: {
+          action: AuditAction.PAYMENT_METHOD_UPDATED,
+          entityType: 'PaymentMethod',
+          entityId: cardMethodIdQ,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        latest !== null &&
+        !ownedCardReferenceAuditLogIdsQ.includes(latest.id)
+      ) {
+        ownedCardReferenceAuditLogIdsQ.push(latest.id);
+      }
+    }
 
     beforeAll(async () => {
+      const methodsResponse = await request(app.getHttpServer())
+        .get('/api/v1/payment-methods')
+        .set('Cookie', adminCookie);
+      if (methodsResponse.status !== 200) {
+        throw new Error(
+          `No se pudo leer GET /payment-methods: ${JSON.stringify(methodsResponse.body)}`,
+        );
+      }
+      const cardMethod = (
+        methodsResponse.body as Array<{
+          id: string;
+          code: string;
+          requiresReference: boolean;
+        }>
+      ).find((m) => m.code === 'CARD');
+      if (cardMethod === undefined) {
+        throw new Error('No se encontró el método de pago baseline "CARD"');
+      }
+      cardMethodIdQ = cardMethod.id;
+      cardRequiresReferenceOriginalQ = cardMethod.requiresReference;
+      if (cardMethod.requiresReference !== false) {
+        await setCardRequiresReferenceQ(false);
+      }
+
       const suffixA = nextSuffix();
       const rowA = await prisma.product.create({
         data: {
@@ -5762,6 +5928,17 @@ describe('Sales (e2e)', () => {
         name: rowB.name,
         salePrice: rowB.salePrice.toFixed(2),
       };
+    });
+
+    afterAll(async () => {
+      if (cardRequiresReferenceOriginalQ !== false) {
+        await setCardRequiresReferenceQ(cardRequiresReferenceOriginalQ);
+      }
+      if (ownedCardReferenceAuditLogIdsQ.length > 0) {
+        await prisma.auditLog.deleteMany({
+          where: { id: { in: ownedCardReferenceAuditLogIdsQ } },
+        });
+      }
     });
 
     it('sin pago (preserva el comportamiento de la Fase 6): UNPAID, paidAmount 0, balanceDue = total, payments=[]; Quote CONVERTED', async () => {
@@ -5957,6 +6134,32 @@ describe('Sales (e2e)', () => {
       expect(sale.paidAmount).toBe('10.00');
       expect(sale.balanceDue).toBe('20.00');
       expect(sale.payments).toHaveLength(1);
+    });
+
+    it('NR-01B1: conversión de cotización con pago inicial CARD sin referencia (requiresReference=false): 201, PAID, reference null, Quote CONVERTED', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [quoteItemFor(productQD, '1.000')],
+      });
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({ payment: { method: 'CARD', amount: '100.00' } });
+      expect(response.status).toBe(201);
+      const sale = response.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+      expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+      expect(sale.paidAmount).toBe('100.00');
+      expect(sale.balanceDue).toBe('0.00');
+      expect(sale.payments).toHaveLength(1);
+      const payment = sale.payments[0] as SafeSalePaymentItem;
+      expect(payment.reference).toBeNull();
+      const quoteRow = await prisma.quote.findUniqueOrThrow({
+        where: { id: quote.id },
+      });
+      expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
     });
   });
 
