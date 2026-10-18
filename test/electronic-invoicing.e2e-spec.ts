@@ -262,6 +262,10 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
         documentType: CustomerDocumentType.RUC,
         documentNumber: '20123456789',
         name: 'Distribuidora Fiscal E2E SAC',
+        // NR-02A: createFixtureSale() de este archivo nunca envía `payment`
+        // (venta con saldo pendiente completo) -- cliente PRE-EXISTENTE a
+        // NR-02A, mismo criterio que el backfill real.
+        creditEnabled: true,
       },
     });
     rucCustomerId = rucCustomer.id;

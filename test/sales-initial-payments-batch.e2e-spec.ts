@@ -373,6 +373,16 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
     expect(response.status).toBe(201);
     const id = (response.body as { id: string }).id;
     ownedCustomerIds.push(id);
+    // NR-02A: CreateCustomerDto no declara creditEnabled, así que nace en
+    // false. Este archivo prueba PARTIALLY_PAID/UNPAID deliberadamente
+    // (R1) -- cliente PRE-EXISTENTE a NR-02A, mismo criterio que el
+    // backfill real. SELLER no puede habilitarlo (ADMIN-only): se usa
+    // adminCookie aquí, nunca sellerCookie.
+    const creditResponse = await request(app.getHttpServer())
+      .patch(`/api/v1/customers/${id}/credit`)
+      .set('Cookie', adminCookie)
+      .send({ creditEnabled: true });
+    expect(creditResponse.status).toBe(200);
     return id;
   }
 

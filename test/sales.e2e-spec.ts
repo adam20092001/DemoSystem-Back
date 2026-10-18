@@ -739,6 +739,19 @@ describe('Sales (e2e)', () => {
         data: {
           customerStage: CustomerStage.CUSTOMER,
           status: CustomerStatus.ACTIVE,
+          // NR-02A: todos los clientes fixture de este archivo representan
+          // clientes PRE-EXISTENTES a NR-02A (nunca uno creado para probar
+          // el baseline false de clientes nuevos, que vive en su propio
+          // describe dedicado con su propio fixture explícito) — mismo
+          // criterio que el backfill real de la migración
+          // (20261018221500_add_customer_credit_enabled: todo cliente no
+          // genérico ya existente pasa a true). Sin esto, cientos de tests
+          // preexistentes de pago parcial/sin pago inicial sobre
+          // personActive y el resto de clientes de este bloque romperían
+          // en cuanto la migración se aplique. Irrelevante para
+          // blockedCustomer/inactiveCustomer (bloqueados por su propio
+          // status antes de llegar a evaluarse creditEnabled).
+          creditEnabled: true,
           ...data,
         } as Prisma.CustomerUncheckedCreateInput,
       });
@@ -5820,6 +5833,119 @@ describe('Sales (e2e)', () => {
       );
       expect(sumActive.toFixed(2)).toBe(sale.paidAmount);
     });
+
+    describe('NR-02A: crédito configurable por cliente, end-to-end', () => {
+      async function createCustomerWithCredit(
+        creditEnabled: boolean,
+      ): Promise<string> {
+        const suffix = nextSuffix();
+        const row = await prisma.customer.create({
+          data: {
+            customerType: CustomerType.PERSON,
+            customerStage: CustomerStage.CUSTOMER,
+            status: CustomerStatus.ACTIVE,
+            name: `Cliente Credito E2E ${suffix}`,
+            creditEnabled,
+          },
+        });
+        createdCustomerIds.push(row.id);
+        return row.id;
+      }
+
+      it('crédito deshabilitado: sin pago -> 409, sin crear Sale', async () => {
+        const customerId = await createCustomerWithCredit(false);
+        const paymentsBefore = await prisma.payment.count();
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/sales')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateSaleBody({
+              customerId,
+              items: [{ productId: productD100.id, quantity: '1.000' }],
+            }),
+          );
+        expect(response.status).toBe(409);
+        expect((response.body as { message?: string }).message).toContain(
+          'crédito habilitado',
+        );
+        expect(await prisma.payment.count()).toBe(paymentsBefore);
+        expect(await prisma.sale.count({ where: { customerId } })).toBe(0);
+      });
+
+      it('crédito deshabilitado: pago parcial -> 409', async () => {
+        const customerId = await createCustomerWithCredit(false);
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/sales')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateSaleBody({
+              customerId,
+              items: [{ productId: productD100.id, quantity: '1.000' }],
+              payment: { method: 'CASH', amount: '40.00' },
+            }),
+          );
+        expect(response.status).toBe(409);
+      });
+
+      it('crédito deshabilitado: pago total -> 201 (0 de saldo nunca depende de creditEnabled)', async () => {
+        const customerId = await createCustomerWithCredit(false);
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/sales')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateSaleBody({
+              customerId,
+              items: [{ productId: productD100.id, quantity: '1.000' }],
+              payment: { method: 'CASH', amount: '100.00' },
+            }),
+          );
+        expect(response.status).toBe(201);
+        createdSaleIds.push((response.body as SafeSaleBody).id);
+      });
+
+      it('crédito habilitado: sin pago -> 201, UNPAID, balanceDue = total', async () => {
+        const customerId = await createCustomerWithCredit(true);
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/sales')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateSaleBody({
+              customerId,
+              items: [{ productId: productD100.id, quantity: '1.000' }],
+            }),
+          );
+        expect(response.status).toBe(201);
+        const sale = response.body as SafeSaleBody;
+        createdSaleIds.push(sale.id);
+        expect(sale.paymentStatus).toBe(SalePaymentStatus.UNPAID);
+        expect(sale.balanceDue).toBe(sale.total);
+      });
+
+      it('ADMIN deshabilita el crédito con deuda histórica ya existente: el cobro posterior sigue funcionando (NR-02A §7)', async () => {
+        const customerId = await createCustomerWithCredit(true);
+        const sale = await createDirectSale(adminCookie, {
+          customerId,
+          items: [{ productId: productD100.id, quantity: '1.000' }],
+        });
+        expect(sale.balanceDue).toBe('100.00');
+
+        const disable = await request(app.getHttpServer())
+          .patch(`/api/v1/customers/${customerId}/credit`)
+          .set('Cookie', adminCookie)
+          .send({ creditEnabled: false });
+        expect(disable.status).toBe(200);
+
+        const payment = await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .set('Cookie', adminCookie)
+          .send({ method: 'CASH', amount: '100.00' });
+        expect(payment.status).toBe(201);
+        const saleRow = await prisma.sale.findUniqueOrThrow({
+          where: { id: sale.id },
+        });
+        expect(saleRow.balanceDue.toFixed(2)).toBe('0.00');
+      });
+    });
   });
 
   // ==================================================================
@@ -6064,6 +6190,11 @@ describe('Sales (e2e)', () => {
           name: `Cliente Snapshot Pago E2E ${snapshotSuffix}`,
           documentType: CustomerDocumentType.DNI,
           documentNumber: `SNPP${snapshotSuffix}`,
+          // NR-02A: este test convierte con pago PARCIAL (10 de 30) — sin
+          // crédito habilitado, assertCustomerDebtRules respondería 409
+          // antes de llegar a lo que el test realmente quiere probar
+          // (snapshot comercial inmutable).
+          creditEnabled: true,
         },
       });
       createdCustomerIds.push(customer.id);
@@ -6160,6 +6291,116 @@ describe('Sales (e2e)', () => {
         where: { id: quote.id },
       });
       expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
+    });
+
+    describe('NR-02A: crédito configurable por cliente, conversión de cotización', () => {
+      // E/F (cliente con creditEnabled=true, sin pago / con pago parcial:
+      // permitida) ya están demostrados por los tests preexistentes de
+      // este mismo describe sobre personActive ("sin pago (preserva el
+      // comportamiento de la Fase 6)" y "pago parcial (40 de 100)") --
+      // personActive tiene creditEnabled=true explícito desde NR-02B1
+      // (ver createCustomer() del beforeAll superior). No se duplican
+      // aquí. Solo se agregan B/C/D (el comportamiento genuinamente
+      // nuevo: creditEnabled=false bloqueando la conversión).
+      async function createNoCreditCustomer(): Promise<string> {
+        const suffix = nextSuffix();
+        const row = await prisma.customer.create({
+          data: {
+            customerType: CustomerType.PERSON,
+            customerStage: CustomerStage.CUSTOMER,
+            status: CustomerStatus.ACTIVE,
+            name: `Cliente Conversion Sin Credito E2E ${suffix}`,
+            creditEnabled: false,
+          },
+        });
+        createdCustomerIds.push(row.id);
+        return row.id;
+      }
+
+      it('B: creditEnabled=false, conversión sin pago inicial -> 409; Quote no se convierte, sin Sale/Payment/descuento de stock/auditoría de éxito', async () => {
+        const customerId = await createNoCreditCustomer();
+        const quote = await createDirectQuote({
+          customerId,
+          customerType: CustomerType.PERSON,
+          customerName: 'Cliente Conversion Sin Credito E2E',
+          items: [quoteItemFor(productQD, '1.000')],
+        });
+        const stockBefore = await prisma.product.findUniqueOrThrow({
+          where: { id: productQD.id },
+        });
+        const salesBefore = await prisma.sale.count();
+        const paymentsBefore = await prisma.payment.count();
+
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send();
+        expect(response.status).toBe(409);
+        expect((response.body as { message?: string }).message).toContain(
+          'crédito habilitado',
+        );
+
+        expect(await prisma.sale.count()).toBe(salesBefore);
+        expect(await prisma.payment.count()).toBe(paymentsBefore);
+        const quoteRow = await prisma.quote.findUniqueOrThrow({
+          where: { id: quote.id },
+        });
+        expect(quoteRow.status).not.toBe(QuoteStatus.CONVERTED);
+        const stockAfter = await prisma.product.findUniqueOrThrow({
+          where: { id: productQD.id },
+        });
+        expect(stockAfter.stockCurrent.toFixed(3)).toBe(
+          stockBefore.stockCurrent.toFixed(3),
+        );
+        const convertedAudits = await fetchAuditRows(
+          AuditAction.QUOTE_CONVERTED,
+          'Quote',
+          quote.id,
+        );
+        expect(convertedAudits).toHaveLength(0);
+      });
+
+      it('C: creditEnabled=false, conversión con pago parcial -> 409; Quote no se convierte', async () => {
+        const customerId = await createNoCreditCustomer();
+        const quote = await createDirectQuote({
+          customerId,
+          customerType: CustomerType.PERSON,
+          customerName: 'Cliente Conversion Sin Credito E2E',
+          items: [quoteItemFor(productQD, '1.000')],
+        });
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({ payment: { method: 'CASH', amount: '40.00' } });
+        expect(response.status).toBe(409);
+        const quoteRow = await prisma.quote.findUniqueOrThrow({
+          where: { id: quote.id },
+        });
+        expect(quoteRow.status).not.toBe(QuoteStatus.CONVERTED);
+      });
+
+      it('D: creditEnabled=false, conversión con pago completo -> 201, Quote CONVERTED (0 de saldo nunca depende de creditEnabled)', async () => {
+        const customerId = await createNoCreditCustomer();
+        const quote = await createDirectQuote({
+          customerId,
+          customerType: CustomerType.PERSON,
+          customerName: 'Cliente Conversion Sin Credito E2E',
+          items: [quoteItemFor(productQD, '1.000')],
+        });
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({ payment: { method: 'CASH', amount: '100.00' } });
+        expect(response.status).toBe(201);
+        const sale = response.body as SafeSaleBody;
+        createdSaleIds.push(sale.id);
+        expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
+        expect(sale.balanceDue).toBe('0.00');
+        const quoteRow = await prisma.quote.findUniqueOrThrow({
+          where: { id: quote.id },
+        });
+        expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
+      });
     });
   });
 

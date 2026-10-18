@@ -245,6 +245,21 @@ describe('Dashboard (e2e)', () => {
     }
     const body = response.body as { id: string; name: string };
     createdCustomerIds.push(body.id);
+    // NR-02A: CreateCustomerDto no declara creditEnabled, así que un
+    // cliente nuevo nace en false. Este archivo representa clientes
+    // PRE-EXISTENTES a NR-02A (sus fixtures de receivables/saldo pendiente
+    // ya asumían crédito sin restricción antes de este requerimiento,
+    // mismo criterio que el backfill real de la migración). Se habilita
+    // explícitamente vía el endpoint administrativo real.
+    const creditResponse = await request(app.getHttpServer())
+      .patch(`/api/v1/customers/${body.id}/credit`)
+      .set('Cookie', adminCookie)
+      .send({ creditEnabled: true });
+    if (creditResponse.status !== 200) {
+      throw new Error(
+        `No se pudo habilitar crédito del cliente fixture: ${JSON.stringify(creditResponse.body)}`,
+      );
+    }
     return body;
   }
 

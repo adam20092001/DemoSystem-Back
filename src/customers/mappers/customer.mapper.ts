@@ -18,6 +18,7 @@ export const CUSTOMER_SAFE_SELECT = {
   internalNotes: true,
   isGeneric: true,
   status: true,
+  creditEnabled: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.CustomerSelect;
@@ -43,6 +44,7 @@ export function toSafeCustomer(row: CustomerSafeRow): SafeCustomer {
     internalNotes: row.internalNotes,
     isGeneric: row.isGeneric,
     status: row.status,
+    creditEnabled: row.creditEnabled,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

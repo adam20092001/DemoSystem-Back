@@ -296,6 +296,10 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         customerType: CustomerType.PERSON,
         customerStage: CustomerStage.CUSTOMER,
         status: CustomerStatus.ACTIVE,
+        // NR-02A: varias ventas/conversiones de este archivo se crean sin
+        // `payment` (saldo pendiente completo) -- cliente PRE-EXISTENTE a
+        // NR-02A, mismo criterio que el backfill real.
+        creditEnabled: true,
         name: 'Cliente E2E Config IGV',
       },
     });

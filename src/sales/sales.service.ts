@@ -102,6 +102,12 @@ interface LockedCustomerRow {
   documentNumber: string | null;
   name: string;
   address: string | null;
+  // NR-02A: leído dentro del mismo SELECT ... FOR UPDATE que ya bloqueaba
+  // esta fila (nunca una segunda consulta aparte): un ADMIN deshabilitando
+  // crédito concurrentemente se serializa con esta transacción exactamente
+  // igual que ya ocurría con status/isGeneric — ninguna lógica de bloqueo
+  // nueva, solo una columna más en la misma lectura.
+  creditEnabled: boolean;
 }
 
 interface LockedProductRow {
@@ -1064,7 +1070,8 @@ export class SalesService {
         document_type   AS "documentType",
         document_number AS "documentNumber",
         name,
-        address
+        address,
+        credit_enabled  AS "creditEnabled"
       FROM customers
       WHERE id = ${customerId}::uuid
     `);
@@ -1086,7 +1093,8 @@ export class SalesService {
         document_type   AS "documentType",
         document_number AS "documentNumber",
         name,
-        address
+        address,
+        credit_enabled  AS "creditEnabled"
       FROM customers
       WHERE id = ${customerId}::uuid
       FOR UPDATE
@@ -1330,7 +1338,14 @@ export class SalesService {
     }
   }
 
-  /** Reglas de deuda (D4/D5/D19 del plan aprobado): sin Payment en la Fase 6, nunca se inventa dinero recibido. */
+  /**
+   * Reglas de deuda (D4/D5/D19 del plan aprobado): sin Payment en la Fase 6,
+   * nunca se inventa dinero recibido. NR-02A añade la condición de
+   * creditEnabled, evaluada DESPUÉS de isGeneric/BLOCKED (que ya lanzan por
+   * su cuenta): solo puede alcanzarla un cliente identificado ACTIVE, el
+   * único caso para el que creditEnabled tiene significado real. Sin
+   * límite monetario ni vencimiento: fuera de alcance de NR-02A.
+   */
   private assertCustomerDebtRules(
     customer: LockedCustomerRow,
     balanceDue: Prisma.Decimal,
@@ -1346,6 +1361,15 @@ export class SalesService {
     ) {
       throw new ConflictException(
         'Un cliente bloqueado no puede generar una venta con saldo pendiente',
+      );
+    }
+    if (
+      !customer.isGeneric &&
+      !customer.creditEnabled &&
+      balanceDue.greaterThan(0)
+    ) {
+      throw new ConflictException(
+        'Este cliente no tiene crédito habilitado: no puede generar una venta con saldo pendiente',
       );
     }
   }

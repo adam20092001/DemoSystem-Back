@@ -84,6 +84,13 @@
 // una fila UPDATED redundante para la misma petición. Sin
 // PAYMENT_METHOD_REORDERED: reordenar es sortOrder cambiando por PATCH,
 // cubierto por UPDATED, igual que cualquier otro campo simple.
+// CUSTOMER_CREDIT_ENABLED/CUSTOMER_CREDIT_DISABLED se agregan en NR-02A:
+// CustomersService.setCreditEnabled() es su único emisor, exclusivo de
+// ADMIN (PATCH /customers/:id/credit). Mismo criterio que
+// PAYMENT_METHOD_ACTIVATED/DEACTIVATED: un PATCH que no cambia el valor
+// efectivo es un no-op y no genera ninguna de las dos filas. El cliente
+// genérico "Público general" nunca las genera (rechazado con 409, mismo
+// criterio que el resto de mutaciones de Customer).
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
   LOGIN_FAILED = 'LOGIN_FAILED',
@@ -122,6 +129,8 @@ export enum AuditAction {
   CUSTOMER_BLOCKED = 'CUSTOMER_BLOCKED',
   CUSTOMER_UNBLOCKED = 'CUSTOMER_UNBLOCKED',
   CUSTOMER_STAGE_CHANGED = 'CUSTOMER_STAGE_CHANGED',
+  CUSTOMER_CREDIT_ENABLED = 'CUSTOMER_CREDIT_ENABLED',
+  CUSTOMER_CREDIT_DISABLED = 'CUSTOMER_CREDIT_DISABLED',
   QUOTE_CREATED = 'QUOTE_CREATED',
   QUOTE_UPDATED = 'QUOTE_UPDATED',
   QUOTE_ACCEPTED = 'QUOTE_ACCEPTED',

@@ -421,6 +421,17 @@ model Customer {
 
   status CustomerStatus @default(ACTIVE)
 
+  // NR-02A: crédito configurable por cliente, exclusivo de ADMIN (ver
+  // SalesService.assertCustomerDebtRules() y PATCH /customers/:id/credit).
+  // @default(false) aquí es el valor para INSERT futuros (clientes nuevos);
+  // los clientes ya existentes al migrar quedan en true por backfill
+  // explícito en la migración (preservan el crédito ya vigente, nunca
+  // dueDate ni límite monetario — fuera de alcance). El cliente genérico
+  // "Público general" siempre queda en false (irrelevante en la práctica:
+  // assertCustomerDebtRules lo bloquea de forma incondicional por
+  // `isGeneric`, nunca por este campo).
+  creditEnabled Boolean @default(false) @map("credit_enabled")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

@@ -177,6 +177,10 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.CUSTOMER_BLOCKED]: ['previousStatus'],
   [AuditAction.CUSTOMER_UNBLOCKED]: ['previousStatus'],
   [AuditAction.CUSTOMER_STAGE_CHANGED]: ['previousStage', 'customerStage'],
+  // NR-02A. Mismo criterio que CUSTOMER_BLOCKED/CUSTOMER_UNBLOCKED: solo el
+  // valor anterior (el nuevo lo implica el propio nombre de la acción).
+  [AuditAction.CUSTOMER_CREDIT_ENABLED]: ['previousCreditEnabled'],
+  [AuditAction.CUSTOMER_CREDIT_DISABLED]: ['previousCreditEnabled'],
   // Nunca se audita PII de cliente (nombre/documento/dirección), payload de
   // ítems, nombres/SKU de producto ni ningún monto (subtotal/discount/tax/
   // total): la fila de Quote ya los conserva; el log solo necesita

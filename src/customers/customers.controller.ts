@@ -38,6 +38,7 @@ import {
 } from './dto/customer-response.dto';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { ListCustomersQueryDto } from './dto/list-customers-query.dto';
+import { SetCustomerCreditDto } from './dto/set-customer-credit.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { SafeCustomer } from './types/safe-customer';
 
@@ -123,7 +124,7 @@ export class CustomersController {
   @ApiOperation({
     summary: 'Actualizar los datos de contacto/documento de un cliente',
     description:
-      'code, customerType, customerStage, status e isGeneric son inmutables aquí. El par documentType/documentNumber se reemplaza o limpia junto (ambos null limpia; ambos con valor lo reemplaza).',
+      'code, customerType, customerStage, status e isGeneric son inmutables aquí. El par documentType/documentNumber se reemplaza o limpia junto (ambos null limpia; ambos con valor lo reemplaza). NR-02A: creditEnabled no es un campo de este DTO (SELLER también usa este endpoint) — se administra exclusivamente vía PATCH /customers/:id/credit, restringido a ADMIN.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: CustomerResponseDto })
@@ -245,6 +246,34 @@ export class CustomersController {
   ): Promise<SafeCustomer> {
     return this.customersService.unblock({
       customerId: id,
+      actorUserId: actor.id,
+      ipAddress: request.ip ?? null,
+    });
+  }
+
+  @ApiOperation({
+    summary: 'Habilitar o deshabilitar el crédito de un cliente (solo ADMIN)',
+    description:
+      'NR-02A: controla si este cliente identificado ACTIVE puede generar una venta con saldo pendiente. Deliberadamente separado de PATCH /customers/:id (compartido con SELLER): SELLER nunca puede alcanzar este campo por ninguna ruta. Clientes nuevos nacen con creditEnabled=false (ADMIN debe habilitarlo explícitamente). No afecta deudas ya existentes (siguen siendo cobrables aunque se deshabilite el crédito) ni los bloqueos de Público general/cliente BLOCKED/INACTIVE, que siempre prevalecen. Un valor igual al ya vigente es un no-op (200 sin auditoría nueva).',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: CustomerResponseDto })
+  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiConflictResponse({
+    description:
+      'Es el cliente genérico "Público general" (nunca puede tener crédito habilitado).',
+  })
+  @Roles(RoleName.ADMIN)
+  @Patch(':id/credit')
+  setCredit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetCustomerCreditDto,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() request: Request,
+  ): Promise<SafeCustomer> {
+    return this.customersService.setCreditEnabled({
+      customerId: id,
+      creditEnabled: dto.creditEnabled,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
