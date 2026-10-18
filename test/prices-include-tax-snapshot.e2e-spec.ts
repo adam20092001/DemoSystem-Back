@@ -186,6 +186,14 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
     expect(response.status).toBe(201);
     const id = (response.body as { id: string }).id;
     ownedCustomerIds.push(id);
+    // NR-02A: R2-B4 crea la venta directa sin `payment` (saldo pendiente
+    // completo) -- cliente PRE-EXISTENTE a NR-02A, mismo criterio que el
+    // backfill real. SELLER no puede habilitarlo (ADMIN-only).
+    const creditResponse = await request(app.getHttpServer())
+      .patch(`/api/v1/customers/${id}/credit`)
+      .set('Cookie', adminCookie)
+      .send({ creditEnabled: true });
+    expect(creditResponse.status).toBe(200);
     return id;
   }
 

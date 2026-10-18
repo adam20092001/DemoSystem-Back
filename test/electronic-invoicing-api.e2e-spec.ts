@@ -451,6 +451,10 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         documentType: CustomerDocumentType.RUC,
         documentNumber: '20123456789',
         name: 'Distribuidora API E2E SAC',
+        // NR-02A: la mayoría de createFixtureSale() de este archivo omite
+        // `payment` (venta con saldo pendiente completo) -- cliente
+        // PRE-EXISTENTE a NR-02A, mismo criterio que el backfill real.
+        creditEnabled: true,
       },
     });
     rucCustomerId = rucCustomer.id;
@@ -495,6 +499,8 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         documentNumber: '20999999999',
         name: '<script>alert(1)</script> & "SAC"',
         address: '<script>alert(2)</script>',
+        // NR-02A: su único uso (§40) crea la venta fixture sin `payment`.
+        creditEnabled: true,
       },
     });
     xssCustomerId = xssCustomer.id;

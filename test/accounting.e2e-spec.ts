@@ -374,6 +374,10 @@ describe('Basic Accounting (e2e)', () => {
         customerStage: CustomerStage.CUSTOMER,
         status: CustomerStatus.ACTIVE,
         name: `Cliente E2E Accounting ${nextSuffix()}`,
+        // NR-02A: createBasicSale()/varios fixtures de este archivo crean
+        // ventas sin pago (saldo pendiente completo) -- cliente
+        // PRE-EXISTENTE a NR-02A, mismo criterio que el backfill real.
+        creditEnabled: true,
       },
     });
     personActive = { id: customer.id, name: customer.name };

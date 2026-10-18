@@ -7,7 +7,7 @@ import {
 } from '@prisma/client';
 
 /**
- * Documenta exactamente los 17 campos de SafeCustomer. Es documentación de
+ * Documenta exactamente los 18 campos de SafeCustomer. Es documentación de
  * contrato/Swagger, no una segunda fuente de mapeo: CUSTOMER_SAFE_SELECT +
  * toSafeCustomer() siguen siendo la única frontera real contra fuga de datos.
  */
@@ -71,6 +71,12 @@ export class CustomerResponseDto {
       'SELLER ve ACTIVE y BLOCKED (nunca INACTIVE). BLOCKED sigue siendo un estado de Customer, no de venta.',
   })
   status!: CustomerStatus;
+
+  @ApiProperty({
+    description:
+      'NR-02A: si un cliente identificado ACTIVE puede generar una venta con saldo pendiente (crédito). Clientes nuevos nacen en false; ADMIN lo habilita mediante PATCH /customers/:id/credit. Sin efecto sobre Público general (siempre bloqueado por isGeneric) ni sobre un cliente BLOCKED (siempre exige pago total). No implica límite monetario ni vencimiento: no existen en el MVP.',
+  })
+  creditEnabled!: boolean;
 
   @ApiProperty()
   createdAt!: Date;

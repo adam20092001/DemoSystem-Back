@@ -59,6 +59,12 @@ function makeCustomerRow(overrides: Partial<Record<string, unknown>> = {}) {
     documentNumber: null,
     name: 'Cliente Uno',
     address: null,
+    // NR-02A: default true para no alterar el comportamiento de ningún test
+    // preexistente de este archivo (todos asumían crédito sin restricción,
+    // el comportamiento histórico que la migración preserva para clientes
+    // ya existentes). Los tests dedicados de NR-02A lo sobreescriben a
+    // false explícitamente.
+    creditEnabled: true,
     ...overrides,
   };
 }
@@ -2121,6 +2127,81 @@ describe('SalesService', () => {
           ).resolves.toBeDefined();
         });
       });
+
+      describe('cliente ACTIVE identificado con crédito deshabilitado (NR-02A)', () => {
+        function noCreditInput(overrides: Record<string, unknown> = {}) {
+          return { ...validDirectInput, ...overrides };
+        }
+
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow({ creditEnabled: false }),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('sin pago -> 409, sin crear Sale ni registrar pagos', async () => {
+          await expect(service.createDirect(noCreditInput())).rejects.toThrow(
+            'Este cliente no tiene crédito habilitado: no puede generar una venta con saldo pendiente',
+          );
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(paymentEngine.register).not.toHaveBeenCalled();
+        });
+
+        it('pago parcial -> 409', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createDirect(
+              noCreditInput({ payment: { method: 'CASH', amount: '4.00' } }),
+            ),
+          ).rejects.toBeInstanceOf(ConflictException);
+        });
+
+        it('pago total -> éxito (0 saldo pendiente nunca depende de creditEnabled)', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createDirect(
+              noCreditInput({ payment: { method: 'CASH', amount: '10.00' } }),
+            ),
+          ).resolves.toBeDefined();
+        });
+      });
+
+      describe('cliente ACTIVE identificado con crédito habilitado (NR-02A: comportamiento preservado)', () => {
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow({ creditEnabled: true }),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('sin pago -> éxito (crédito habilitado admite saldo pendiente total)', async () => {
+          await expect(
+            service.createDirect(validDirectInput),
+          ).resolves.toBeDefined();
+          expect(paymentEngine.register).not.toHaveBeenCalled();
+        });
+
+        it('pago parcial -> éxito', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              payment: { method: 'CASH', amount: '4.00' },
+            }),
+          ).resolves.toBeDefined();
+        });
+      });
     });
   });
 
@@ -3085,6 +3166,53 @@ describe('SalesService', () => {
               products: new Map([[PRODUCT_ID, makeProductRow()]]),
             }),
           );
+        });
+
+        it('pago parcial -> 409, Quote no se convierte', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('4.00'),
+          );
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              payment: { method: 'CASH', amount: '4.00' },
+            }),
+          ).rejects.toBeInstanceOf(ConflictException);
+          expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        });
+
+        it('pago total -> éxito, Quote se convierte', async () => {
+          paymentEngine.sumActiveForSale.mockResolvedValue(
+            new Prisma.Decimal('10.00'),
+          );
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              payment: { method: 'CASH', amount: '10.00' },
+            }),
+          ).resolves.toBeDefined();
+          expect(prisma.tx.quote.update).toHaveBeenCalled();
+        });
+      });
+
+      describe('cliente ACTIVE identificado con crédito deshabilitado (NR-02A)', () => {
+        beforeEach(() => {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow({ creditEnabled: false }),
+              quote: makeQuoteRow(),
+              products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            }),
+          );
+        });
+
+        it('sin pago -> 409, Quote no se convierte (mismo mecanismo que venta directa: assertCustomerDebtRules)', async () => {
+          await expect(
+            service.createFromQuote(validConvertInput),
+          ).rejects.toThrow(
+            'Este cliente no tiene crédito habilitado: no puede generar una venta con saldo pendiente',
+          );
+          expect(prisma.tx.quote.update).not.toHaveBeenCalled();
         });
 
         it('pago parcial -> 409, Quote no se convierte', async () => {

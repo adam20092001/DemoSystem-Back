@@ -237,6 +237,11 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
         customerStage: CustomerStage.CUSTOMER,
         status: CustomerStatus.ACTIVE,
         name: 'Cliente E2E Config Comercial',
+        // NR-02A: createDirectSale()/createQuote()+conversión de este
+        // archivo nunca envían `payment` (saldo pendiente completo) --
+        // cliente PRE-EXISTENTE a NR-02A, mismo criterio que el backfill
+        // real.
+        creditEnabled: true,
       },
     });
     customerId = customer.id;

@@ -43,6 +43,7 @@ function createServiceMock() {
     block: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     unblock: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     convertToCustomer: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    setCreditEnabled: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
   };
 }
 
@@ -234,6 +235,29 @@ describe('CustomersController', () => {
     });
   });
 
+  describe('setCredit', () => {
+    it('delega customerId + creditEnabled + actor/IP', async () => {
+      const expected = { id: 'customer-1', creditEnabled: true };
+      service.setCreditEnabled.mockResolvedValue(expected);
+      const request = { ip: '203.0.113.5' } as unknown as Request;
+
+      const result = await controller.setCredit(
+        'customer-1',
+        { creditEnabled: true },
+        ACTOR,
+        request,
+      );
+
+      expect(service.setCreditEnabled).toHaveBeenCalledWith({
+        customerId: 'customer-1',
+        creditEnabled: true,
+        actorUserId: 'actor-id',
+        ipAddress: '203.0.113.5',
+      });
+      expect(result).toBe(expected);
+    });
+  });
+
   describe('convertToCustomer', () => {
     it('delega customerId + actor/IP', async () => {
       const expected = {
@@ -269,6 +293,7 @@ describe('CustomersController', () => {
       ['block', [RoleName.ADMIN]],
       ['unblock', [RoleName.ADMIN]],
       ['convertToCustomer', [RoleName.ADMIN, RoleName.SELLER]],
+      ['setCredit', [RoleName.ADMIN]],
     ])('%s expone @Roles(%p) exactamente', (methodName, roles) => {
       const metadata = Reflect.getMetadata(
         ROLES_KEY,
@@ -288,6 +313,7 @@ describe('CustomersController', () => {
         'block',
         'unblock',
         'convertToCustomer',
+        'setCredit',
       ];
       for (const methodName of methodNames) {
         const metadata = Reflect.getMetadata(
@@ -308,6 +334,7 @@ describe('CustomersController', () => {
         'block',
         'unblock',
         'convertToCustomer',
+        'setCredit',
       ];
       for (const methodName of withManagement) {
         const metadata = Reflect.getMetadata(
@@ -325,7 +352,7 @@ describe('CustomersController', () => {
       }
     });
 
-    it('SELLER aparece en create/list/findOne/update/convertToCustomer, no en activate/deactivate/block/unblock', () => {
+    it('SELLER aparece en create/list/findOne/update/convertToCustomer, no en activate/deactivate/block/unblock/setCredit', () => {
       const withSeller = [
         'create',
         'list',
@@ -333,7 +360,13 @@ describe('CustomersController', () => {
         'update',
         'convertToCustomer',
       ];
-      const withoutSeller = ['activate', 'deactivate', 'block', 'unblock'];
+      const withoutSeller = [
+        'activate',
+        'deactivate',
+        'block',
+        'unblock',
+        'setCredit',
+      ];
       for (const methodName of withSeller) {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
@@ -350,7 +383,7 @@ describe('CustomersController', () => {
       }
     });
 
-    it('ADMIN aparece en los 9 endpoints', () => {
+    it('ADMIN aparece en los 10 endpoints', () => {
       const methodNames = [
         'create',
         'list',
@@ -361,6 +394,7 @@ describe('CustomersController', () => {
         'block',
         'unblock',
         'convertToCustomer',
+        'setCredit',
       ];
       for (const methodName of methodNames) {
         const metadata = Reflect.getMetadata(
@@ -373,7 +407,7 @@ describe('CustomersController', () => {
   });
 
   describe('superficie exacta de rutas', () => {
-    it('expone exactamente las 9 operaciones de Customers, sin DELETE/PUT ni rutas extra', () => {
+    it('expone exactamente las 10 operaciones de Customers, sin DELETE/PUT ni rutas extra', () => {
       const methodNames = Object.getOwnPropertyNames(
         CustomersController.prototype,
       ).filter((name) => name !== 'constructor');
@@ -395,7 +429,7 @@ describe('CustomersController', () => {
             route !== null,
         );
 
-      expect(routes).toHaveLength(9);
+      expect(routes).toHaveLength(10);
       expect(routes).toEqual(
         expect.arrayContaining([
           { method: RequestMethod.POST, path: '/' },
@@ -407,6 +441,7 @@ describe('CustomersController', () => {
           { method: RequestMethod.POST, path: ':id/block' },
           { method: RequestMethod.POST, path: ':id/unblock' },
           { method: RequestMethod.POST, path: ':id/convert-to-customer' },
+          { method: RequestMethod.PATCH, path: ':id/credit' },
         ]),
       );
       expect(

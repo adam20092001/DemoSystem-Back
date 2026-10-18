@@ -22,6 +22,7 @@ export interface SafeCustomer {
   internalNotes: string | null;
   isGeneric: boolean;
   status: CustomerStatus;
+  creditEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -353,6 +353,10 @@ async function seedGenericCustomer(): Promise<void> {
       status: CustomerStatus.ACTIVE,
       documentType: null,
       documentNumber: null,
+      // NR-02A: irrelevante en la práctica (assertCustomerDebtRules bloquea
+      // al genérico de forma incondicional por isGeneric, nunca por este
+      // campo), pero se restaura igual que el resto de valores de sistema.
+      creditEnabled: false,
     },
     create: {
       code: 'PUBLIC_GENERAL',
@@ -363,6 +367,7 @@ async function seedGenericCustomer(): Promise<void> {
       status: CustomerStatus.ACTIVE,
       documentType: null,
       documentNumber: null,
+      creditEnabled: false,
     },
   });
   console.log('Cliente genérico verificado: Público general (PUBLIC_GENERAL)');

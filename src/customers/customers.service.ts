@@ -23,6 +23,7 @@ import { CreateCustomerInput } from './types/create-customer.input';
 import { CustomerActionInput } from './types/customer-action.input';
 import { ListCustomersQuery } from './types/list-customers.query';
 import { SafeCustomer } from './types/safe-customer';
+import { SetCustomerCreditInput } from './types/set-customer-credit.input';
 import { UpdateCustomerInput } from './types/update-customer.input';
 
 const DEFAULT_PAGE = 1;
@@ -390,6 +391,59 @@ export class CustomersService {
         entityId: input.customerId,
         description: `Cliente ${input.customerId} convertido de prospecto a cliente`,
         metadata: { previousStage, customerStage: CustomerStage.CUSTOMER },
+        ipAddress: input.ipAddress ?? null,
+        client: tx,
+      });
+
+      return toSafeCustomer(updated);
+    });
+  }
+
+  /**
+   * NR-02A: exclusivo de ADMIN (el controller lo restringe con @Roles;
+   * aquí es defensa en profundidad, mismo criterio que el resto del
+   * módulo). A diferencia de block/unblock/activate/deactivate (estados
+   * excluyentes entre sí, 409 si ya está en el estado pedido), creditEnabled
+   * es una configuración simple: un PATCH con el mismo valor que ya tenía
+   * es un no-op explícito (sin escritura ni auditoría), mismo criterio que
+   * PaymentMethodsService.updatePaymentMethod()/ConfigurationService — no
+   * su propio criterio de 409 por estado inmutable.
+   */
+  async setCreditEnabled(input: SetCustomerCreditInput): Promise<SafeCustomer> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.customer.findUnique({
+        where: { id: input.customerId },
+        select: CUSTOMER_SAFE_SELECT,
+      });
+      if (existing === null) {
+        throw new NotFoundException('Cliente no encontrado');
+      }
+      if (existing.isGeneric) {
+        throw new ConflictException(
+          'El cliente genérico "Público general" no puede tener crédito habilitado',
+        );
+      }
+      if (existing.creditEnabled === input.creditEnabled) {
+        return toSafeCustomer(existing);
+      }
+
+      const previousCreditEnabled = existing.creditEnabled;
+      const updated = await tx.customer.update({
+        where: { id: input.customerId },
+        data: { creditEnabled: input.creditEnabled },
+        select: CUSTOMER_SAFE_SELECT,
+      });
+
+      await this.auditService.record({
+        userId: input.actorUserId,
+        module: 'CUSTOMERS',
+        action: input.creditEnabled
+          ? AuditAction.CUSTOMER_CREDIT_ENABLED
+          : AuditAction.CUSTOMER_CREDIT_DISABLED,
+        entityType: 'Customer',
+        entityId: input.customerId,
+        description: `Cliente ${input.customerId} cambia su habilitación de crédito`,
+        metadata: { previousCreditEnabled },
         ipAddress: input.ipAddress ?? null,
         client: tx,
       });

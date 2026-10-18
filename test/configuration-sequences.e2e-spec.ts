@@ -396,6 +396,10 @@ describe('Configuration — Document Sequence Administration (Bloque 10, D) (e2e
         customerType: CustomerType.PERSON,
         customerStage: CustomerStage.CUSTOMER,
         status: CustomerStatus.ACTIVE,
+        // NR-02A: createDirectSale() de este archivo nunca envía `payment`
+        // (saldo pendiente completo) -- cliente PRE-EXISTENTE a NR-02A,
+        // mismo criterio que el backfill real.
+        creditEnabled: true,
         name: 'Cliente E2E Config Secuencias',
       },
     });

@@ -45,6 +45,7 @@ const SAFE_CUSTOMER_KEYS = [
   'internalNotes',
   'isGeneric',
   'status',
+  'creditEnabled',
   'createdAt',
   'updatedAt',
 ].sort();
@@ -65,6 +66,7 @@ interface SafeCustomerBody {
   internalNotes: string | null;
   isGeneric: boolean;
   status: CustomerStatus;
+  creditEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -337,7 +339,7 @@ describe('Customers (e2e)', () => {
       roleMatrixCustomerId = created.id;
     });
 
-    it('ADMIN: permitido en los 9 endpoints', async () => {
+    it('ADMIN: permitido en los 10 endpoints', async () => {
       const server = app.getHttpServer();
 
       const created = await request(server)
@@ -405,9 +407,17 @@ describe('Customers (e2e)', () => {
             .set('Cookie', adminCookie)
         ).status,
       ).toBe(200);
+      expect(
+        (
+          await request(server)
+            .patch(`/api/v1/customers/${id}/credit`)
+            .set('Cookie', adminCookie)
+            .send({ creditEnabled: true })
+        ).status,
+      ).toBe(200);
     });
 
-    it('SELLER: permitido create/list/detail/update/convert; prohibido activate/deactivate/block/unblock', async () => {
+    it('SELLER: permitido create/list/detail/update/convert; prohibido activate/deactivate/block/unblock/credit', async () => {
       const server = app.getHttpServer();
 
       const created = await request(server)
@@ -474,6 +484,14 @@ describe('Customers (e2e)', () => {
           await request(server)
             .post(`/api/v1/customers/${roleMatrixCustomerId}/unblock`)
             .set('Cookie', sellerCookie)
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await request(server)
+            .patch(`/api/v1/customers/${roleMatrixCustomerId}/credit`)
+            .set('Cookie', sellerCookie)
+            .send({ creditEnabled: true })
         ).status,
       ).toBe(403);
     });
@@ -549,9 +567,17 @@ describe('Customers (e2e)', () => {
             .set('Cookie', managementCookie)
         ).status,
       ).toBe(403);
+      expect(
+        (
+          await request(server)
+            .patch(`/api/v1/customers/${roleMatrixCustomerId}/credit`)
+            .set('Cookie', managementCookie)
+            .send({ creditEnabled: true })
+        ).status,
+      ).toBe(403);
     });
 
-    it('WAREHOUSE: 403 en los 9 endpoints', async () => {
+    it('WAREHOUSE: 403 en los 10 endpoints', async () => {
       const server = app.getHttpServer();
       const id = roleMatrixCustomerId;
 
@@ -583,6 +609,10 @@ describe('Customers (e2e)', () => {
         request(server)
           .post(`/api/v1/customers/${id}/convert-to-customer`)
           .set('Cookie', warehouseCookie),
+        request(server)
+          .patch(`/api/v1/customers/${id}/credit`)
+          .set('Cookie', warehouseCookie)
+          .send({ creditEnabled: true }),
       ]);
 
       for (const response of responses) {
@@ -595,7 +625,7 @@ describe('Customers (e2e)', () => {
   // 3. Creación
   // ================================================================
   describe('POST /customers — creación', () => {
-    it('PERSON: 201, respuesta segura de 17 campos, valores de sistema correctos', async () => {
+    it('PERSON: 201, respuesta segura de 18 campos, valores de sistema correctos', async () => {
       const before = new Date();
       const response = await request(app.getHttpServer())
         .post('/api/v1/customers')
@@ -617,12 +647,23 @@ describe('Customers (e2e)', () => {
       expect(body.status).toBe(CustomerStatus.ACTIVE);
       expect(body.isGeneric).toBe(false);
       expect(body.code).toBeNull();
+      // NR-02A: valor de sistema, nunca controlado por el llamador (ver el
+      // siguiente test: CreateCustomerDto ni siquiera declara el campo).
+      expect(body.creditEnabled).toBe(false);
       expect(new Date(body.createdAt).getTime()).toBeGreaterThanOrEqual(
         before.getTime() - 1000,
       );
       expect(new Date(body.updatedAt).getTime()).toEqual(
         new Date(body.createdAt).getTime(),
       );
+    });
+
+    it('NR-02A: creditEnabled no es un campo de CreateCustomerDto -> enviarlo responde 400 (forbidNonWhitelisted), nunca se crea con crédito habilitado por esta vía', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/customers')
+        .set('Cookie', sellerCookie)
+        .send(validCreateBody({ creditEnabled: true }));
+      expect(response.status).toBe(400);
     });
 
     it('COMPANY: 201, name/tradeName/contactName persistidos', async () => {
@@ -1231,13 +1272,13 @@ describe('Customers (e2e)', () => {
   });
 
   // ================================================================
-  // 9.5. Contrato de respuesta segura — cobertura completa de las 17 claves
+  // 9.5. Contrato de respuesta segura — cobertura completa de las 18 claves
   // (create/update ya se verifican en sus propios describe; aquí se
   // completa list item, detail, una acción de estado exitosa y
   // convert-to-customer, con igualdad exacta de claves, no solo presencia).
   // ================================================================
-  describe('contrato de respuesta segura — 17 claves exactas', () => {
-    it('list item expone exactamente las 17 claves', async () => {
+  describe('contrato de respuesta segura — 18 claves exactas', () => {
+    it('list item expone exactamente las 18 claves', async () => {
       const created = await createCustomer(adminCookie);
       const response = await request(app.getHttpServer())
         .get('/api/v1/customers')
@@ -1252,7 +1293,7 @@ describe('Customers (e2e)', () => {
       );
     });
 
-    it('detail expone exactamente las 17 claves', async () => {
+    it('detail expone exactamente las 18 claves', async () => {
       const created = await createCustomer(adminCookie);
       const response = await request(app.getHttpServer())
         .get(`/api/v1/customers/${created.id}`)
@@ -1263,7 +1304,7 @@ describe('Customers (e2e)', () => {
       );
     });
 
-    it('una acción de estado exitosa (deactivate) expone exactamente las 17 claves', async () => {
+    it('una acción de estado exitosa (deactivate) expone exactamente las 18 claves', async () => {
       const created = await createCustomer(adminCookie);
       const response = await request(app.getHttpServer())
         .post(`/api/v1/customers/${created.id}/deactivate`)
@@ -1274,7 +1315,7 @@ describe('Customers (e2e)', () => {
       );
     });
 
-    it('convert-to-customer expone exactamente las 17 claves', async () => {
+    it('convert-to-customer expone exactamente las 18 claves', async () => {
       const created = await createCustomer(adminCookie, {
         customerStage: CustomerStage.PROSPECT,
       });
@@ -1468,6 +1509,147 @@ describe('Customers (e2e)', () => {
         .post(`/api/v1/customers/${id}/${action}`)
         .set('Cookie', adminCookie);
       expect(response.status).toBe(409);
+    });
+  });
+
+  // ================================================================
+  // 11.5. PATCH /customers/:id/credit (NR-02A)
+  // ================================================================
+  describe('PATCH /customers/:id/credit (NR-02A)', () => {
+    it('cliente nuevo nace con creditEnabled=false', async () => {
+      const created = await createCustomer(adminCookie);
+      expect(created.creditEnabled).toBe(false);
+    });
+
+    it('ADMIN habilita (false -> true) y vuelve a deshabilitar (true -> false)', async () => {
+      const created = await createCustomer(adminCookie);
+      expect(created.creditEnabled).toBe(false);
+
+      const enabled = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: true });
+      expect(enabled.status).toBe(200);
+      expect((enabled.body as SafeCustomerBody).creditEnabled).toBe(true);
+      let row = await prisma.customer.findUniqueOrThrow({
+        where: { id: created.id },
+      });
+      expect(row.creditEnabled).toBe(true);
+
+      const disabled = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: false });
+      expect(disabled.status).toBe(200);
+      expect((disabled.body as SafeCustomerBody).creditEnabled).toBe(false);
+      row = await prisma.customer.findUniqueOrThrow({
+        where: { id: created.id },
+      });
+      expect(row.creditEnabled).toBe(false);
+    });
+
+    it('SELLER no puede modificar creditEnabled por ninguna ruta: 403 en PATCH /credit; PATCH /:id normal (UpdateCustomerDto) ni siquiera declara el campo, así que forbidNonWhitelisted lo rechaza con 400 en vez de ignorarlo en silencio', async () => {
+      const created = await createCustomer(adminCookie);
+      const viaCredit = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', sellerCookie)
+        .send({ creditEnabled: true });
+      expect(viaCredit.status).toBe(403);
+
+      const viaUpdate = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}`)
+        .set('Cookie', sellerCookie)
+        .send({ creditEnabled: true, phone: '900000000' });
+      expect(viaUpdate.status).toBe(400);
+
+      const validUpdate = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}`)
+        .set('Cookie', sellerCookie)
+        .send({ phone: '900000000' });
+      expect(validUpdate.status).toBe(200);
+
+      const row = await prisma.customer.findUniqueOrThrow({
+        where: { id: created.id },
+      });
+      expect(row.creditEnabled).toBe(false);
+      expect(row.phone).toBe('900000000');
+    });
+
+    it('cliente genérico "Público general" -> 409, sin cambiar su creditEnabled', async () => {
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${genericCustomerId}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: true });
+      expect(response.status).toBe(409);
+      const row = await prisma.customer.findUniqueOrThrow({
+        where: { id: genericCustomerId },
+      });
+      expect(row.creditEnabled).toBe(false);
+    });
+
+    it('cliente inexistente -> 404', async () => {
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${NON_EXISTENT_UUID}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: true });
+      expect(response.status).toBe(404);
+    });
+
+    it('creditEnabled no booleano -> 400', async () => {
+      const created = await createCustomer(adminCookie);
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: 'yes' });
+      expect(response.status).toBe(400);
+    });
+
+    it('mismo valor ya vigente: 200 sin fila de auditoría nueva', async () => {
+      const created = await createCustomer(adminCookie);
+      const auditCountBefore = await prisma.auditLog.count({
+        where: { entityType: 'Customer', entityId: created.id },
+      });
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: false });
+      expect(response.status).toBe(200);
+
+      const auditCountAfter = await prisma.auditLog.count({
+        where: { entityType: 'Customer', entityId: created.id },
+      });
+      expect(auditCountAfter).toBe(auditCountBefore);
+    });
+
+    it('auditoría CUSTOMER_CREDIT_ENABLED / CUSTOMER_CREDIT_DISABLED con el actor ADMIN real', async () => {
+      const created = await createCustomer(adminCookie);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: true });
+      const enabledRow = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          entityType: 'Customer',
+          entityId: created.id,
+          action: 'CUSTOMER_CREDIT_ENABLED',
+        },
+      });
+      expect(enabledRow.userId).toBe(adminId);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${created.id}/credit`)
+        .set('Cookie', adminCookie)
+        .send({ creditEnabled: false });
+      const disabledRow = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          entityType: 'Customer',
+          entityId: created.id,
+          action: 'CUSTOMER_CREDIT_DISABLED',
+        },
+      });
+      expect(disabledRow.userId).toBe(adminId);
     });
   });
 
@@ -2084,7 +2266,7 @@ describe('Customers (e2e)', () => {
   // 21. Regresión de Swagger
   // ================================================================
   describe('regresión de Swagger', () => {
-    it('el documento OpenAPI conserva exactamente las 9 operaciones de Customers en 7 paths, sin DELETE', async () => {
+    it('el documento OpenAPI conserva exactamente las 10 operaciones de Customers en 8 paths, sin DELETE', async () => {
       const response = await request(app.getHttpServer()).get('/api/docs-json');
       expect(response.status).toBe(200);
 
@@ -2097,7 +2279,7 @@ describe('Customers (e2e)', () => {
       const customerPaths = Object.keys(document.paths).filter((path) =>
         path.includes('/customers'),
       );
-      expect(customerPaths).toHaveLength(7);
+      expect(customerPaths).toHaveLength(8);
 
       let totalOperations = 0;
       for (const path of customerPaths) {
@@ -2106,7 +2288,7 @@ describe('Customers (e2e)', () => {
         expect(methods).not.toContain('delete');
         expect(methods).not.toContain('put');
       }
-      expect(totalOperations).toBe(9);
+      expect(totalOperations).toBe(10);
     });
   });
 });

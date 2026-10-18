@@ -57,6 +57,9 @@ function makeCustomerRow(overrides: Partial<Record<string, unknown>> = {}) {
     internalNotes: null,
     isGeneric: false,
     status: CustomerStatus.ACTIVE,
+    // NR-02A: default false, igual que un cliente nuevo real; los tests que
+    // necesiten crédito ya habilitado lo sobreescriben explícitamente.
+    creditEnabled: false,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -284,6 +287,7 @@ describe('CustomersService', () => {
         internalNotes: null,
         isGeneric: false,
         status: CustomerStatus.ACTIVE,
+        creditEnabled: false,
         createdAt: NOW,
         updatedAt: NOW,
       });
@@ -889,6 +893,137 @@ describe('CustomersService', () => {
             previousStage: CustomerStage.PROSPECT,
             customerStage: CustomerStage.CUSTOMER,
           },
+          client: prisma.tx,
+        }),
+      );
+    });
+  });
+
+  describe('setCreditEnabled (NR-02A)', () => {
+    it('false -> true tiene éxito y persiste creditEnabled=true', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: false }),
+      );
+      prisma.tx.customer.update.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: true }),
+      );
+
+      const result = await service.setCreditEnabled({
+        customerId: 'customer-1',
+        creditEnabled: true,
+        actorUserId: ACTOR_ID,
+      });
+
+      expect(result.creditEnabled).toBe(true);
+      const call = prisma.tx.customer.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: { creditEnabled: boolean };
+      };
+      expect(call.where).toEqual({ id: 'customer-1' });
+      expect(call.data).toEqual({ creditEnabled: true });
+    });
+
+    it('true -> false tiene éxito y persiste creditEnabled=false', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: true }),
+      );
+      prisma.tx.customer.update.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: false }),
+      );
+
+      const result = await service.setCreditEnabled({
+        customerId: 'customer-1',
+        creditEnabled: false,
+        actorUserId: ACTOR_ID,
+      });
+
+      expect(result.creditEnabled).toBe(false);
+    });
+
+    it('mismo valor ya vigente: no-op, sin update ni auditoría', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: true }),
+      );
+
+      const result = await service.setCreditEnabled({
+        customerId: 'customer-1',
+        creditEnabled: true,
+        actorUserId: ACTOR_ID,
+      });
+
+      expect(result.creditEnabled).toBe(true);
+      expect(prisma.tx.customer.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('cliente genérico -> ConflictException, sin update', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ isGeneric: true, creditEnabled: false }),
+      );
+
+      await expect(
+        service.setCreditEnabled({
+          customerId: 'generic-customer',
+          creditEnabled: true,
+          actorUserId: ACTOR_ID,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.tx.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('cliente inexistente -> NotFoundException', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.setCreditEnabled({
+          customerId: 'missing',
+          creditEnabled: true,
+          actorUserId: ACTOR_ID,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('registra CUSTOMER_CREDIT_ENABLED con previousCreditEnabled=false al habilitar', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: false }),
+      );
+      prisma.tx.customer.update.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: true }),
+      );
+
+      await service.setCreditEnabled({
+        customerId: 'customer-1',
+        creditEnabled: true,
+        actorUserId: ACTOR_ID,
+      });
+
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.CUSTOMER_CREDIT_ENABLED,
+          metadata: { previousCreditEnabled: false },
+          client: prisma.tx,
+        }),
+      );
+    });
+
+    it('registra CUSTOMER_CREDIT_DISABLED con previousCreditEnabled=true al deshabilitar', async () => {
+      prisma.tx.customer.findUnique.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: true }),
+      );
+      prisma.tx.customer.update.mockResolvedValue(
+        makeCustomerRow({ creditEnabled: false }),
+      );
+
+      await service.setCreditEnabled({
+        customerId: 'customer-1',
+        creditEnabled: false,
+        actorUserId: ACTOR_ID,
+      });
+
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.CUSTOMER_CREDIT_DISABLED,
+          metadata: { previousCreditEnabled: true },
           client: prisma.tx,
         }),
       );
