@@ -962,6 +962,392 @@ describe('Quotes (e2e)', () => {
   });
 
   // ==================================================================
+  // Permisos por vendedor — lectura de cotizaciones (P6-B1)
+  // ==================================================================
+  describe('permisos por vendedor — lectura (P6-B1)', () => {
+    const SELLER2_USERNAME = 'e2e_seller2_quotes_p6b1';
+    const SELLER2_PASSWORD = 'Seller2QuotesP6b1123';
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_quotes_p6b1';
+    const MULTI_ROLE_PASSWORD = 'MultiRoleQuotesP6b1123';
+
+    async function listQuotes(
+      cookie: string,
+      query: Record<string, string | number> = {},
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .get('/api/v1/quotes')
+        .query({ limit: 100, ...query })
+        .set('Cookie', cookie);
+    }
+
+    function rowsOf(
+      response: request.Response,
+    ): PaginatedBody<SafeQuoteListItemBody> {
+      return response.body as PaginatedBody<SafeQuoteListItemBody>;
+    }
+
+    async function seller2Cookie(): Promise<string> {
+      await upsertFixtureUser(prisma, {
+        username: SELLER2_USERNAME,
+        email: 'e2e_seller2_quotes_p6b1@demosystem.test',
+        password: SELLER2_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      return (
+        await login(app.getHttpServer(), SELLER2_USERNAME, SELLER2_PASSWORD)
+      ).cookie;
+    }
+
+    it('SELLER lista solo sus cotizaciones: excluye las del ADMIN y de otro SELLER; total = las suyas', async () => {
+      const own = await createQuote(sellerCookie);
+      const byAdmin = await createQuote(adminCookie);
+      const byOtherSeller = await createQuote(await seller2Cookie());
+
+      const response = await listQuotes(sellerCookie);
+      expect(response.status).toBe(200);
+      const body = rowsOf(response);
+      const ids = body.data.map((row) => row.id);
+      expect(ids).toContain(own.id);
+      expect(ids).not.toContain(byAdmin.id);
+      expect(ids).not.toContain(byOtherSeller.id);
+      expect(body.data.every((row) => row.sellerId === sellerId)).toBe(true);
+      expect(body.total).toBe(
+        await prisma.quote.count({ where: { sellerId } }),
+      );
+    });
+
+    it('SELLER con sellerId ajeno → lista vacía; con su propio sellerId → sus cotizaciones', async () => {
+      const own = await createQuote(sellerCookie);
+      await createQuote(adminCookie);
+
+      const foreign = await listQuotes(sellerCookie, { sellerId: adminId });
+      expect(foreign.status).toBe(200);
+      expect(rowsOf(foreign).data).toEqual([]);
+      expect(rowsOf(foreign).total).toBe(0);
+
+      const mine = await listQuotes(sellerCookie, { sellerId });
+      expect(rowsOf(mine).data.map((row) => row.id)).toContain(own.id);
+    });
+
+    it('SELLER: detalle e impresión propios 200; ajenos 404 idéntico a una cotización inexistente', async () => {
+      const server = app.getHttpServer();
+      const own = await createQuote(sellerCookie);
+      const foreign = await createQuote(adminCookie);
+
+      const ownDetail = await request(server)
+        .get(`/api/v1/quotes/${own.id}`)
+        .set('Cookie', sellerCookie);
+      expect(ownDetail.status).toBe(200);
+      const ownPrint = await request(server)
+        .get(`/api/v1/quotes/${own.id}/print`)
+        .set('Cookie', sellerCookie);
+      expect(ownPrint.status).toBe(200);
+      expect(ownPrint.text).toContain(own.number);
+
+      const responses = await Promise.all([
+        request(server)
+          .get(`/api/v1/quotes/${foreign.id}`)
+          .set('Cookie', sellerCookie),
+        request(server)
+          .get(`/api/v1/quotes/${foreign.id}/print`)
+          .set('Cookie', sellerCookie),
+        request(server)
+          .get(`/api/v1/quotes/${NON_EXISTENT_UUID}`)
+          .set('Cookie', sellerCookie),
+        request(server)
+          .get(`/api/v1/quotes/${NON_EXISTENT_UUID}/print`)
+          .set('Cookie', sellerCookie),
+      ]);
+      for (const response of responses) {
+        expect(response.status).toBe(404);
+        // /print declara text/html: el JSON de error llega en `text`.
+        expect(
+          (JSON.parse(response.text) as { message?: unknown }).message,
+        ).toBe('Cotización no encontrada');
+        expect(response.text).not.toContain(foreign.number);
+      }
+    });
+
+    it('ADMIN y MANAGEMENT conservan la lectura global (listado, detalle e impresión)', async () => {
+      const server = app.getHttpServer();
+      const bySeller = await createQuote(sellerCookie);
+      for (const cookie of [adminCookie, managementCookie]) {
+        const list = await listQuotes(cookie, { sellerId });
+        expect(rowsOf(list).data.map((row) => row.id)).toContain(bySeller.id);
+        const detail = await request(server)
+          .get(`/api/v1/quotes/${bySeller.id}`)
+          .set('Cookie', cookie);
+        expect(detail.status).toBe(200);
+        expect((detail.body as SafeQuoteBody).seller.id).toBe(sellerId);
+        const print = await request(server)
+          .get(`/api/v1/quotes/${bySeller.id}/print`)
+          .set('Cookie', cookie);
+        expect(print.status).toBe(200);
+      }
+    });
+
+    it('WAREHOUSE: 403 en listado, detalle e impresión; sin autenticación: 401', async () => {
+      const server = app.getHttpServer();
+      const quote = await createQuote(sellerCookie);
+      for (const path of [
+        '/api/v1/quotes',
+        `/api/v1/quotes/${quote.id}`,
+        `/api/v1/quotes/${quote.id}/print`,
+      ]) {
+        expect(
+          (await request(server).get(path).set('Cookie', warehouseCookie))
+            .status,
+        ).toBe(403);
+        expect((await request(server).get(path)).status).toBe(401);
+      }
+    });
+
+    it('cambio de rol activo: como SELLER 404 sobre una cotización ajena; tras cambiar a ADMIN, 200', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_quotes_p6b1@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createQuote(adminCookie);
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        expect(
+          (
+            await request(server)
+              .get(`/api/v1/quotes/${foreign.id}`)
+              .set('Cookie', asSeller)
+          ).status,
+        ).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect(
+          (
+            await request(server)
+              .get(`/api/v1/quotes/${foreign.id}`)
+              .set('Cookie', asAdmin)
+          ).status,
+        ).toBe(200);
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — operaciones sobre cotizaciones (P6-B2)
+  // ==================================================================
+  describe('permisos por vendedor — operaciones (P6-B2)', () => {
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_quotes_p6b2';
+    const MULTI_ROLE_PASSWORD = 'MultiRoleQuotesP6b2123';
+
+    type Mutation = 'patch' | 'accept' | 'reject';
+
+    function mutate(
+      cookie: string | undefined,
+      quoteId: string,
+      kind: Mutation,
+    ): Promise<request.Response> {
+      const server = app.getHttpServer();
+      const req =
+        kind === 'patch'
+          ? request(server)
+              .patch(`/api/v1/quotes/${quoteId}`)
+              .send({ notes: 'P6-B2' })
+          : request(server).post(`/api/v1/quotes/${quoteId}/${kind}`);
+      return cookie === undefined ? req : req.set('Cookie', cookie);
+    }
+
+    /** Todo lo que una mutación podría persistir sobre la cotización. */
+    async function quoteSnapshot(quoteId: string) {
+      const [quote, items, audits] = await Promise.all([
+        prisma.quote.findUniqueOrThrow({
+          where: { id: quoteId },
+          select: {
+            status: true,
+            notes: true,
+            sellerId: true,
+            total: true,
+            updatedAt: true,
+          },
+        }),
+        prisma.quoteItem.count({ where: { quoteId } }),
+        prisma.auditLog.count({
+          where: { entityType: 'Quote', entityId: quoteId },
+        }),
+      ]);
+      return { quote, items, audits };
+    }
+
+    function messageOf(response: request.Response): unknown {
+      return (response.body as { message?: unknown }).message;
+    }
+
+    it('SELLER edita, acepta y rechaza sus propias cotizaciones; la auditoría registra al SELLER', async () => {
+      const toAccept = await createQuote(sellerCookie);
+      expect((await mutate(sellerCookie, toAccept.id, 'patch')).status).toBe(
+        200,
+      );
+      expect((await mutate(sellerCookie, toAccept.id, 'accept')).status).toBe(
+        200,
+      );
+      const toReject = await createQuote(sellerCookie);
+      expect((await mutate(sellerCookie, toReject.id, 'reject')).status).toBe(
+        200,
+      );
+
+      for (const [quoteId, action] of [
+        [toAccept.id, AuditAction.QUOTE_UPDATED],
+        [toAccept.id, AuditAction.QUOTE_ACCEPTED],
+        [toReject.id, AuditAction.QUOTE_REJECTED],
+      ] as const) {
+        const audit = await prisma.auditLog.findFirstOrThrow({
+          where: { action, entityType: 'Quote', entityId: quoteId },
+        });
+        expect(audit.userId).toBe(sellerId);
+      }
+    });
+
+    it.each(['patch', 'accept', 'reject'] as const)(
+      'SELLER %s sobre una cotización PENDIENTE del ADMIN: 404 "La cotización no existe" sin ningún efecto',
+      async (kind) => {
+        const foreign = await createQuote(adminCookie);
+        const before = await quoteSnapshot(foreign.id);
+        const response = await mutate(sellerCookie, foreign.id, kind);
+        expect(response.status).toBe(404);
+        expect(messageOf(response)).toBe('La cotización no existe');
+        expect(JSON.stringify(response.body)).not.toContain(foreign.number);
+        expect(await quoteSnapshot(foreign.id)).toEqual(before);
+      },
+    );
+
+    it('cotizaciones ajenas ACEPTADA o RECHAZADA: toda mutación del SELLER da 404 (nunca el 409 que revelaría su estado); idéntico a una inexistente', async () => {
+      const accepted = await createQuote(adminCookie);
+      expect((await mutate(adminCookie, accepted.id, 'accept')).status).toBe(
+        200,
+      );
+      const rejected = await createQuote(adminCookie);
+      expect((await mutate(adminCookie, rejected.id, 'reject')).status).toBe(
+        200,
+      );
+
+      for (const quote of [accepted, rejected]) {
+        const before = await quoteSnapshot(quote.id);
+        for (const kind of ['patch', 'accept', 'reject'] as const) {
+          const response = await mutate(sellerCookie, quote.id, kind);
+          expect(response.status).toBe(404);
+          expect(messageOf(response)).toBe('La cotización no existe');
+        }
+        expect(await quoteSnapshot(quote.id)).toEqual(before);
+      }
+      for (const kind of ['patch', 'accept', 'reject'] as const) {
+        const missing = await mutate(sellerCookie, NON_EXISTENT_UUID, kind);
+        expect(missing.status).toBe(404);
+        expect(messageOf(missing)).toBe('La cotización no existe');
+      }
+    });
+
+    it('ADMIN edita y acepta una cotización del SELLER: 200; sellerId intacto; auditoría con el ADMIN real', async () => {
+      const bySeller = await createQuote(sellerCookie);
+      expect((await mutate(adminCookie, bySeller.id, 'patch')).status).toBe(
+        200,
+      );
+      expect((await mutate(adminCookie, bySeller.id, 'accept')).status).toBe(
+        200,
+      );
+      const after = await quoteSnapshot(bySeller.id);
+      expect(after.quote.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.QUOTE_ACCEPTED,
+          entityType: 'Quote',
+          entityId: bySeller.id,
+        },
+      });
+      expect(audit.userId).toBe(adminId);
+    });
+
+    it('MANAGEMENT sigue sin escritura: 403 sin efectos; sin autenticación: 401', async () => {
+      const bySeller = await createQuote(sellerCookie);
+      const before = await quoteSnapshot(bySeller.id);
+      for (const kind of ['patch', 'accept', 'reject'] as const) {
+        expect((await mutate(managementCookie, bySeller.id, kind)).status).toBe(
+          403,
+        );
+        expect((await mutate(undefined, bySeller.id, kind)).status).toBe(401);
+      }
+      expect(await quoteSnapshot(bySeller.id)).toEqual(before);
+    });
+
+    it('usuario multirol: como SELLER 404 al editar una cotización ajena; tras cambiar a ADMIN, 200', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_quotes_p6b2@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createQuote(adminCookie);
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        expect((await mutate(asSeller, foreign.id, 'patch')).status).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect((await mutate(asAdmin, foreign.id, 'patch')).status).toBe(200);
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+  });
+
+  // ==================================================================
   // §15 PERSON / COMPANY / PROSPECT
   // ==================================================================
   describe('creación PERSON / COMPANY / PROSPECT', () => {
@@ -2426,7 +2812,7 @@ describe('Quotes (e2e)', () => {
       ).toBe(200);
     });
 
-    it('SELLER: acceso Total en los 7, sin restricción de propiedad (opera cotizaciones creadas por otro emisor)', async () => {
+    it('SELLER sobre cotizaciones ajenas (P6-B1 + P6-B2): detalle, impresión, edición, aceptación y rechazo → 404; puede crear las suyas', async () => {
       const createdByAdmin = await createQuote(adminCookie);
       const server = app.getHttpServer();
 
@@ -2443,7 +2829,7 @@ describe('Quotes (e2e)', () => {
             .get(`/api/v1/quotes/${createdByAdmin.id}`)
             .set('Cookie', sellerCookie)
         ).status,
-      ).toBe(200);
+      ).toBe(404);
       expect(
         (
           await request(server)
@@ -2451,21 +2837,21 @@ describe('Quotes (e2e)', () => {
             .set('Cookie', sellerCookie)
             .send({ notes: 'seller opera sobre admin' })
         ).status,
-      ).toBe(200);
+      ).toBe(404);
       expect(
         (
           await request(server)
             .get(`/api/v1/quotes/${createdByAdmin.id}/print`)
             .set('Cookie', sellerCookie)
         ).status,
-      ).toBe(200);
+      ).toBe(404);
       expect(
         (
           await request(server)
             .post(`/api/v1/quotes/${createdByAdmin.id}/accept`)
             .set('Cookie', sellerCookie)
         ).status,
-      ).toBe(200);
+      ).toBe(404);
 
       const createByAdminForReject = await createQuote(adminCookie);
       expect(
@@ -2474,7 +2860,7 @@ describe('Quotes (e2e)', () => {
             .post(`/api/v1/quotes/${createByAdminForReject.id}/reject`)
             .set('Cookie', sellerCookie)
         ).status,
-      ).toBe(200);
+      ).toBe(404);
 
       const createdBySeller = await createQuote(sellerCookie);
       expect(createdBySeller.seller.id).toBe(sellerId);

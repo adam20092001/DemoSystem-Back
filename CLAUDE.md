@@ -70,7 +70,7 @@ Reglas de capas:
 
 1. **Autenticación** — login, logout, refresh, sesión por cookie HttpOnly.
 2. **Usuarios y roles** — alta, edición, activación/desactivación, asignación de rol.
-3. **Dashboard** — métricas agregadas de ventas, cobranzas y stock.
+3. **Dashboard** — métricas agregadas de ventas, cobranzas y stock. Las secciones comerciales (sales/collections/quotes/receivables) están restringidas por propiedad del vendedor desde P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11).
 4. **Categorías** — clasificación de productos.
 5. **Unidades** — unidades de medida.
 6. **Productos** — bienes inventariables y servicios no inventariables.
@@ -80,7 +80,7 @@ Reglas de capas:
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código.
 12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones.
-13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar.
+13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
 16. **Facturación electrónica (demostración)** — emisión de FACTURA/BOLETA sobre ventas confirmadas mediante una abstracción de proveedor (`ElectronicInvoicingProvider`), con `MockElectronicInvoicingProvider` como única implementación existente. Un documento `ACCEPTED` por el proveedor MOCK no tiene validez fiscal ante SUNAT (ver §7). Series fiscales (`FiscalSeries`) separadas de los correlativos comerciales (`DocumentSequence`).
@@ -90,10 +90,10 @@ Reglas de capas:
 
 ## 5. Roles
 
-- `ADMIN` — acceso total, configuración y usuarios.
-- `SELLER` — cotizaciones, ventas, pagos, clientes.
-- `WAREHOUSE` — productos, categorías, unidades, inventario.
-- `MANAGEMENT` — dashboard y reportes (lectura y análisis).
+- `ADMIN` — acceso total, configuración y usuarios. Sin restricción de propiedad en ningún módulo.
+- `SELLER` — cotizaciones, ventas, pagos, clientes, comprobantes electrónicos y reportes/dashboard comerciales, pero **restringido a sus propios registros** (`Sale.sellerId`/`Quote.sellerId`) desde P1–P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11). No tiene acceso a Contabilidad básica ni a Auditoría.
+- `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes.
+- `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones (ver §11, cierre P6-E4).
 
 La autorización se resuelve **siempre en el backend** mediante guards y decoradores de rol.
 El frontend puede ocultar opciones, pero eso **no** cuenta como control de acceso.
@@ -145,6 +145,19 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - Las **operaciones críticas usan transacciones** (`prisma.$transaction`): venta, anulación, pago, correlativo, movimiento de inventario, asiento contable.
 - Las **acciones críticas generan auditoría** (quién, qué, cuándo, sobre qué entidad).
 - Los **asientos contables deben cuadrar**: total debe = total haber; si no cuadra, la transacción se revierte.
+
+**Propiedad y autorización por vendedor (P1–P6-E2)**
+- La identidad y el rol del solicitante salen **siempre** del rol **ACTIVO** revalidado en vivo por `JwtAuthGuard` (KAN-18) en cada petición — nunca de un dato enviado por el cliente (body/query/headers) ni confiado solo porque el JWT esté firmado.
+- `Sale.sellerId` define la propiedad comercial de una **venta**. `Quote.sellerId` define la propiedad de una **cotización**. Una venta confirmada desde cotización hereda el `sellerId` de la cotización original, nunca el del actor que la convierte.
+- `Payment.createdByUserId` identifica **quién registró el cobro**, nunca al propietario de la venta cobrada: el alcance de un pago siempre se decide por `Payment → Sale.sellerId`. Un ADMIN puede cobrar la venta de un SELLER y ese cobro sí pertenece al dashboard/reportes/listado de ese SELLER; un cobro histórico que un SELLER haya registrado sobre una venta ajena nunca aparece en lo que ese SELLER puede ver.
+- Las policies puras `src/sales/sale-access.policy.ts` (`Sale.sellerId`) y `src/quotes/quote-access.policy.ts` (`Quote.sellerId`) son la única fuente de estas reglas; no existe una tercera policy — los módulos que necesitan alcance por venta (Pagos, Cuentas por cobrar, Comprobantes, Reportes, Dashboard) reutilizan la de Ventas a través de la relación hacia `Sale`, nunca duplican el criterio.
+- En listados, reportes y agregaciones, el alcance se aplica **dentro** de la consulta Prisma/SQL (en el `WHERE`, antes de `GROUP BY`/`SUM`/`COUNT`/`aggregate()`/`take`) — nunca calculando un resultado global para filtrarlo o restarle algo después.
+- Un filtro opcional enviado por el cliente (por ejemplo `sellerId` en los reportes) se combina con el alcance obligatorio mediante **AND**, nunca lo sustituye ni lo amplía con OR: un `sellerId` ajeno produce un resultado vacío, no los datos de otro vendedor.
+- Donde el endpoint opera sobre un **recurso único** (detalle, impresión, entrega/observación de venta, operaciones de cotización, emisión de comprobante), una referencia ajena responde el **mismo HTTP 404** que una inexistente, con idéntico mensaje — nunca 403 (que revelaría que el recurso existe). Esto NO aplica a los endpoints de **listado o agregación** (pagos, cuentas por cobrar, reportes, dashboard): ahí el registro ajeno simplemente queda excluido del conjunto o del cálculo, sin ningún error.
+- Una operación denegada por propiedad **no produce ningún efecto persistente**: no crea ni modifica filas, no consume correlativos ni numeración fiscal, no genera auditoría de éxito.
+- La **atribución comercial** (`sellerId`, quién es dueño del documento) y el **actor de auditoría** (`actorUserId`/`createdByUserId`, quién ejecutó la acción) son conceptos distintos: la auditoría siempre registra al actor real, incluso cuando ADMIN opera sobre una venta de un SELLER.
+- ADMIN y MANAGEMENT consultan sin esta restricción (alcance global) en todos los módulos listados en §5; MANAGEMENT nunca la combina con permisos de escritura. WAREHOUSE no participa de este requerimiento (sin acceso a los módulos comerciales afectados).
+- Detalle módulo por módulo, cronología de bloques (P1–P6-E2) y decisiones todavía pendientes: ver §11.
 
 ---
 
@@ -299,13 +312,73 @@ decisión del cliente):
   el enum de Caja se conservan solo por historial.
 - R1 (pagos múltiples), R2 (IGV incluido) y R3 (lookup y filtros) no cambian.
 
-**Decisiones del cliente pendientes (NO implementadas):** vendedor solo ve
-sus ventas; vendedor no puede cobrar ni marcar entregadas ventas ajenas;
-administrador ve todas las ventas; crédito opcional; referencias de pago no
-obligatorias; descuentos por producto; descuentos en soles o porcentaje;
-cambios de inventario, contabilidad e importaciones. Hoy un vendedor todavía
-puede cobrar ventas ajenas: la prueba E2E que lo ejercita describe
-comportamiento heredado, no una regla aprobada.
+**Requerimiento de propiedad por vendedor (P1–P6-E2, rama
+`feat/seller-sale-ownership`, base `main` en `13e74a2`):** implementado y
+verificado sobre el código real (controllers/services/policies), **sin
+commit, push ni PR todavía** — pendiente de autorización explícita del
+cliente para P7-C. Reemplaza por completo la decisión pendiente anterior
+("vendedor solo ve sus ventas"), que ya está implementada. Policies nuevas
+y reutilizadas en todo el requerimiento: `src/sales/sale-access.policy.ts`
+(`Sale.sellerId`) y `src/quotes/quote-access.policy.ts` (`Quote.sellerId`);
+ver §6 "Propiedad y autorización por vendedor" para la semántica exacta.
+
+- **P1** — policy de propiedad de ventas (`sale-access.policy.ts`): alcance
+  de lectura (`saleReadScopeWhere`) y de operación (`canOperateSale`/
+  `assertCanOperateSale`) por rol, como fundamento puro reutilizable —
+  todavía sin conectar a ningún endpoint en este bloque.
+- **P2** — `GET /sales`, `GET /sales/:id`, `GET /sales/:id/print`: primera
+  conexión real de la policy; SELLER restringido a `Sale.sellerId =
+  requester.id`; venta ajena e inexistente responden el mismo 404 "Venta no
+  encontrada".
+- **P3** — `POST /sales/:id/mark-delivered`: misma restricción, aplicada
+  dentro de la transacción sobre la fila ya bloqueada (`FOR UPDATE`, con
+  `seller_id` en el `SELECT`).
+- **P4** — `POST /sales/:saleId/payments*`: la comprobación de propiedad en
+  los cobros posteriores se realiza desde `PaymentsService.register()`/
+  `cancel()`, utilizando la venta bloqueada (`SELECT ... FOR UPDATE`) y la
+  policy correspondiente, antes de delegar en `PaymentEngine`. Un cobro
+  sobre una venta ajena queda bloqueado. `PaymentEngine` no fue modificado
+  por este requerimiento.
+- **P5** — `GET /payments` y `GET /accounts-receivable`: alcance por
+  `Payment → Sale.sellerId` (nunca `Payment.createdByUserId`).
+- **P6-A** — `POST /sales/from-quote/:quoteId` con pago inicial: la
+  conversión de una cotización ajena queda bloqueada (`assertCanOperateQuote`
+  antes de cualquier efecto); la venta resultante hereda `Quote.sellerId`.
+- **P6-B1/B2** — `quote-access.policy.ts`: `GET /quotes`, `GET /quotes/:id`,
+  `GET /quotes/:id/print` (B1) y `PATCH/accept/reject` (B2) restringidos a
+  `Quote.sellerId = requester.id`, mismo criterio de 404 indistinguible.
+- **P6-C1/C2** — Comprobantes electrónicos: lectura (`GET
+  /electronic-documents*`, C1) y emisión (`POST
+  /sales/:saleId/electronic-documents`, C2) restringidas a la venta propia;
+  el reintento (`POST /electronic-documents/:id/retry`) permanece
+  exclusivo de ADMIN, sin cambios.
+- **P6-D** — `POST /sales/:id/mark-observed`: misma restricción que P3,
+  reutilizando `transitionDelivery()`.
+- **P6-E1** — Los 5 reportes operativos (`sales-by-product`,
+  `sales-by-customer`, `sales-by-seller`, `quotes-by-status`,
+  `payments-by-method`) restringidos por vendedor; el filtro `sellerId`
+  opcional se combina con AND, nunca sustituye el alcance.
+- **P6-E2** — `GET /dashboard`: las secciones `sales`/`collections`/
+  `quotes`/`receivables` restringidas por vendedor (incluido el top 5 de
+  cuentas por cobrar, acotado ANTES del límite); `lowStock` sin cambios.
+- **P6-E3/P6-E4** — Auditoría de cierre: `GET /users/lookup` (identidad
+  mínima, sin datos comerciales) y los permisos de MANAGEMENT ya cumplían
+  la regla aprobada; cerrados **sin cambios de código**.
+
+Evidencia de la última validación completa: **84 suites / 2939 pruebas
+unitarias**; **31 suites / 1250 pruebas E2E en dos ejecuciones consecutivas**
+(exit code 0 ambas); `lint:check` y `build` correctos.
+
+**Decisiones funcionales todavía pendientes (NO implementadas; distintas del
+requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
+opcional; referencias de pago no obligatorias; descuentos por producto;
+descuentos en soles o porcentaje; umbral mínimo de stock configurable por
+producto (alertas); exportaciones a Excel; Libro Diario y Libro Mayor como
+reportes contables terminados (hoy solo existen los asientos básicos de
+Contabilidad básica, §4 punto 12); reportes contables adicionales; módulo de
+importaciones y proveedores; cualquier cambio futuro que amplíe los permisos
+de facturación/escritura de MANAGEMENT (su alcance actual —lectura global,
+cero escritura— es la decisión vigente, confirmada en el cierre P6-E4).
 
 **Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
 `products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
@@ -313,7 +386,8 @@ conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
 aislamiento global no está completamente resuelto); 11 errores preexistentes
 en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **15**.
+Migraciones totales: **15** (sin cambios por el requerimiento de propiedad
+por vendedor: es exclusivamente de autorización, sin alteraciones de esquema).
 
 ---
 

@@ -846,7 +846,26 @@ describe('Sales (e2e)', () => {
 
   afterAll(async () => {
     try {
-      const allSaleIds = [...createdSaleIds, ...directSaleIds];
+      // P6-B2: una prueba que falla ANTES de registrar su venta en
+      // createdSaleIds dejaba una Sale que referencia una cotización propia;
+      // su FK (sales_quote_id_fkey) abortaba quote.deleteMany y el resto de
+      // la limpieza. Se incluyen también las ventas que referencian
+      // cotizaciones PROPIAS de esta suite (propiedad exacta, nunca global).
+      const ownedQuoteIdsForSales = [...createdQuoteIds, ...directQuoteIds];
+      const salesFromOwnedQuotes =
+        ownedQuoteIdsForSales.length > 0
+          ? await prisma.sale.findMany({
+              where: { quoteId: { in: ownedQuoteIdsForSales } },
+              select: { id: true },
+            })
+          : [];
+      const allSaleIds = [
+        ...new Set([
+          ...createdSaleIds,
+          ...directSaleIds,
+          ...salesFromOwnedQuotes.map((sale) => sale.id),
+        ]),
+      ];
       if (allSaleIds.length > 0) {
         // Fase 7, Bloque D: varias ventas propias ahora tienen Payment
         // asociado (pago inicial / posterior). Payment -> Sale es RESTRICT,
@@ -1486,8 +1505,10 @@ describe('Sales (e2e)', () => {
       expect(warehouse.status).toBe(403);
     });
 
-    it('list/findOne/print: ADMIN/SELLER/MANAGEMENT 200 (sin restricción de propiedad), WAREHOUSE 403', async () => {
-      const sale = await createDirectSale(adminCookie);
+    it('list/findOne/print: ADMIN/SELLER/MANAGEMENT 200 sobre una venta del SELLER (propia para él), WAREHOUSE 403', async () => {
+      // P2: el SELLER solo lee sus ventas; la fixture es suya, y ADMIN/
+      // MANAGEMENT conservan la lectura completa.
+      const sale = await createDirectSale(sellerCookie);
       const server = app.getHttpServer();
 
       for (const cookie of [adminCookie, sellerCookie, managementCookie]) {
@@ -1519,16 +1540,15 @@ describe('Sales (e2e)', () => {
       expect(printWarehouse.status).toBe(403);
     });
 
-    it('SELLER ve/lee ventas creadas por ADMIN (sin filtrado por propiedad)', async () => {
+    it('SELLER no lee ventas creadas por ADMIN (P2: 404 en detalle)', async () => {
       const sale = await createDirectSale(adminCookie);
       const response = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', sellerCookie);
-      expect(response.status).toBe(200);
-      expect((response.body as SafeSaleBody).id).toBe(sale.id);
+      expect(response.status).toBe(404);
     });
 
-    it('markDelivered/markObserved: ADMIN 200, SELLER 200, MANAGEMENT 403, WAREHOUSE 403', async () => {
+    it('markDelivered/markObserved: ADMIN 200, SELLER 200 (sobre su propia venta; P6-D), MANAGEMENT 403, WAREHOUSE 403', async () => {
       const server = app.getHttpServer();
       const saleForAdmin = await createDirectSale(adminCookie);
       const deliveredByAdmin = await request(server)
@@ -1536,7 +1556,12 @@ describe('Sales (e2e)', () => {
         .set('Cookie', adminCookie);
       expect(deliveredByAdmin.status).toBe(200);
 
-      const saleForSeller = await createDirectSale(adminCookie);
+      // P6-D: SELLER solo puede observar sus PROPIAS ventas (antes de este
+      // bloque, esta prueba usaba una venta del ADMIN; ver también el
+      // describe() dedicado "permisos por vendedor — observación (P6-D)"
+      // para la cobertura de propiedad completa, incluida la inversión
+      // explícita del supuesto heredado).
+      const saleForSeller = await createDirectSale(sellerCookie);
       const observedBySeller = await request(server)
         .post(`/api/v1/sales/${saleForSeller.id}/mark-observed`)
         .set('Cookie', sellerCookie);
@@ -1602,6 +1627,8 @@ describe('Sales (e2e)', () => {
         customerId: personActive.id,
         customerType: CustomerType.PERSON,
         customerName: personActive.name,
+        // P6-B2: el SELLER convierte una cotización propia.
+        sellerId,
         items: [quoteItemFor(productA, '1.000')],
       });
       const seller = await convertQuote(sellerCookie, quoteForSeller.id);
@@ -1631,6 +1658,862 @@ describe('Sales (e2e)', () => {
         quoteForWarehouse.id,
       );
       expect(warehouse.status).toBe(403);
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — lectura (P2)
+  // ==================================================================
+  describe('permisos por vendedor — lectura (P2)', () => {
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_sales_p2';
+    const MULTI_ROLE_PASSWORD = 'MultiRoleSales123';
+
+    async function listSales(
+      cookie: string,
+      query: Record<string, string | number> = {},
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .get('/api/v1/sales')
+        .query({ limit: 100, ...query })
+        .set('Cookie', cookie);
+    }
+
+    function rowsOf(
+      response: request.Response,
+    ): PaginatedBody<SafeSaleListItemBody> {
+      return response.body as PaginatedBody<SafeSaleListItemBody>;
+    }
+
+    it('SELLER lista únicamente sus ventas: incluye la propia, excluye la de ADMIN, total = sus ventas reales', async () => {
+      const own = await createDirectSale(sellerCookie);
+      const foreign = await createDirectSale(adminCookie);
+
+      const response = await listSales(sellerCookie);
+      expect(response.status).toBe(200);
+      const body = rowsOf(response);
+      const ids = body.data.map((row) => row.id);
+      expect(ids).toContain(own.id);
+      expect(ids).not.toContain(foreign.id);
+      expect(body.data.every((row) => row.sellerId === sellerId)).toBe(true);
+      expect(body.total).toBe(await prisma.sale.count({ where: { sellerId } }));
+    });
+
+    it('SELLER que filtra por el sellerId de otro vendedor obtiene una lista vacía (sin error)', async () => {
+      await createDirectSale(adminCookie);
+      const response = await listSales(sellerCookie, { sellerId: adminId });
+      expect(response.status).toBe(200);
+      expect(rowsOf(response).data).toEqual([]);
+      expect(rowsOf(response).total).toBe(0);
+    });
+
+    it('SELLER que filtra por su propio sellerId ve sus ventas', async () => {
+      const own = await createDirectSale(sellerCookie);
+      const response = await listSales(sellerCookie, { sellerId });
+      expect(response.status).toBe(200);
+      expect(rowsOf(response).data.map((row) => row.id)).toContain(own.id);
+    });
+
+    it('SELLER: detalle e impresión propios 200; ajenos 404 idéntico a una venta inexistente', async () => {
+      const server = app.getHttpServer();
+      const own = await createDirectSale(sellerCookie);
+      const foreign = await createDirectSale(adminCookie);
+
+      const ownDetail = await request(server)
+        .get(`/api/v1/sales/${own.id}`)
+        .set('Cookie', sellerCookie);
+      expect(ownDetail.status).toBe(200);
+      expect((ownDetail.body as SafeSaleBody).id).toBe(own.id);
+      const ownPrint = await request(server)
+        .get(`/api/v1/sales/${own.id}/print`)
+        .set('Cookie', sellerCookie);
+      expect(ownPrint.status).toBe(200);
+      expect(ownPrint.text).toContain(own.number);
+
+      const foreignDetail = await request(server)
+        .get(`/api/v1/sales/${foreign.id}`)
+        .set('Cookie', sellerCookie);
+      const foreignPrint = await request(server)
+        .get(`/api/v1/sales/${foreign.id}/print`)
+        .set('Cookie', sellerCookie);
+      const missingDetail = await request(server)
+        .get(`/api/v1/sales/${NON_EXISTENT_UUID}`)
+        .set('Cookie', sellerCookie);
+      const missingPrint = await request(server)
+        .get(`/api/v1/sales/${NON_EXISTENT_UUID}/print`)
+        .set('Cookie', sellerCookie);
+      expect(foreignDetail.status).toBe(404);
+      expect(foreignPrint.status).toBe(404);
+      expect(missingDetail.status).toBe(404);
+      expect(missingPrint.status).toBe(404);
+      // La ruta /print declara Content-Type text/html, así que el cuerpo de
+      // error JSON llega en `text` (mismo comportamiento previo para una
+      // venta inexistente): se lee el mensaje desde ahí.
+      const messageOf = (r: request.Response): unknown =>
+        (JSON.parse(r.text) as { message?: unknown }).message;
+      expect(messageOf(foreignDetail)).toBe('Venta no encontrada');
+      expect(messageOf(foreignPrint)).toBe('Venta no encontrada');
+      expect(messageOf(foreignDetail)).toEqual(messageOf(missingDetail));
+      expect(messageOf(foreignPrint)).toEqual(messageOf(missingPrint));
+      // Nada del documento ajeno se filtra en la respuesta.
+      expect(JSON.stringify(foreignDetail.body)).not.toContain(foreign.number);
+      expect(foreignPrint.text).not.toContain(foreign.number);
+    });
+
+    it('ADMIN lee y lista ventas de otros vendedores; el vendedor original se conserva', async () => {
+      const server = app.getHttpServer();
+      const sellerSale = await createDirectSale(sellerCookie);
+
+      const detail = await request(server)
+        .get(`/api/v1/sales/${sellerSale.id}`)
+        .set('Cookie', adminCookie);
+      expect(detail.status).toBe(200);
+      expect((detail.body as SafeSaleBody).seller.id).toBe(sellerId);
+
+      const list = await listSales(adminCookie, { sellerId });
+      expect(list.status).toBe(200);
+      expect(rowsOf(list).data.map((row) => row.id)).toContain(sellerSale.id);
+
+      const print = await request(server)
+        .get(`/api/v1/sales/${sellerSale.id}/print`)
+        .set('Cookie', adminCookie);
+      expect(print.status).toBe(200);
+    });
+
+    it('MANAGEMENT conserva la lectura completa (ventas de SELLER y de ADMIN)', async () => {
+      const server = app.getHttpServer();
+      const sellerSale = await createDirectSale(sellerCookie);
+      const adminSale = await createDirectSale(adminCookie);
+
+      for (const sale of [sellerSale, adminSale]) {
+        const detail = await request(server)
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', managementCookie);
+        expect(detail.status).toBe(200);
+      }
+      const bySeller = await listSales(managementCookie, { sellerId });
+      expect(rowsOf(bySeller).data.map((row) => row.id)).toContain(
+        sellerSale.id,
+      );
+      const byAdmin = await listSales(managementCookie, { sellerId: adminId });
+      expect(rowsOf(byAdmin).data.map((row) => row.id)).toContain(adminSale.id);
+    });
+
+    it('sin autenticación: listado, detalle e impresión responden 401', async () => {
+      const server = app.getHttpServer();
+      const sale = await createDirectSale(sellerCookie);
+      expect((await request(server).get('/api/v1/sales')).status).toBe(401);
+      expect(
+        (await request(server).get(`/api/v1/sales/${sale.id}`)).status,
+      ).toBe(401);
+      expect(
+        (await request(server).get(`/api/v1/sales/${sale.id}/print`)).status,
+      ).toBe(401);
+    });
+
+    it('cambio de rol activo: el mismo usuario como SELLER no ve una venta ajena; tras cambiar a ADMIN sí', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_sales_p2@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createDirectSale(adminCookie);
+        // Rol activo por defecto con SELLER asignado: SELLER.
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        const deniedDetail = await request(server)
+          .get(`/api/v1/sales/${foreign.id}`)
+          .set('Cookie', asSeller);
+        expect(deniedDetail.status).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect(asAdmin).not.toBe('');
+
+        const allowedDetail = await request(server)
+          .get(`/api/v1/sales/${foreign.id}`)
+          .set('Cookie', asAdmin);
+        expect(allowedDetail.status).toBe(200);
+      } finally {
+        // Revoca el rol ADMIN de este usuario dedicado: otras suites
+        // (users, users-admin-concurrency) dependen de que e2e_admin sea
+        // el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — entrega (P3)
+  // ==================================================================
+  describe('permisos por vendedor — entrega (P3)', () => {
+    const SELLER2_USERNAME = 'e2e_seller2_sales_p3';
+    const SELLER2_PASSWORD = 'Seller2SalesP3123';
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_sales_p3';
+    const MULTI_ROLE_PASSWORD = 'MultiRoleSalesP3123';
+
+    async function markDelivered(
+      cookie: string,
+      saleId: string,
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/mark-delivered`)
+        .set('Cookie', cookie);
+    }
+
+    /** Estado persistido relevante de la venta, para comparar antes/después. */
+    async function deliverySnapshot(saleId: string) {
+      const [sale, movements, deliveryAudits] = await Promise.all([
+        prisma.sale.findUniqueOrThrow({
+          where: { id: saleId },
+          select: { deliveryStatus: true, sellerId: true, updatedAt: true },
+        }),
+        prisma.inventoryMovement.count({
+          where: { referenceType: 'Sale', referenceId: saleId },
+        }),
+        prisma.auditLog.count({
+          where: {
+            action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+            entityType: 'Sale',
+            entityId: saleId,
+          },
+        }),
+      ]);
+      return { sale, movements, deliveryAudits };
+    }
+
+    function messageOf(response: request.Response): unknown {
+      return (JSON.parse(response.text) as { message?: unknown }).message;
+    }
+
+    it('SELLER marca entregada su propia venta: 200, DELIVERED, auditoría con el SELLER real y sellerId intacto', async () => {
+      const own = await createDirectSale(sellerCookie);
+      const response = await markDelivered(sellerCookie, own.id);
+      expect(response.status).toBe(200);
+      expect((response.body as SafeSaleBody).deliveryStatus).toBe(
+        SaleDeliveryStatus.DELIVERED,
+      );
+
+      const after = await deliverySnapshot(own.id);
+      expect(after.sale.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+          entityId: own.id,
+        },
+      });
+      expect(audit.userId).toBe(sellerId);
+    });
+
+    it('SELLER sobre una venta del ADMIN: 404 sin ningún efecto (estado, inventario, auditoría, sellerId)', async () => {
+      const foreign = await createDirectSale(adminCookie);
+      const before = await deliverySnapshot(foreign.id);
+
+      const response = await markDelivered(sellerCookie, foreign.id);
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('Venta no encontrada');
+      expect(response.text).not.toContain(foreign.number);
+
+      expect(await deliverySnapshot(foreign.id)).toEqual(before);
+      expect(before.sale.deliveryStatus).toBe(SaleDeliveryStatus.PENDING);
+    });
+
+    it('SELLER sobre una venta de OTRO SELLER: 404 sin efectos', async () => {
+      await upsertFixtureUser(prisma, {
+        username: SELLER2_USERNAME,
+        email: 'e2e_seller2_sales_p3@demosystem.test',
+        password: SELLER2_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const seller2Cookie = (
+        await login(app.getHttpServer(), SELLER2_USERNAME, SELLER2_PASSWORD)
+      ).cookie;
+      const otherSellerSale = await createDirectSale(seller2Cookie);
+      const before = await deliverySnapshot(otherSellerSale.id);
+
+      const response = await markDelivered(sellerCookie, otherSellerSale.id);
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('Venta no encontrada');
+      expect(await deliverySnapshot(otherSellerSale.id)).toEqual(before);
+    });
+
+    it('venta ajena e inexistente son indistinguibles (estado y mensaje)', async () => {
+      const foreign = await createDirectSale(adminCookie);
+      const foreignResponse = await markDelivered(sellerCookie, foreign.id);
+      const missingResponse = await markDelivered(
+        sellerCookie,
+        NON_EXISTENT_UUID,
+      );
+      expect(foreignResponse.status).toBe(404);
+      expect(missingResponse.status).toBe(404);
+      expect(messageOf(foreignResponse)).toEqual(messageOf(missingResponse));
+      expect(messageOf(missingResponse)).toBe('Venta no encontrada');
+    });
+
+    it('ADMIN marca entregada una venta del SELLER (permiso existente); auditoría con el ADMIN real; sellerId intacto', async () => {
+      const sellerSale = await createDirectSale(sellerCookie);
+      const response = await markDelivered(adminCookie, sellerSale.id);
+      expect(response.status).toBe(200);
+
+      const after = await deliverySnapshot(sellerSale.id);
+      expect(after.sale.deliveryStatus).toBe(SaleDeliveryStatus.DELIVERED);
+      expect(after.sale.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+          entityId: sellerSale.id,
+        },
+      });
+      expect(audit.userId).toBe(adminId);
+    });
+
+    it('sin autenticación: 401 sin efectos', async () => {
+      const sale = await createDirectSale(sellerCookie);
+      const before = await deliverySnapshot(sale.id);
+      const response = await request(app.getHttpServer()).post(
+        `/api/v1/sales/${sale.id}/mark-delivered`,
+      );
+      expect(response.status).toBe(401);
+      expect(await deliverySnapshot(sale.id)).toEqual(before);
+    });
+
+    it('cambio de rol activo: como SELLER 404 sobre una venta ajena; tras cambiar a ADMIN, 200', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_sales_p3@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createDirectSale(adminCookie);
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        const denied = await markDelivered(asSeller, foreign.id);
+        expect(denied.status).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect(asAdmin).not.toBe('');
+
+        const allowed = await markDelivered(asAdmin, foreign.id);
+        expect(allowed.status).toBe(200);
+        const audit = await prisma.auditLog.findFirstOrThrow({
+          where: {
+            action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+            entityId: foreign.id,
+          },
+        });
+        expect(audit.userId).toBe(multiRoleUser.id);
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — observación (P6-D)
+  // ==================================================================
+  describe('permisos por vendedor — observación (P6-D)', () => {
+    const SELLER2_USERNAME = 'e2e_seller2_sales_p6d';
+    const SELLER2_PASSWORD = 'Seller2SalesP6d123';
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_sales_p6d';
+    const MULTI_ROLE_PASSWORD = 'MultiRoleSalesP6d123';
+
+    async function markObserved(
+      cookie: string,
+      saleId: string,
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/mark-observed`)
+        .set('Cookie', cookie);
+    }
+
+    async function markDelivered(
+      cookie: string,
+      saleId: string,
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/mark-delivered`)
+        .set('Cookie', cookie);
+    }
+
+    /** Estado persistido relevante de la venta, para comparar antes/después. */
+    async function deliverySnapshot(saleId: string) {
+      const [sale, movements, deliveryAudits] = await Promise.all([
+        prisma.sale.findUniqueOrThrow({
+          where: { id: saleId },
+          select: { deliveryStatus: true, sellerId: true, updatedAt: true },
+        }),
+        prisma.inventoryMovement.count({
+          where: { referenceType: 'Sale', referenceId: saleId },
+        }),
+        prisma.auditLog.count({
+          where: {
+            action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+            entityType: 'Sale',
+            entityId: saleId,
+          },
+        }),
+      ]);
+      return { sale, movements, deliveryAudits };
+    }
+
+    function messageOf(response: request.Response): unknown {
+      return (JSON.parse(response.text) as { message?: unknown }).message;
+    }
+
+    it('SELLER marca observada su propia venta: 200, OBSERVED, auditoría con el SELLER real y sellerId intacto', async () => {
+      const own = await createDirectSale(sellerCookie);
+      const response = await markObserved(sellerCookie, own.id);
+      expect(response.status).toBe(200);
+      expect((response.body as SafeSaleBody).deliveryStatus).toBe(
+        SaleDeliveryStatus.OBSERVED,
+      );
+
+      const after = await deliverySnapshot(own.id);
+      expect(after.sale.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+          entityId: own.id,
+        },
+      });
+      expect(audit.userId).toBe(sellerId);
+    });
+
+    it('INVERSIÓN DEL SUPUESTO HEREDADO: SELLER sobre una venta del ADMIN ya NO devuelve 200 — ahora 404 sin ningún efecto (estado, inventario, auditoría, sellerId)', async () => {
+      const foreign = await createDirectSale(adminCookie);
+      const before = await deliverySnapshot(foreign.id);
+      expect(before.sale.deliveryStatus).toBe(SaleDeliveryStatus.PENDING);
+
+      const response = await markObserved(sellerCookie, foreign.id);
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('Venta no encontrada');
+      expect(response.text).not.toContain(foreign.number);
+
+      expect(await deliverySnapshot(foreign.id)).toEqual(before);
+    });
+
+    it('SELLER sobre una venta de OTRO SELLER: 404 sin efectos', async () => {
+      await upsertFixtureUser(prisma, {
+        username: SELLER2_USERNAME,
+        email: 'e2e_seller2_sales_p6d@demosystem.test',
+        password: SELLER2_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const seller2Cookie = (
+        await login(app.getHttpServer(), SELLER2_USERNAME, SELLER2_PASSWORD)
+      ).cookie;
+      const otherSellerSale = await createDirectSale(seller2Cookie);
+      const before = await deliverySnapshot(otherSellerSale.id);
+
+      const response = await markObserved(sellerCookie, otherSellerSale.id);
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('Venta no encontrada');
+      expect(await deliverySnapshot(otherSellerSale.id)).toEqual(before);
+    });
+
+    it('venta ajena e inexistente son indistinguibles (estado y mensaje)', async () => {
+      const foreign = await createDirectSale(adminCookie);
+      const foreignResponse = await markObserved(sellerCookie, foreign.id);
+      const missingResponse = await markObserved(
+        sellerCookie,
+        NON_EXISTENT_UUID,
+      );
+      expect(foreignResponse.status).toBe(404);
+      expect(missingResponse.status).toBe(404);
+      expect(messageOf(foreignResponse)).toEqual(messageOf(missingResponse));
+      expect(messageOf(missingResponse)).toBe('Venta no encontrada');
+    });
+
+    it('venta ajena en estado inválido para observar (ya ENTREGADA por el ADMIN): sigue siendo 404, nunca 409 — la propiedad nunca revela el estado', async () => {
+      const foreign = await createDirectSale(adminCookie);
+      const delivered = await markDelivered(adminCookie, foreign.id);
+      expect(delivered.status).toBe(200);
+      const before = await deliverySnapshot(foreign.id);
+      expect(before.sale.deliveryStatus).toBe(SaleDeliveryStatus.DELIVERED);
+
+      const response = await markObserved(sellerCookie, foreign.id);
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('Venta no encontrada');
+      expect(await deliverySnapshot(foreign.id)).toEqual(before);
+    });
+
+    it('ADMIN marca observada una venta del SELLER (permiso existente); auditoría con el ADMIN real; sellerId intacto', async () => {
+      const sellerSale = await createDirectSale(sellerCookie);
+      const response = await markObserved(adminCookie, sellerSale.id);
+      expect(response.status).toBe(200);
+
+      const after = await deliverySnapshot(sellerSale.id);
+      expect(after.sale.deliveryStatus).toBe(SaleDeliveryStatus.OBSERVED);
+      expect(after.sale.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+          entityId: sellerSale.id,
+        },
+      });
+      expect(audit.userId).toBe(adminId);
+    });
+
+    it('MANAGEMENT y WAREHOUSE no adquieren permisos de observación: 403 (RolesGuard), ni siquiera sobre su propia identidad', async () => {
+      const sale = await createDirectSale(adminCookie);
+      const byManagement = await markObserved(managementCookie, sale.id);
+      expect(byManagement.status).toBe(403);
+      const byWarehouse = await markObserved(warehouseCookie, sale.id);
+      expect(byWarehouse.status).toBe(403);
+    });
+
+    it('sin autenticación: 401 sin efectos', async () => {
+      const sale = await createDirectSale(sellerCookie);
+      const before = await deliverySnapshot(sale.id);
+      const response = await request(app.getHttpServer()).post(
+        `/api/v1/sales/${sale.id}/mark-observed`,
+      );
+      expect(response.status).toBe(401);
+      expect(await deliverySnapshot(sale.id)).toEqual(before);
+    });
+
+    it('cambio de rol activo: como SELLER 404 sobre una venta ajena; tras cambiar a ADMIN, 200', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_sales_p6d@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createDirectSale(adminCookie);
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        const denied = await markObserved(asSeller, foreign.id);
+        expect(denied.status).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect(asAdmin).not.toBe('');
+
+        const allowed = await markObserved(asAdmin, foreign.id);
+        expect(allowed.status).toBe(200);
+        const audit = await prisma.auditLog.findFirstOrThrow({
+          where: {
+            action: AuditAction.SALE_DELIVERY_STATUS_CHANGED,
+            entityId: foreign.id,
+          },
+        });
+        expect(audit.userId).toBe(multiRoleUser.id);
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+
+    it('regresión: mark-delivered conserva exactamente su comportamiento de P3 (propia 200, ajena 404)', async () => {
+      const own = await createDirectSale(sellerCookie);
+      const ownResponse = await markDelivered(sellerCookie, own.id);
+      expect(ownResponse.status).toBe(200);
+
+      const foreign = await createDirectSale(adminCookie);
+      const foreignResponse = await markDelivered(sellerCookie, foreign.id);
+      expect(foreignResponse.status).toBe(404);
+      expect(messageOf(foreignResponse)).toBe('Venta no encontrada');
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — conversión con pagos iniciales (P6-A)
+  // ==================================================================
+  describe('permisos por vendedor — conversión de cotizaciones (P6-A + P6-B2)', () => {
+    async function convertWith(
+      cookie: string,
+      quoteId: string,
+      body: Record<string, unknown>,
+    ): Promise<request.Response> {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quoteId}`)
+        .set('Cookie', cookie)
+        .send(body);
+    }
+
+    async function quoteFor(sellerOwner: string, status?: QuoteStatus) {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        sellerId: sellerOwner,
+        ...(status !== undefined ? { status } : {}),
+        items: [quoteItemFor(productA, '1.000')],
+      });
+      const row = await prisma.quote.findUniqueOrThrow({
+        where: { id: quote.id },
+        select: { total: true },
+      });
+      return { ...quote, total: row.total.toFixed(2) };
+    }
+
+    /** Todo lo que una conversión podría persistir. */
+    async function conversionSnapshot(quoteId: string) {
+      const [quote, sales, sequence, converted, stock] = await Promise.all([
+        prisma.quote.findUniqueOrThrow({
+          where: { id: quoteId },
+          select: { status: true, sellerId: true, updatedAt: true },
+        }),
+        prisma.sale.count({ where: { quoteId } }),
+        currentSaleSequenceNumber(),
+        prisma.auditLog.count({
+          where: {
+            action: AuditAction.QUOTE_CONVERTED,
+            entityType: 'Quote',
+            entityId: quoteId,
+          },
+        }),
+        prisma.product
+          .findUniqueOrThrow({ where: { id: productA.id } })
+          .then((p) => p.stockCurrent.toFixed(3)),
+      ]);
+      return { quote, sales, sequence, converted, stock };
+    }
+
+    function trackSale(response: request.Response): SafeSaleBody {
+      const body = response.body as SafeSaleBody;
+      createdSaleIds.push(body.id);
+      return body;
+    }
+
+    function messageOf(response: request.Response): unknown {
+      return (response.body as { message?: unknown }).message;
+    }
+
+    const SELLER2_USERNAME = 'e2e_seller2_sales_p6b2';
+    const SELLER2_PASSWORD = 'Seller2SalesP6b2123';
+
+    async function seller2CookieP6b2(): Promise<string> {
+      await upsertFixtureUser(prisma, {
+        username: SELLER2_USERNAME,
+        email: 'e2e_seller2_sales_p6b2@demosystem.test',
+        password: SELLER2_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      return (
+        await login(app.getHttpServer(), SELLER2_USERNAME, SELLER2_PASSWORD)
+      ).cookie;
+    }
+
+    it('SELLER convierte su propia cotización con `payment`: 201, PAID, sellerId = SELLER, cobrador = SELLER', async () => {
+      const quote = await quoteFor(sellerId);
+      const response = await convertWith(sellerCookie, quote.id, {
+        payment: { method: 'CASH', amount: quote.total },
+      });
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(sale.seller.id).toBe(sellerId);
+      const payments = await prisma.payment.findMany({
+        where: { saleId: sale.id },
+      });
+      expect(payments).toHaveLength(1);
+      expect(payments[0].createdByUserId).toBe(sellerId);
+    });
+
+    it('SELLER convierte su propia cotización con `payments[]`: 201, un Payment por elemento', async () => {
+      const quote = await quoteFor(sellerId);
+      const response = await convertWith(sellerCookie, quote.id, {
+        payments: [
+          { method: 'CASH', amount: '1.00' },
+          { method: 'CASH', amount: '1.00' },
+        ],
+      });
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(await prisma.payment.count({ where: { saleId: sale.id } })).toBe(
+        2,
+      );
+    });
+
+    it.each([
+      [
+        'payment',
+        (total: string) => ({ payment: { method: 'CASH', amount: total } }),
+      ],
+      [
+        'payments[]',
+        () => ({
+          payments: [
+            { method: 'CASH', amount: '1.00' },
+            { method: 'CASH', amount: '1.00' },
+          ],
+        }),
+      ],
+    ])(
+      'SELLER con cotización ajena y %s: 404 "La cotización no existe", sin venta, pagos, stock, correlativo ni auditoría',
+      async (_label, body) => {
+        const quote = await quoteFor(adminId);
+        const before = await conversionSnapshot(quote.id);
+        const paymentsBefore = await prisma.payment.count();
+
+        const response = await convertWith(
+          sellerCookie,
+          quote.id,
+          body(quote.total),
+        );
+        expect(response.status).toBe(404);
+        expect(messageOf(response)).toBe('La cotización no existe');
+        expect(JSON.stringify(response.body)).not.toContain(quote.number);
+
+        expect(await conversionSnapshot(quote.id)).toEqual(before);
+        expect(await prisma.payment.count()).toBe(paymentsBefore);
+        expect(before.quote.sellerId).toBe(adminId);
+      },
+    );
+
+    it('cotización ajena RECHAZADA o inexistente con pagos: mismo 404 (nunca el 409 que revelaría su estado)', async () => {
+      const rejected = await quoteFor(adminId, QuoteStatus.REJECTED);
+      const rejectedResponse = await convertWith(sellerCookie, rejected.id, {
+        payment: { method: 'CASH', amount: '1.00' },
+      });
+      const missingResponse = await convertWith(
+        sellerCookie,
+        NON_EXISTENT_UUID,
+        { payment: { method: 'CASH', amount: '1.00' } },
+      );
+      expect(rejectedResponse.status).toBe(404);
+      expect(missingResponse.status).toBe(404);
+      expect(messageOf(rejectedResponse)).toEqual(messageOf(missingResponse));
+    });
+
+    it('ADMIN convierte una cotización del SELLER con pago: sellerId = SELLER original, cobrador = ADMIN', async () => {
+      const quote = await quoteFor(sellerId);
+      const response = await convertWith(adminCookie, quote.id, {
+        payment: { method: 'CASH', amount: quote.total },
+      });
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(sale.seller.id).toBe(sellerId);
+      const payments = await prisma.payment.findMany({
+        where: { saleId: sale.id },
+      });
+      expect(payments[0].createdByUserId).toBe(adminId);
+    });
+
+    it('P6-B2: SELLER convierte una cotización ajena SIN pagos → 404 "La cotización no existe", sin venta, stock, correlativo ni auditoría', async () => {
+      const quote = await quoteFor(adminId);
+      const before = await conversionSnapshot(quote.id);
+      const response = await convertWith(sellerCookie, quote.id, {});
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('La cotización no existe');
+      expect(await conversionSnapshot(quote.id)).toEqual(before);
+    });
+
+    it('P6-B2: SELLER convierte su propia cotización SIN pagos → 201 a su nombre, sin pagos', async () => {
+      const quote = await quoteFor(sellerId);
+      const response = await convertWith(sellerCookie, quote.id, {});
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(sale.seller.id).toBe(sellerId);
+      expect(await prisma.payment.count({ where: { saleId: sale.id } })).toBe(
+        0,
+      );
+    });
+
+    it('P6-B2: ADMIN convierte una cotización del SELLER SIN pagos → 201; la venta conserva al SELLER', async () => {
+      const quote = await quoteFor(sellerId);
+      const response = await convertWith(adminCookie, quote.id, {});
+      expect(response.status).toBe(201);
+      const sale = trackSale(response);
+      expect(sale.seller.id).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.QUOTE_CONVERTED,
+          entityType: 'Quote',
+          entityId: quote.id,
+        },
+      });
+      expect(audit.userId).toBe(adminId);
+    });
+
+    it('P6-B2: concurrencia — dueño (SELLER) y SELLER ajeno convierten la misma cotización; solo el dueño crea la venta', async () => {
+      const quote = await quoteFor(sellerId);
+      const [owner, foreign] = await Promise.all([
+        convertWith(sellerCookie, quote.id, {}),
+        convertWith(await seller2CookieP6b2(), quote.id, {}),
+      ]);
+      expect(owner.status).toBe(201);
+      expect(foreign.status).toBe(404);
+      trackSale(owner);
+      expect(await prisma.sale.count({ where: { quoteId: quote.id } })).toBe(1);
+    }, 30000);
+
+    it('sin autenticación: 401 sin efectos', async () => {
+      const quote = await quoteFor(sellerId);
+      const before = await conversionSnapshot(quote.id);
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .send({ payment: { method: 'CASH', amount: quote.total } });
+      expect(response.status).toBe(401);
+      expect(await conversionSnapshot(quote.id)).toEqual(before);
     });
   });
 
@@ -2437,6 +3320,9 @@ describe('Sales (e2e)', () => {
         customerId: personActive.id,
         customerType: CustomerType.PERSON,
         customerName: personActive.name,
+        // P6-B2: cotización del SELLER que convierte (propiedad coherente; esta
+        // prueba no es de autorización).
+        sellerId,
         items: [quoteItemFor(productA, '1.000')],
       });
 
@@ -2463,6 +3349,9 @@ describe('Sales (e2e)', () => {
         customerId: companyActive.id,
         customerType: CustomerType.COMPANY,
         customerName: companyActive.name,
+        // P6-B2: cotización del SELLER que convierte (propiedad coherente; esta
+        // prueba no es de autorización).
+        sellerId,
         items: [quoteItemFor(productRaceStock, '3.000')],
       });
 

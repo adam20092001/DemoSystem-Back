@@ -35,8 +35,14 @@ function createServiceMock() {
     update: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     accept: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     reject: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
-    list: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    findOne: jest.fn<Promise<unknown>, [string, RoleName]>(),
+    list: jest.fn<
+      Promise<unknown>,
+      [unknown, { id: string; role: RoleName }]
+    >(),
+    findOne: jest.fn<
+      Promise<unknown>,
+      [string, { id: string; role: RoleName }]
+    >(),
   };
 }
 
@@ -126,7 +132,10 @@ describe('QuotesController', () => {
 
       const result = await controller.list(query, ACTOR);
 
-      expect(service.list).toHaveBeenCalledWith(query, RoleName.ADMIN);
+      expect(service.list).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(expected);
     });
   });
@@ -137,7 +146,10 @@ describe('QuotesController', () => {
 
       const result = await controller.findOne('quote-1', ACTOR);
 
-      expect(service.findOne).toHaveBeenCalledWith('quote-1', RoleName.ADMIN);
+      expect(service.findOne).toHaveBeenCalledWith('quote-1', {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(SAMPLE_QUOTE);
     });
   });
@@ -161,6 +173,7 @@ describe('QuotesController', () => {
         notes: 'Actualizada',
         items: undefined,
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_QUOTE);
@@ -195,6 +208,7 @@ describe('QuotesController', () => {
       expect(service.accept).toHaveBeenCalledWith({
         quoteId: 'quote-1',
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_QUOTE);
@@ -211,6 +225,7 @@ describe('QuotesController', () => {
       expect(service.reject).toHaveBeenCalledWith({
         quoteId: 'quote-1',
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_QUOTE);
@@ -228,7 +243,10 @@ describe('QuotesController', () => {
 
       const result = await controller.print('quote-1', ACTOR);
 
-      expect(service.findOne).toHaveBeenCalledWith('quote-1', RoleName.ADMIN);
+      expect(service.findOne).toHaveBeenCalledWith('quote-1', {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(renderer.render).toHaveBeenCalledWith(safeQuote);
       expect(result).toBe('<html>ok</html>');
     });

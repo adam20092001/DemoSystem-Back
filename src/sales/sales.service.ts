@@ -17,7 +17,6 @@ import {
   Prisma,
   ProductStatus,
   QuoteStatus,
-  RoleName,
   SaleDeliveryStatus,
   SaleStatus,
   UnitStatus,
@@ -46,6 +45,10 @@ import {
   parseInitialPayments,
 } from '../payments/payment-calculator';
 import { PaymentEngine } from '../payments/payment.engine';
+import {
+  assertCanOperateQuote,
+  QuoteAccessRequester,
+} from '../quotes/quote-access.policy';
 import { effectiveStatus } from '../quotes/quote-calculator';
 import {
   SALE_DETAIL_SELECT,
@@ -66,6 +69,14 @@ import {
 } from './sale-calculator';
 import { ConvertQuoteToSaleInput } from './types/convert-quote-to-sale.input';
 import { CreateSaleInput } from './types/create-sale.input';
+import {
+  applySaleReadScope,
+  assertCanOperateSale,
+  assertCanReadSale,
+  SALE_NOT_FOUND_MESSAGE,
+  SaleAccessRequester,
+  saleReadScopeWhere,
+} from './sale-access.policy';
 import { ListSalesQuery } from './types/list-sales.query';
 import { CancelSaleInput, SaleActionInput } from './types/sale-action.input';
 import { SafeSale, SafeSaleListItem } from './types/safe-sale';
@@ -78,23 +89,8 @@ const CANCELLATION_REASON_MAX_LENGTH = 200;
 /** Referencia polimórfica que StockMovementEngine asocia a la venta (§57 del plan aprobado, sin FK). */
 const SALE_REFERENCE_TYPE = 'Sale';
 
-/**
- * Roles con acceso de lectura a Ventas (defensa en profundidad; el futuro
- * Bloque C decide el acceso HTTP real vía guards). WAREHOUSE no tiene
- * ningún acceso a Sale, igual que en Quotes/Customers. `default` también
- * falla cerrado: un rol futuro/desconocido nunca hereda visibilidad.
- */
-function hasSaleReadAccess(role: RoleName): boolean {
-  switch (role) {
-    case RoleName.ADMIN:
-    case RoleName.SELLER:
-    case RoleName.MANAGEMENT:
-      return true;
-    case RoleName.WAREHOUSE:
-    default:
-      return false;
-  }
-}
+/** 404 único de la conversión: cotización inexistente o ajena. */
+const QUOTE_NOT_FOUND_MESSAGE = 'La cotización no existe';
 
 interface LockedCustomerRow {
   id: string;
@@ -156,6 +152,7 @@ interface LockedSaleRow {
   id: string;
   number: string;
   status: SaleStatus;
+  sellerId: string;
   deliveryStatus: SaleDeliveryStatus;
   subtotal: Prisma.Decimal;
   discountAmount: Prisma.Decimal;
@@ -409,7 +406,22 @@ export class SalesService {
   // Venta desde cotización
   // ==================================================================
 
-  async createFromQuote(input: ConvertQuoteToSaleInput): Promise<SafeSale> {
+  /**
+   * Permisos por vendedor (P6-A + P6-B2): convertir es operar la cotización.
+   * TODA conversión (sin pagos, con `payment` o con `payments[]`) exige que
+   * el solicitante pueda operar la cotización según su propietario
+   * (Quote.sellerId, policy de cotizaciones): un SELLER solo las propias;
+   * ADMIN todas. La comprobación ocurre sobre la cotización ya bloqueada y
+   * ANTES de validar su estado o de cualquier escritura (numeración, venta,
+   * stock, pagos, asientos, auditoría); una cotización ajena responde el
+   * mismo 404 que una inexistente. La venta conserva el sellerId de la
+   * cotización y los pagos registran al actor real.
+   */
+  async createFromQuote(
+    input: ConvertQuoteToSaleInput & {
+      actorRole: QuoteAccessRequester['role'];
+    },
+  ): Promise<SafeSale> {
     const businessDate = businessToday();
     // R1: mismo contrato `payment`/`payments` y mismo parseo puro previo a
     // la transacción que en la venta directa.
@@ -417,6 +429,11 @@ export class SalesService {
 
     return this.prisma.$transaction(async (tx) => {
       const quote = await this.lockQuoteForConversion(tx, input.quoteId);
+      assertCanOperateQuote(
+        { id: input.actorUserId, role: input.actorRole },
+        quote.sellerId,
+        QUOTE_NOT_FOUND_MESSAGE,
+      );
       const effective = effectiveStatus(
         quote.status,
         quote.expirationDate,
@@ -782,37 +799,75 @@ export class SalesService {
   // Entrega
   // ==================================================================
 
-  async markDelivered(input: SaleActionInput): Promise<SafeSale> {
-    return this.transitionDelivery(input, (current) => {
-      if (
-        current === SaleDeliveryStatus.PENDING ||
-        current === SaleDeliveryStatus.OBSERVED
-      ) {
-        return SaleDeliveryStatus.DELIVERED;
-      }
-      throw new ConflictException(
-        'No es posible marcar la venta como entregada en su estado actual',
-      );
-    });
+  /**
+   * Permisos por vendedor (P3): solo el dueño de la venta (o un rol sin
+   * restricción de propiedad, ADMIN) puede marcarla entregada. La
+   * comprobación ocurre dentro de la transacción, sobre la fila ya
+   * bloqueada y antes de cualquier escritura; una venta ajena responde el
+   * mismo 404 "Venta no encontrada" que una inexistente.
+   */
+  async markDelivered(
+    input: SaleActionInput & { actorRole: SaleAccessRequester['role'] },
+  ): Promise<SafeSale> {
+    return this.transitionDelivery(
+      input,
+      (current) => {
+        if (
+          current === SaleDeliveryStatus.PENDING ||
+          current === SaleDeliveryStatus.OBSERVED
+        ) {
+          return SaleDeliveryStatus.DELIVERED;
+        }
+        throw new ConflictException(
+          'No es posible marcar la venta como entregada en su estado actual',
+        );
+      },
+      { id: input.actorUserId, role: input.actorRole },
+    );
   }
 
-  async markObserved(input: SaleActionInput): Promise<SafeSale> {
-    return this.transitionDelivery(input, (current) => {
-      if (current === SaleDeliveryStatus.PENDING) {
-        return SaleDeliveryStatus.OBSERVED;
-      }
-      throw new ConflictException(
-        'No es posible marcar la venta como observada en su estado actual',
-      );
-    });
+  /**
+   * Permisos por vendedor (P6-D): mismo criterio exacto que markDelivered()
+   * (P3) — solo el dueño de la venta (o ADMIN, sin restricción) puede
+   * marcarla observada. La comprobación ocurre dentro de la transacción,
+   * sobre la fila ya bloqueada y antes de cualquier escritura; una venta
+   * ajena responde el mismo 404 "Venta no encontrada" que una inexistente.
+   */
+  async markObserved(
+    input: SaleActionInput & { actorRole: SaleAccessRequester['role'] },
+  ): Promise<SafeSale> {
+    return this.transitionDelivery(
+      input,
+      (current) => {
+        if (current === SaleDeliveryStatus.PENDING) {
+          return SaleDeliveryStatus.OBSERVED;
+        }
+        throw new ConflictException(
+          'No es posible marcar la venta como observada en su estado actual',
+        );
+      },
+      { id: input.actorUserId, role: input.actorRole },
+    );
   }
 
+  /**
+   * `ownershipRequester` presente: exige propiedad (assertCanOperateSale)
+   * con el sellerId de la fila bloqueada, antes de cualquier efecto.
+   * Ausente: comportamiento previo, sin control de propiedad.
+   */
   private async transitionDelivery(
     input: SaleActionInput,
     resolveNext: (current: SaleDeliveryStatus) => SaleDeliveryStatus,
+    ownershipRequester?: SaleAccessRequester,
   ): Promise<SafeSale> {
     return this.prisma.$transaction(async (tx) => {
-      const sale = await this.lockSale(tx, input.saleId);
+      const sale =
+        ownershipRequester === undefined
+          ? await this.lockSale(tx, input.saleId)
+          : await this.lockSale(tx, input.saleId, SALE_NOT_FOUND_MESSAGE);
+      if (ownershipRequester !== undefined) {
+        assertCanOperateSale(ownershipRequester, sale.sellerId);
+      }
       if (sale.status === SaleStatus.CANCELLED) {
         throw new ConflictException(
           'No es posible cambiar el estado de entrega de una venta anulada',
@@ -853,9 +908,17 @@ export class SalesService {
   // Lectura
   // ==================================================================
 
+  /**
+   * Permisos por vendedor (P2): el alcance obligatorio de la policy de
+   * propiedad (SELLER -> solo sus ventas; ADMIN/MANAGEMENT -> todas;
+   * WAREHOUSE/desconocido -> ninguna) se combina con AND con los filtros
+   * comerciales, y el MISMO `where` alimenta findMany y count. `requester`
+   * es siempre el usuario autenticado (id + rol activo), nunca un dato del
+   * cliente.
+   */
   async list(
     query: ListSalesQuery,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<SafeSaleListItem>> {
     const page =
       query.page !== undefined && query.page > 0
@@ -869,10 +932,10 @@ export class SalesService {
     );
     const skip = (page - 1) * limit;
 
-    if (!hasSaleReadAccess(requesterRole)) {
+    if (saleReadScopeWhere(requester) === null) {
       // Rol sin ningún acceso a Sale (WAREHOUSE u otro no contemplado):
-      // página vacía sin tocar Prisma. Defensa en profundidad; el futuro
-      // Bloque C igualmente rechaza esto con 403 en la capa HTTP.
+      // página vacía sin tocar Prisma. Defensa en profundidad; RolesGuard
+      // igualmente rechaza esto con 403 en la capa HTTP.
       return { data: [], page, limit, total: 0, totalPages: 0 };
     }
 
@@ -918,8 +981,14 @@ export class SalesService {
       });
     }
 
-    const where: Prisma.SaleWhereInput =
+    const requested: Prisma.SaleWhereInput =
       conditions.length > 0 ? { AND: conditions } : {};
+    // Alcance obligatorio AND filtros solicitados: un sellerId ajeno (o su
+    // omisión, o un OR anidado) nunca amplía lo que un SELLER puede ver.
+    const where = applySaleReadScope(requester, requested);
+    if (where === null) {
+      return { data: [], page, limit, total: 0, totalPages: 0 };
+    }
 
     const [rows, total] = await Promise.all([
       this.prisma.sale.findMany({
@@ -941,17 +1010,29 @@ export class SalesService {
     };
   }
 
-  async findOne(saleId: string, requesterRole: RoleName): Promise<SafeSale> {
-    if (!hasSaleReadAccess(requesterRole)) {
-      throw new NotFoundException('Venta no encontrada');
+  /**
+   * Detalle de una venta (también lo usa GET /sales/:id/print). El alcance
+   * de propiedad viaja DENTRO de la consulta: una venta ajena nunca se lee
+   * para un SELLER, y responde exactamente igual que una inexistente (404
+   * "Venta no encontrada"). assertCanReadSale queda como defensa en
+   * profundidad sobre la fila obtenida, antes de leer movimientos.
+   */
+  async findOne(
+    saleId: string,
+    requester: SaleAccessRequester,
+  ): Promise<SafeSale> {
+    const scope = saleReadScopeWhere(requester);
+    if (scope === null) {
+      throw new NotFoundException(SALE_NOT_FOUND_MESSAGE);
     }
     const sale = await this.prisma.sale.findUnique({
-      where: { id: saleId },
+      where: { id: saleId, AND: [scope] },
       select: SALE_DETAIL_SELECT,
     });
     if (sale === null) {
-      throw new NotFoundException('Venta no encontrada');
+      throw new NotFoundException(SALE_NOT_FOUND_MESSAGE);
     }
+    assertCanReadSale(requester, sale.seller.id);
     const movements = await this.fetchSaleInventoryMovements(
       this.prisma,
       saleId,
@@ -1111,20 +1192,29 @@ export class SalesService {
     `);
     const row = rows[0];
     if (row === undefined) {
-      throw new NotFoundException('La cotización no existe');
+      throw new NotFoundException(QUOTE_NOT_FOUND_MESSAGE);
     }
     return row;
   }
 
+  /**
+   * Bloquea la venta (SELECT ... FOR UPDATE). Incluye `seller_id` para que
+   * la comprobación de propiedad (P3) ocurra dentro de la misma transacción,
+   * sobre la fila ya bloqueada. `notFoundMessage` permite que un endpoint
+   * con control de propiedad responda igual para inexistente y ajena; por
+   * defecto conserva el mensaje histórico.
+   */
   private async lockSale(
     tx: Prisma.TransactionClient,
     saleId: string,
+    notFoundMessage = 'La venta no existe',
   ): Promise<LockedSaleRow> {
     const rows = await tx.$queryRaw<LockedSaleRow[]>(Prisma.sql`
       SELECT
         id,
         number,
         status,
+        seller_id AS "sellerId",
         delivery_status AS "deliveryStatus",
         subtotal,
         discount_amount AS "discountAmount",
@@ -1136,7 +1226,7 @@ export class SalesService {
     `);
     const row = rows[0];
     if (row === undefined) {
-      throw new NotFoundException('La venta no existe');
+      throw new NotFoundException(notFoundMessage);
     }
     return row;
   }

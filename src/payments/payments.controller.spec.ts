@@ -31,7 +31,10 @@ function createServiceMock() {
   return {
     register: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     cancel: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
-    list: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
+    list: jest.fn<
+      Promise<unknown>,
+      [unknown, { id: string; role: RoleName }]
+    >(),
   };
 }
 
@@ -67,6 +70,7 @@ describe('PaymentsController', () => {
         amount: '40.00',
         reference: undefined,
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_RESULT);
@@ -198,7 +202,10 @@ describe('PaymentsController', () => {
 
       const result = await controller.list(query, ACTOR);
 
-      expect(service.list).toHaveBeenCalledWith(query, RoleName.ADMIN);
+      expect(service.list).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(expected);
     });
   });

@@ -75,7 +75,7 @@ export class PaymentsController {
   })
   @ApiNotFoundResponse({
     description:
-      'La venta no existe, o method no corresponde a ningún método de pago existente.',
+      'La venta no existe o (rol SELLER) pertenece a otro vendedor — mismo 404 "La venta no existe" en ambos casos —, o method no corresponde a ningún método de pago existente.',
   })
   @ApiConflictResponse({
     description:
@@ -95,6 +95,7 @@ export class PaymentsController {
       amount: dto.amount,
       reference: dto.reference,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -140,7 +141,7 @@ export class PaymentsController {
   @ApiOperation({
     summary: 'Listar pagos (paginado, con filtros)',
     description:
-      'SELLER tiene acceso Total (sin restricción de propiedad). Incluye pagos ACTIVE y CANCELLED. Los filtros paidFrom/paidTo usan fechas de negocio America/Lima.',
+      'P5: el alcance de SELLER se decide por la venta del cobro (Payment -> Sale.sellerId), NUNCA por Payment.createdByUserId (quien registró el pago) — un cobro de un ADMIN sobre una venta del SELLER sí aparece; uno del propio SELLER sobre una venta ajena no. ADMIN/MANAGEMENT conservan la lectura global. Incluye pagos ACTIVE y CANCELLED. Los filtros paidFrom/paidTo usan fechas de negocio America/Lima.',
   })
   @ApiOkResponse({ type: PaginatedPaymentsResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })
@@ -150,6 +151,6 @@ export class PaymentsController {
     @Query() query: ListPaymentsQueryDto,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafePayment>> {
-    return this.paymentsService.list(query, user.role);
+    return this.paymentsService.list(query, { id: user.id, role: user.role });
   }
 }

@@ -105,6 +105,22 @@ describe('Reports (e2e)', () => {
   const periodEndExclusive = endOfBusinessDayExclusiveUtc(PERIOD_TO);
   const insideInstant = new Date(periodStart.getTime() + 6 * 60 * 60 * 1000);
 
+  // P6-E1: rango DEDICADO y separado de PERIOD_FROM/PERIOD_TO para los
+  // nuevos escenarios de propiedad en R2/R3/R8/R9. R4 agrupa por
+  // Sale.seller_id SIN filtrar por producto/cliente: una venta de
+  // seller1Id/seller2Id creada aquí con confirmedAt dentro de
+  // PERIOD_FROM/PERIOD_TO contaminaría los totales ya fijados por las
+  // pruebas EXISTENTES de "R4 — sales-by-seller" (totalSold '80.00'/
+  // '15.00' exactos). Los nuevos escenarios de R4 reutilizan en cambio,
+  // deliberadamente, esos mismos datos ya construidos (ver su describe
+  // "permisos por vendedor (P6-E1)").
+  const P6E1_FROM = '2025-04-10';
+  const P6E1_TO = '2025-04-20';
+  const p6e1PeriodStart = startOfBusinessDayUtc(P6E1_FROM);
+  const p6e1InsideInstant = new Date(
+    p6e1PeriodStart.getTime() + 6 * 60 * 60 * 1000,
+  );
+
   interface FixtureProduct {
     id: string;
     sku: string;
@@ -1030,6 +1046,74 @@ describe('Reports (e2e)', () => {
       expect((response.body as { total: number }).total).toBe(0);
       expect((response.body as { totalPages: number }).totalPages).toBe(0);
     });
+
+    // ================================================================
+    // P6-E1 — permisos por vendedor
+    // ================================================================
+    describe('permisos por vendedor (P6-E1)', () => {
+      it('SELLER solo agrega SaleItem de sus propias ventas; ADMIN conserva el agregado global del mismo producto', async () => {
+        const productShared = await createProductHttp({ salePrice: '10.00' });
+        const customer = await createCustomerHttp();
+
+        const saleSeller = await createSaleHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: productShared.id, quantity: '2.000' }],
+        });
+        await setSaleConfirmedAt(saleSeller.id, p6e1InsideInstant);
+
+        const saleSeller2 = await createSaleHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: productShared.id, quantity: '3.000' }],
+        });
+        await setSaleConfirmedAt(saleSeller2.id, p6e1InsideInstant);
+
+        const saleAdmin = await createSaleHttp(adminCookie, {
+          customerId: customer.id,
+          items: [{ productId: productShared.id, quantity: '5.000' }],
+        });
+        await setSaleConfirmedAt(saleAdmin.id, p6e1InsideInstant);
+
+        const asSeller = await get(
+          '/api/v1/reports/sales-by-product',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, productId: productShared.id },
+        );
+        expect(asSeller.status).toBe(200);
+        const sellerRows = (asSeller.body as { data: unknown }).data as R2Row[];
+        expect(sellerRows).toHaveLength(1);
+        expect(sellerRows[0].quantitySold).toBe('2.000');
+        expect(sellerRows[0].totalSold).toBe('20.00');
+
+        const asAdmin = await get(
+          '/api/v1/reports/sales-by-product',
+          adminCookie,
+          { from: P6E1_FROM, to: P6E1_TO, productId: productShared.id },
+        );
+        const adminRows = (asAdmin.body as { data: unknown }).data as R2Row[];
+        expect(adminRows).toHaveLength(1);
+        // 2 + 3 + 5 = 10: el agregado global de ADMIN nunca se restringe.
+        expect(adminRows[0].quantitySold).toBe('10.000');
+      });
+
+      it('SELLER sin ventas propias del producto en el período: página vacía, nunca las cantidades de otro vendedor', async () => {
+        const productOther = await createProductHttp({ salePrice: '10.00' });
+        const customer = await createCustomerHttp();
+        const saleOther = await createSaleHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: productOther.id, quantity: '7.000' }],
+        });
+        await setSaleConfirmedAt(saleOther.id, p6e1InsideInstant);
+
+        const response = await get(
+          '/api/v1/reports/sales-by-product',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, productId: productOther.id },
+        );
+        expect(response.status).toBe(200);
+        expect((response.body as { data: unknown[] }).data).toEqual([]);
+        expect((response.body as { total: number }).total).toBe(0);
+      });
+    });
   });
 
   // ==================================================================
@@ -1239,6 +1323,68 @@ describe('Reports (e2e)', () => {
       expect((response.body as { data: unknown }).data).toEqual([]);
       expect((response.body as { total: number }).total).toBe(0);
     });
+
+    // ================================================================
+    // P6-E1 — permisos por vendedor
+    // ================================================================
+    describe('permisos por vendedor (P6-E1)', () => {
+      it('SELLER solo agrega clientes e importes de sus propias ventas; ADMIN conserva el agregado global del mismo cliente', async () => {
+        const product = await createProductHttp({ salePrice: '30.00' });
+        const customer = await createCustomerHttp();
+
+        const saleSeller = await createSaleHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setSaleConfirmedAt(saleSeller.id, p6e1InsideInstant);
+
+        const saleSeller2 = await createSaleHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setSaleConfirmedAt(saleSeller2.id, p6e1InsideInstant);
+
+        const asSeller = await get(
+          '/api/v1/reports/sales-by-customer',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        expect(asSeller.status).toBe(200);
+        const sellerRows = (asSeller.body as { data: unknown }).data as R3Row[];
+        expect(sellerRows).toHaveLength(1);
+        expect(sellerRows[0].saleCount).toBe(1);
+        expect(sellerRows[0].totalSold).toBe('30.00');
+
+        const asAdmin = await get(
+          '/api/v1/reports/sales-by-customer',
+          adminCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        const adminRows = (asAdmin.body as { data: unknown }).data as R3Row[];
+        expect(adminRows).toHaveLength(1);
+        expect(adminRows[0].saleCount).toBe(2);
+        expect(adminRows[0].totalSold).toBe('60.00');
+      });
+
+      it('un cliente que solo tiene ventas de OTRO vendedor no aparece en el resultado del SELLER', async () => {
+        const product = await createProductHttp({ salePrice: '30.00' });
+        const customerOther = await createCustomerHttp();
+        const saleOther = await createSaleHttp(seller2Cookie, {
+          customerId: customerOther.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setSaleConfirmedAt(saleOther.id, p6e1InsideInstant);
+
+        const response = await get(
+          '/api/v1/reports/sales-by-customer',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customerOther.id },
+        );
+        expect(response.status).toBe(200);
+        expect((response.body as { data: unknown[] }).data).toEqual([]);
+        expect((response.body as { total: number }).total).toBe(0);
+      });
+    });
   });
 
   // ==================================================================
@@ -1432,6 +1578,173 @@ describe('Reports (e2e)', () => {
       const totals = rows.map((r) => Number(r.totalSold));
       const sorted = [...totals].sort((a, b) => b - a);
       expect(totals).toEqual(sorted);
+    });
+
+    // ================================================================
+    // P6-E1 — permisos por vendedor (el más sensible de los 5 reportes).
+    // Reutiliza DELIBERADAMENTE los datos ya construidos arriba por las
+    // pruebas previas de este mismo describe (seller1: 2 ventas/80.00
+    // dentro del período; seller2: 1 venta/15.00, convertedQuotes=1):
+    // ningún dato nuevo se crea, solo se repite la consulta con cookies
+    // distintas para probar el alcance sobre el MISMO estado persistido.
+    // ================================================================
+    describe('permisos por vendedor (P6-E1)', () => {
+      it('SELLER sin sellerId obtiene SOLO su propia fila (comportamiento aprobado)', async () => {
+        const response = await get(
+          '/api/v1/reports/sales-by-seller',
+          sellerCookie,
+          { from: PERIOD_FROM, to: PERIOD_TO },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R4Row[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0].seller.id).toBe(seller1Id);
+        expect(rows[0].saleCount).toBe(2);
+        expect(rows[0].totalSold).toBe('80.00');
+      });
+
+      it('SELLER con sellerId = su propio id: mismo resultado (condición redundante, no contradictoria)', async () => {
+        const response = await get(
+          '/api/v1/reports/sales-by-seller',
+          sellerCookie,
+          { from: PERIOD_FROM, to: PERIOD_TO, sellerId: seller1Id },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R4Row[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0].seller.id).toBe(seller1Id);
+      });
+
+      it('SELLER con sellerId de OTRO vendedor: resultado VACÍO en PostgreSQL real (AND contradictorio), manteniendo el contrato de respuesta', async () => {
+        const response = await get(
+          '/api/v1/reports/sales-by-seller',
+          sellerCookie,
+          { from: PERIOD_FROM, to: PERIOD_TO, sellerId: seller2Id },
+        );
+        expect(response.status).toBe(200);
+        const body = response.body as {
+          data: unknown[];
+          page: number;
+          limit: number;
+          total: number;
+          totalPages: number;
+        };
+        expect(body.data).toEqual([]);
+        expect(body.total).toBe(0);
+        expect(body.totalPages).toBe(0);
+        expect(body).toHaveProperty('page');
+        expect(body).toHaveProperty('limit');
+      });
+
+      it('SELLER2 obtiene su propia fila, con su propio convertedQuotes — nunca contaminada por seller1 (payment_agg/convertedQuotes acotados)', async () => {
+        const response = await get(
+          '/api/v1/reports/sales-by-seller',
+          seller2Cookie,
+          { from: PERIOD_FROM, to: PERIOD_TO },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R4Row[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0].seller.id).toBe(seller2Id);
+        expect(rows[0].totalSold).toBe('15.00');
+        expect(rows[0].convertedQuotes).toBe(1);
+      });
+
+      it('ADMIN y MANAGEMENT conservan la comparación global entre vendedores (ambos visibles, sin cambios)', async () => {
+        for (const cookie of [adminCookie, managementCookie]) {
+          const response = await get(
+            '/api/v1/reports/sales-by-seller',
+            cookie,
+            { from: PERIOD_FROM, to: PERIOD_TO, limit: '100' },
+          );
+          expect(response.status).toBe(200);
+          const rows = (response.body as { data: unknown }).data as R4Row[];
+          const sellerIds = rows.map((r) => r.seller.id);
+          expect(sellerIds).toContain(seller1Id);
+          expect(sellerIds).toContain(seller2Id);
+        }
+      });
+
+      it('cambio de rol activo: como SELLER solo su propia fila; tras cambiar a ADMIN, la comparación global', async () => {
+        const MULTI_ROLE_USERNAME = 'e2e_multirole_reports_p6e1';
+        const MULTI_ROLE_PASSWORD = 'MultiRoleReportsP6e1123';
+        const server = app.getHttpServer();
+
+        await upsertFixtureUser(prisma, {
+          username: MULTI_ROLE_USERNAME,
+          email: 'e2e_multirole_reports_p6e1@demosystem.test',
+          password: MULTI_ROLE_PASSWORD,
+          roleName: RoleName.SELLER,
+        });
+        const multiRoleUser = await prisma.user.findUniqueOrThrow({
+          where: { username: MULTI_ROLE_USERNAME },
+        });
+        const adminRole = await prisma.role.findUniqueOrThrow({
+          where: { name: RoleName.ADMIN },
+        });
+        await prisma.userRole.createMany({
+          data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+          skipDuplicates: true,
+        });
+
+        try {
+          const asSellerLogin = await login(
+            server,
+            MULTI_ROLE_USERNAME,
+            MULTI_ROLE_PASSWORD,
+          );
+          expect(asSellerLogin.status).toBe(200);
+          const asSellerCookie = asSellerLogin.cookie;
+
+          const asSellerResponse = await get(
+            '/api/v1/reports/sales-by-seller',
+            asSellerCookie,
+            { from: PERIOD_FROM, to: PERIOD_TO },
+          );
+          expect(asSellerResponse.status).toBe(200);
+          // Este usuario multi-rol no tiene ventas propias: página vacía,
+          // nunca las filas de seller1/seller2.
+          expect((asSellerResponse.body as { data: unknown[] }).data).toEqual(
+            [],
+          );
+
+          const switched = await request(server)
+            .post('/api/v1/auth/switch-role')
+            .set('Cookie', asSellerCookie)
+            .send({ role: RoleName.ADMIN });
+          expect(switched.status).toBe(200);
+          const setCookie = (switched.headers['set-cookie'] ??
+            []) as unknown as string[];
+          const asAdminCookie = (setCookie[0] ?? '').split(';')[0] ?? '';
+          expect(asAdminCookie).not.toBe('');
+
+          const asAdminResponse = await get(
+            '/api/v1/reports/sales-by-seller',
+            asAdminCookie,
+            { from: PERIOD_FROM, to: PERIOD_TO, limit: '100' },
+          );
+          expect(asAdminResponse.status).toBe(200);
+          const adminRows = (asAdminResponse.body as { data: unknown })
+            .data as R4Row[];
+          const sellerIds = adminRows.map((r) => r.seller.id);
+          expect(sellerIds).toContain(seller1Id);
+          expect(sellerIds).toContain(seller2Id);
+        } finally {
+          // Otras suites exigen un único ADMIN activo conocido.
+          await prisma.userRole.deleteMany({
+            where: { userId: multiRoleUser.id, roleId: adminRole.id },
+          });
+        }
+      });
+
+      it('WAREHOUSE mantiene el acceso denegado (403, RolesGuard) — sin relación con la restricción de propiedad', async () => {
+        const response = await get(
+          '/api/v1/reports/sales-by-seller',
+          warehouseCookie,
+          { from: PERIOD_FROM, to: PERIOD_TO },
+        );
+        expect(response.status).toBe(403);
+      });
     });
   });
 
@@ -1756,6 +2069,124 @@ describe('Reports (e2e)', () => {
         expect(afterPendingCount).toBe(beforePendingCount);
       });
     });
+
+    // ================================================================
+    // P6-E1 — permisos por vendedor
+    // ================================================================
+    describe('permisos por vendedor (P6-E1)', () => {
+      it('8. SELLER: solo cotizaciones propias (Quote.sellerId = requester.id); ADMIN conserva la lectura global', async () => {
+        const product = await createProductHttp({ salePrice: '45.00' });
+        const customer = await createCustomerHttp();
+
+        const quoteSeller = await createQuoteHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSeller.id, p6e1InsideInstant);
+
+        const quoteSeller2 = await createQuoteHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSeller2.id, p6e1InsideInstant);
+
+        const asSeller = await get(
+          '/api/v1/reports/quotes-by-status',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        expect(asSeller.status).toBe(200);
+        const sellerRows = (asSeller.body as { data: unknown }).data as R8Row[];
+        expect(sellerRows).toHaveLength(1);
+        expect(sellerRows[0].quoteId).toBe(quoteSeller.id);
+
+        const asAdmin = await get(
+          '/api/v1/reports/quotes-by-status',
+          adminCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        const adminRows = (asAdmin.body as { data: unknown }).data as R8Row[];
+        expect(adminRows).toHaveLength(2);
+      });
+
+      it('9. SELLER con sellerId de OTRO vendedor: resultado vacío — el filtro se combina con AND, nunca reemplaza el alcance', async () => {
+        const product = await createProductHttp({ salePrice: '45.00' });
+        const customer = await createCustomerHttp();
+        const quoteSeller2 = await createQuoteHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSeller2.id, p6e1InsideInstant);
+
+        const response = await get(
+          '/api/v1/reports/quotes-by-status',
+          sellerCookie,
+          {
+            from: P6E1_FROM,
+            to: P6E1_TO,
+            customerId: customer.id,
+            sellerId: seller2Id,
+          },
+        );
+        expect(response.status).toBe(200);
+        expect((response.body as { data: unknown[] }).data).toEqual([]);
+        expect((response.body as { total: number }).total).toBe(0);
+      });
+
+      it('10. los conteos (total) quedan restringidos al mismo alcance que los datos', async () => {
+        const product = await createProductHttp({ salePrice: '45.00' });
+        const customer = await createCustomerHttp();
+
+        const quoteSellerA = await createQuoteHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSellerA.id, p6e1InsideInstant);
+        const quoteSellerB = await createQuoteHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSellerB.id, p6e1InsideInstant);
+        const quoteSeller2 = await createQuoteHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSeller2.id, p6e1InsideInstant);
+
+        const asSeller = await get(
+          '/api/v1/reports/quotes-by-status',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        expect((asSeller.body as { total: number }).total).toBe(2);
+
+        const asAdmin = await get(
+          '/api/v1/reports/quotes-by-status',
+          adminCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        expect((asAdmin.body as { total: number }).total).toBe(3);
+      });
+
+      it('MANAGEMENT conserva la lectura global', async () => {
+        const product = await createProductHttp({ salePrice: '45.00' });
+        const customer = await createCustomerHttp();
+        const quoteSeller = await createQuoteHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        await setQuoteIssueDate(quoteSeller.id, p6e1InsideInstant);
+
+        const response = await get(
+          '/api/v1/reports/quotes-by-status',
+          managementCookie,
+          { from: P6E1_FROM, to: P6E1_TO, customerId: customer.id },
+        );
+        const rows = (response.body as { data: unknown }).data as R8Row[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0].quoteId).toBe(quoteSeller.id);
+      });
+    });
   });
 
   // ==================================================================
@@ -2065,6 +2496,164 @@ describe('Reports (e2e)', () => {
       expect(response.status).toBe(200);
       expect((response.body as { data: unknown }).data).toEqual([]);
       expect((response.body as { total: number }).total).toBe(0);
+    });
+
+    // ================================================================
+    // P6-E1 — permisos por vendedor. El alcance es Payment -> Sale.
+    // sellerId, NUNCA Payment.createdByUserId.
+    // ================================================================
+    describe('permisos por vendedor (P6-E1)', () => {
+      it('A. 11. un cobro registrado por el ADMIN sobre una venta del SELLER SÍ aparece en el reporte del SELLER propietario', async () => {
+        const product = await createProductHttp({ salePrice: '70.00' });
+        const customer = await createCustomerHttp();
+
+        const sale = await createSaleHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        const paymentResponse = await registerPaymentHttp(
+          adminCookie,
+          sale.id,
+          { method: 'CASH', amount: '70.00' },
+        );
+        expect(paymentResponse.status).toBe(201);
+        const paymentId = paymentIdOf(paymentResponse);
+        await setPaymentPaidAt(paymentId, p6e1InsideInstant);
+
+        const response = await get(
+          '/api/v1/reports/payments-by-method',
+          sellerCookie,
+          { from: P6E1_FROM, to: P6E1_TO, method: 'CASH' },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R9Row[];
+        const row = rows.find((r) => r.paymentId === paymentId);
+        expect(row).toBeDefined();
+        expect(row?.createdBy.username).not.toBe(SELLER_USERNAME);
+      });
+
+      it('B. 13. un cobro HISTÓRICO registrado por el propio SELLER sobre una venta ajena NO aparece en su reporte (el alcance es la venta, no quien cobró)', async () => {
+        const product = await createProductHttp({ salePrice: '35.00' });
+        const customer = await createCustomerHttp();
+
+        // Venta del ADMIN; el pago se registra como ADMIN (único camino
+        // posible vía HTTP, P1/P6-A bloquean a un SELLER cobrar una venta
+        // ajena) y luego se simula el escenario histórico pre-P1 ajustando
+        // DIRECTAMENTE createdByUserId — mismo criterio ya autorizado en
+        // este archivo para confirmedAt/paidAt/issueDate: nunca se altera
+        // el monto, estado ni la venta asociada.
+        const saleAjena = await createSaleHttp(adminCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        const paymentResponse = await registerPaymentHttp(
+          adminCookie,
+          saleAjena.id,
+          { method: 'CASH', amount: '35.00' },
+        );
+        expect(paymentResponse.status).toBe(201);
+        const paymentId = paymentIdOf(paymentResponse);
+        await setPaymentPaidAt(paymentId, p6e1InsideInstant);
+        await prisma.payment.update({
+          where: { id: paymentId },
+          data: { createdByUserId: seller1Id },
+        });
+
+        const response = await get(
+          '/api/v1/reports/payments-by-method',
+          sellerCookie,
+          {
+            from: P6E1_FROM,
+            to: P6E1_TO,
+            method: 'CASH',
+            createdByUserId: seller1Id,
+          },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R9Row[];
+        expect(rows.some((r) => r.paymentId === paymentId)).toBe(false);
+      });
+
+      it('C. 14. SELLER filtra por createdByUserId de otro usuario: solo ve los cobros de SUS ventas realizados por ese usuario (AND, nunca OR)', async () => {
+        const product = await createProductHttp({ salePrice: '20.00' });
+        const customer = await createCustomerHttp();
+
+        // Cobro del ADMIN sobre la venta DEL SELLER: dentro del alcance Y
+        // coincide con el filtro createdByUserId=ADMIN.
+        const saleOwn = await createSaleHttp(sellerCookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        const paymentOwnResponse = await registerPaymentHttp(
+          adminCookie,
+          saleOwn.id,
+          { method: 'CASH', amount: '20.00' },
+        );
+        expect(paymentOwnResponse.status).toBe(201);
+        const paymentOwnId = paymentIdOf(paymentOwnResponse);
+        await setPaymentPaidAt(paymentOwnId, p6e1InsideInstant);
+
+        // Cobro del ADMIN sobre una venta AJENA (de seller2): coincide con
+        // el filtro createdByUserId=ADMIN, pero FUERA del alcance del
+        // SELLER — no debe aparecer.
+        const saleForeign = await createSaleHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        const paymentForeignResponse = await registerPaymentHttp(
+          adminCookie,
+          saleForeign.id,
+          { method: 'CASH', amount: '20.00' },
+        );
+        expect(paymentForeignResponse.status).toBe(201);
+        const paymentForeignId = paymentIdOf(paymentForeignResponse);
+        await setPaymentPaidAt(paymentForeignId, p6e1InsideInstant);
+
+        const adminUser = await prisma.user.findUniqueOrThrow({
+          where: { username: E2E_ADMIN_USERNAME },
+        });
+
+        const response = await get(
+          '/api/v1/reports/payments-by-method',
+          sellerCookie,
+          {
+            from: P6E1_FROM,
+            to: P6E1_TO,
+            method: 'CASH',
+            createdByUserId: adminUser.id,
+          },
+        );
+        expect(response.status).toBe(200);
+        const rows = (response.body as { data: unknown }).data as R9Row[];
+        expect(rows.some((r) => r.paymentId === paymentOwnId)).toBe(true);
+        expect(rows.some((r) => r.paymentId === paymentForeignId)).toBe(false);
+      });
+
+      it('ADMIN y MANAGEMENT conservan la lectura global (ambos pagos visibles sin restricción)', async () => {
+        const product = await createProductHttp({ salePrice: '20.00' });
+        const customer = await createCustomerHttp();
+        const sale = await createSaleHttp(seller2Cookie, {
+          customerId: customer.id,
+          items: [{ productId: product.id, quantity: '1.000' }],
+        });
+        const paymentResponse = await registerPaymentHttp(
+          adminCookie,
+          sale.id,
+          { method: 'CASH', amount: '20.00' },
+        );
+        const paymentId = paymentIdOf(paymentResponse);
+        await setPaymentPaidAt(paymentId, p6e1InsideInstant);
+
+        for (const cookie of [adminCookie, managementCookie]) {
+          const response = await get(
+            '/api/v1/reports/payments-by-method',
+            cookie,
+            { from: P6E1_FROM, to: P6E1_TO, method: 'CASH' },
+          );
+          const rows = (response.body as { data: unknown }).data as R9Row[];
+          expect(rows.some((r) => r.paymentId === paymentId)).toBe(true);
+        }
+      });
     });
   });
 

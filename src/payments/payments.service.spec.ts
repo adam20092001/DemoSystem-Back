@@ -6,6 +6,7 @@ import {
 import { PaymentStatus, Prisma, RoleName, SaleStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { PaymentEngine } from './payment.engine';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { PaymentsService } from './payments.service';
 import {
   CancelPaymentInput,
@@ -15,12 +16,18 @@ import {
 const SALE_ID = 'sale-1';
 const PAYMENT_ID = 'payment-1';
 const ACTOR_ID = 'actor-1';
+// Permisos por vendedor (P5): solicitante = usuario autenticado (id + rol activo).
+function asRole(role: RoleName, id: string = ACTOR_ID): SaleAccessRequester {
+  return { id, role };
+}
 
 function makeSaleLockRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: SALE_ID,
     number: 'NV-000001',
     status: SaleStatus.ACTIVE,
+    // P4: el SELECT ... FOR UPDATE incluye seller_id (dueño comercial).
+    sellerId: ACTOR_ID,
     total: new Prisma.Decimal('100.00'),
     customerIsGeneric: false,
     ...overrides,
@@ -115,11 +122,13 @@ describe('PaymentsService', () => {
     prisma.payment.count.mockResolvedValue(1);
   });
 
-  const validRegisterInput: RegisterPaymentInput = {
+  // ADMIN por defecto: sin restricción de propiedad (comportamiento previo).
+  const validRegisterInput: RegisterPaymentInput & { actorRole: RoleName } = {
     saleId: SALE_ID,
     method: 'CASH',
     amount: '40.00',
     actorUserId: ACTOR_ID,
+    actorRole: RoleName.ADMIN,
     ipAddress: '10.0.0.1',
   };
 
@@ -241,6 +250,139 @@ describe('PaymentsService', () => {
         ].sort(),
       );
     });
+
+    describe('permisos por vendedor (P4)', () => {
+      const OTHER_SELLER_ID = 'seller-other';
+
+      function sellerInput(actorUserId: string) {
+        return {
+          ...validRegisterInput,
+          actorUserId,
+          actorRole: RoleName.SELLER,
+        };
+      }
+
+      async function expectSaleNotFound(promise: Promise<unknown>) {
+        const error = await promise.catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toBe('La venta no existe');
+      }
+
+      function expectNoPaymentEffects() {
+        expect(engine.sumActiveForSale).not.toHaveBeenCalled();
+        expect(engine.register).not.toHaveBeenCalled();
+        expect(engine.recalculateSaleSummary).not.toHaveBeenCalled();
+      }
+
+      it('SELLER cobra su propia venta (sellerId de la fila bloqueada = actor)', async () => {
+        await expect(
+          service.register(sellerInput(ACTOR_ID)),
+        ).resolves.toBeDefined();
+        expect(engine.register).toHaveBeenCalledWith(
+          prisma.tx,
+          expect.objectContaining({ actorUserId: ACTOR_ID }),
+        );
+      });
+
+      it('SELLER sobre una venta ajena: 404 "La venta no existe" sin saldo, Payment, contabilidad ni resumen', async () => {
+        await expectSaleNotFound(
+          service.register(sellerInput(OTHER_SELLER_ID)),
+        );
+        expectNoPaymentEffects();
+      });
+
+      it('venta inexistente: exactamente el mismo 404', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([]);
+        await expectSaleNotFound(
+          service.register(sellerInput(OTHER_SELLER_ID)),
+        );
+        expectNoPaymentEffects();
+      });
+
+      it.each([
+        ['anulada', { status: SaleStatus.CANCELLED }],
+        ['de Público general', { customerIsGeneric: true }],
+      ])(
+        'venta ajena %s: sigue siendo 404 (nunca 409), sin revelar su estado',
+        async (_label, overrides) => {
+          prisma.tx.$queryRaw.mockResolvedValue([makeSaleLockRow(overrides)]);
+          await expectSaleNotFound(
+            service.register(sellerInput(OTHER_SELLER_ID)),
+          );
+          expectNoPaymentEffects();
+        },
+      );
+
+      it('venta ajena totalmente pagada: 404 (nunca el 409 de saldo), sin consultar el saldo', async () => {
+        engine.sumActiveForSale.mockResolvedValue(new Prisma.Decimal('100.00'));
+        await expectSaleNotFound(
+          service.register(sellerInput(OTHER_SELLER_ID)),
+        );
+        expectNoPaymentEffects();
+      });
+
+      it('la propiedad se decide con seller_id de la fila bloqueada (FOR UPDATE) y antes de cualquier otra consulta', async () => {
+        await expectSaleNotFound(
+          service.register(sellerInput(OTHER_SELLER_ID)),
+        );
+        expect(prisma.tx.$queryRaw).toHaveBeenCalledTimes(1);
+        const sql = (
+          prisma.tx.$queryRaw.mock.calls[0][0] as Prisma.Sql
+        ).strings.join(' ');
+        expect(sql).toContain('seller_id');
+        expect(sql).toContain('FOR UPDATE');
+      });
+
+      it('ADMIN cobra una venta de otro vendedor: createdByUserId (actorUserId) = ADMIN; el vendedor no se toca', async () => {
+        const ADMIN_ID = 'admin-1';
+        await service.register({
+          ...validRegisterInput,
+          actorUserId: ADMIN_ID,
+          actorRole: RoleName.ADMIN,
+        });
+        expect(engine.register).toHaveBeenCalledWith(
+          prisma.tx,
+          expect.objectContaining({ actorUserId: ADMIN_ID }),
+        );
+        const command = engine.register.mock.calls[0][1] as Record<
+          string,
+          unknown
+        >;
+        expect(command).not.toHaveProperty('sellerId');
+      });
+
+      it.each([RoleName.MANAGEMENT, RoleName.WAREHOUSE])(
+        '%s no obtiene permiso de cobro (404), ni sobre una venta a su nombre',
+        async (role) => {
+          await expectSaleNotFound(
+            service.register({
+              ...validRegisterInput,
+              actorUserId: ACTOR_ID,
+              actorRole: role,
+            }),
+          );
+          expectNoPaymentEffects();
+        },
+      );
+
+      it('el dueño sigue sujeto al bloqueo de sobrepago', async () => {
+        engine.sumActiveForSale.mockResolvedValue(new Prisma.Decimal('80.00'));
+        await expect(
+          service.register(sellerInput(ACTOR_ID)),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(engine.register).not.toHaveBeenCalled();
+      });
+
+      it('el dueño sigue sujeto a la validación del método (error del motor se propaga)', async () => {
+        engine.register.mockRejectedValue(
+          new ConflictException('El método de pago "X" está inactivo'),
+        );
+        await expect(
+          service.register(sellerInput(ACTOR_ID)),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(engine.recalculateSaleSummary).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ====================================================================
@@ -326,27 +468,93 @@ describe('PaymentsService', () => {
   // ====================================================================
   describe('list', () => {
     it('ADMIN: consulta normalmente', async () => {
-      const result = await service.list({}, RoleName.ADMIN);
+      const result = await service.list({}, asRole(RoleName.ADMIN));
       expect(prisma.payment.findMany).toHaveBeenCalled();
       expect(result.data).toHaveLength(1);
     });
 
-    it('SELLER: consulta normalmente, sin filtro de propiedad', async () => {
-      await service.list({}, RoleName.SELLER);
-      expect(prisma.payment.findMany).toHaveBeenCalled();
+    it('SELLER: restringido a cobros de SUS ventas (por la venta, nunca por createdByUserId)', async () => {
+      await service.list({}, asRole(RoleName.SELLER));
       const call = prisma.payment.findMany.mock.calls[0][0] as {
         where: Record<string, unknown>;
       };
+      expect(call.where).toEqual({
+        AND: [{ sale: { sellerId: ACTOR_ID } }, {}],
+      });
       expect(JSON.stringify(call.where)).not.toContain('createdByUserId');
     });
 
+    describe('permisos por vendedor (P5)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+      const OTHER_USER_ID = 'user-other';
+      const seller = asRole(RoleName.SELLER, OWN_SELLER_ID);
+
+      function whereOf(call: 'findMany' | 'count'): unknown {
+        return (prisma.payment[call].mock.calls[0][0] as { where: unknown })
+          .where;
+      }
+
+      it('SELLER sin filtros: solo cobros de ventas con sellerId = actor (incluye los registrados por un ADMIN)', async () => {
+        await service.list({}, seller);
+        expect(whereOf('findMany')).toEqual({
+          AND: [{ sale: { sellerId: OWN_SELLER_ID } }, {}],
+        });
+      });
+
+      it('createdByUserId de otro usuario se combina con AND: solo cobros de SUS ventas registrados por ese usuario', async () => {
+        await service.list({ createdByUserId: OTHER_USER_ID }, seller);
+        expect(whereOf('findMany')).toEqual({
+          AND: [
+            { sale: { sellerId: OWN_SELLER_ID } },
+            { AND: [{ createdByUserId: OTHER_USER_ID }] },
+          ],
+        });
+      });
+
+      it('un cobro histórico registrado por el SELLER sobre una venta ajena queda fuera: el alcance es la venta, no el cobrador', async () => {
+        await service.list({ createdByUserId: OWN_SELLER_ID }, seller);
+        const where = whereOf('findMany') as {
+          AND: [Record<string, unknown>, unknown];
+        };
+        // createdByUserId propio NO reemplaza la condición de la venta.
+        expect(where.AND[0]).toEqual({ sale: { sellerId: OWN_SELLER_ID } });
+      });
+
+      it('findMany y count usan exactamente el mismo where restringido', async () => {
+        await service.list(
+          { createdByUserId: OTHER_USER_ID, method: 'cash' },
+          seller,
+        );
+        expect(whereOf('count')).toEqual(whereOf('findMany'));
+      });
+
+      it('ADMIN y MANAGEMENT: filtros tal cual, sin condición de venta', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.payment.findMany.mockClear();
+          await service.list(
+            { createdByUserId: OTHER_USER_ID },
+            asRole(role, OWN_SELLER_ID),
+          );
+          expect(whereOf('findMany')).toEqual({
+            AND: [{ createdByUserId: OTHER_USER_ID }],
+          });
+        }
+      });
+
+      it('la lectura no escribe ni altera pagos ni importes', async () => {
+        const result = await service.list({}, seller);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(result.data[0].amount).toBe('40.00');
+      });
+    });
+
     it('MANAGEMENT: consulta normalmente', async () => {
-      await service.list({}, RoleName.MANAGEMENT);
+      await service.list({}, asRole(RoleName.MANAGEMENT));
       expect(prisma.payment.findMany).toHaveBeenCalled();
     });
 
     it('WAREHOUSE: página vacía sin consultar Prisma', async () => {
-      const result = await service.list({}, RoleName.WAREHOUSE);
+      const result = await service.list({}, asRole(RoleName.WAREHOUSE));
       expect(result).toEqual({
         data: [],
         page: 1,
@@ -358,7 +566,7 @@ describe('PaymentsService', () => {
     });
 
     it('rol desconocido: página vacía sin consultar Prisma (fail-closed)', async () => {
-      const result = await service.list({}, 'UNKNOWN' as RoleName);
+      const result = await service.list({}, asRole('UNKNOWN' as RoleName));
       expect(result.data).toEqual([]);
       expect(prisma.payment.findMany).not.toHaveBeenCalled();
     });
@@ -370,7 +578,7 @@ describe('PaymentsService', () => {
           status: PaymentStatus.ACTIVE,
           createdByUserId: ACTOR_ID,
         },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       const call = prisma.payment.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
@@ -385,7 +593,7 @@ describe('PaymentsService', () => {
     });
 
     it('method se normaliza a mayúsculas antes de filtrar', async () => {
-      await service.list({ method: 'cash' }, RoleName.ADMIN);
+      await service.list({ method: 'cash' }, asRole(RoleName.ADMIN));
       const call = prisma.payment.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
       };
@@ -396,7 +604,7 @@ describe('PaymentsService', () => {
 
     it('paidFrom/paidTo inválidos -> 400', async () => {
       await expect(
-        service.list({ paidFrom: 'no-es-fecha' }, RoleName.ADMIN),
+        service.list({ paidFrom: 'no-es-fecha' }, asRole(RoleName.ADMIN)),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -404,13 +612,13 @@ describe('PaymentsService', () => {
       await expect(
         service.list(
           { paidFrom: '2026-03-20', paidTo: '2026-03-10' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
     it('orden paidAt desc, id desc', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const call = prisma.payment.findMany.mock.calls[0][0] as {
         orderBy: unknown;
       };
@@ -418,15 +626,18 @@ describe('PaymentsService', () => {
     });
 
     it('limit por defecto 20, máximo 100', async () => {
-      const defaultResult = await service.list({}, RoleName.ADMIN);
+      const defaultResult = await service.list({}, asRole(RoleName.ADMIN));
       expect(defaultResult.limit).toBe(20);
 
-      const cappedResult = await service.list({ limit: 500 }, RoleName.ADMIN);
+      const cappedResult = await service.list(
+        { limit: 500 },
+        asRole(RoleName.ADMIN),
+      );
       expect(cappedResult.limit).toBe(100);
     });
 
     it('findMany y count usan el mismo where', async () => {
-      await service.list({ method: 'CARD' }, RoleName.ADMIN);
+      await service.list({ method: 'CARD' }, asRole(RoleName.ADMIN));
       const findManyWhere = (
         prisma.payment.findMany.mock.calls[0][0] as { where: unknown }
       ).where;

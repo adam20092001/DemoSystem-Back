@@ -6,6 +6,7 @@ import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { SaleDocumentRenderer } from './printing/sale-document.renderer';
 import { SalesController } from './sales.controller';
+import { SaleAccessRequester } from './sale-access.policy';
 import { SalesService } from './sales.service';
 import { SafeSale } from './types/safe-sale';
 
@@ -36,8 +37,8 @@ function createServiceMock() {
     cancel: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     markDelivered: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     markObserved: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
-    list: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    findOne: jest.fn<Promise<unknown>, [string, RoleName]>(),
+    list: jest.fn<Promise<unknown>, [unknown, SaleAccessRequester]>(),
+    findOne: jest.fn<Promise<unknown>, [string, SaleAccessRequester]>(),
   };
 }
 
@@ -196,6 +197,7 @@ describe('SalesController', () => {
         quoteId: 'quote-1',
         payment: undefined,
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_SALE);
@@ -227,6 +229,7 @@ describe('SalesController', () => {
         quoteId: 'quote-1',
         payment: { method: 'CASH', amount: '10.00', reference: undefined },
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
     });
@@ -281,7 +284,10 @@ describe('SalesController', () => {
 
       const result = await controller.list(query, ACTOR);
 
-      expect(service.list).toHaveBeenCalledWith(query, RoleName.ADMIN);
+      expect(service.list).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(expected);
     });
   });
@@ -292,7 +298,10 @@ describe('SalesController', () => {
 
       const result = await controller.findOne('sale-1', ACTOR);
 
-      expect(service.findOne).toHaveBeenCalledWith('sale-1', RoleName.ADMIN);
+      expect(service.findOne).toHaveBeenCalledWith('sale-1', {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(SAMPLE_SALE);
     });
   });
@@ -331,7 +340,7 @@ describe('SalesController', () => {
   });
 
   describe('markDelivered', () => {
-    it('delega saleId + actor/IP', async () => {
+    it('delega saleId + actor (id y rol activo)/IP', async () => {
       service.markDelivered.mockResolvedValue(SAMPLE_SALE);
       const request = { ip: '203.0.113.5' } as unknown as Request;
 
@@ -340,6 +349,7 @@ describe('SalesController', () => {
       expect(service.markDelivered).toHaveBeenCalledWith({
         saleId: 'sale-1',
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_SALE);
@@ -347,7 +357,7 @@ describe('SalesController', () => {
   });
 
   describe('markObserved', () => {
-    it('delega saleId + actor/IP', async () => {
+    it('delega saleId + actor (id y rol activo)/IP', async () => {
       service.markObserved.mockResolvedValue(SAMPLE_SALE);
       const request = { ip: '203.0.113.5' } as unknown as Request;
 
@@ -356,6 +366,7 @@ describe('SalesController', () => {
       expect(service.markObserved).toHaveBeenCalledWith({
         saleId: 'sale-1',
         actorUserId: 'actor-id',
+        actorRole: RoleName.ADMIN,
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(SAMPLE_SALE);
@@ -373,7 +384,10 @@ describe('SalesController', () => {
 
       const result = await controller.print('sale-1', ACTOR);
 
-      expect(service.findOne).toHaveBeenCalledWith('sale-1', RoleName.ADMIN);
+      expect(service.findOne).toHaveBeenCalledWith('sale-1', {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(renderer.render).toHaveBeenCalledWith(safeSale);
       expect(result).toBe('<html>ok</html>');
     });

@@ -3,6 +3,7 @@ import { RequestMethod } from '@nestjs/common';
 import { RoleName } from '@prisma/client';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
 
@@ -29,11 +30,17 @@ const EXPECTED_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT, RoleName.SELLER];
 
 function createServiceMock() {
   return {
-    salesByProduct: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    salesByCustomer: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    salesBySeller: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    quotesByStatus: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
-    paymentsByMethod: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
+    salesByProduct: jest.fn<Promise<unknown>, [unknown, SaleAccessRequester]>(),
+    salesByCustomer: jest.fn<
+      Promise<unknown>,
+      [unknown, SaleAccessRequester]
+    >(),
+    salesBySeller: jest.fn<Promise<unknown>, [unknown, SaleAccessRequester]>(),
+    quotesByStatus: jest.fn<Promise<unknown>, [unknown, SaleAccessRequester]>(),
+    paymentsByMethod: jest.fn<
+      Promise<unknown>,
+      [unknown, SaleAccessRequester]
+    >(),
   };
 }
 
@@ -60,10 +67,10 @@ describe('ReportsController', () => {
 
       const result = await controller.salesByProduct(query, ACTOR);
 
-      expect(service.salesByProduct).toHaveBeenCalledWith(
-        query,
-        RoleName.SELLER,
-      );
+      expect(service.salesByProduct).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.SELLER,
+      });
       expect(result).toBe(expected);
     });
 
@@ -80,10 +87,10 @@ describe('ReportsController', () => {
 
       const result = await controller.salesByCustomer(query as never, ACTOR);
 
-      expect(service.salesByCustomer).toHaveBeenCalledWith(
-        query,
-        RoleName.SELLER,
-      );
+      expect(service.salesByCustomer).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.SELLER,
+      });
       expect(result).toBe(expected);
     });
 
@@ -100,10 +107,10 @@ describe('ReportsController', () => {
 
       const result = await controller.salesBySeller(query, ACTOR);
 
-      expect(service.salesBySeller).toHaveBeenCalledWith(
-        query,
-        RoleName.SELLER,
-      );
+      expect(service.salesBySeller).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.SELLER,
+      });
       expect(result).toBe(expected);
     });
 
@@ -120,10 +127,10 @@ describe('ReportsController', () => {
 
       const result = await controller.quotesByStatus(query as never, ACTOR);
 
-      expect(service.quotesByStatus).toHaveBeenCalledWith(
-        query,
-        RoleName.SELLER,
-      );
+      expect(service.quotesByStatus).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.SELLER,
+      });
       expect(result).toBe(expected);
     });
 
@@ -140,10 +147,10 @@ describe('ReportsController', () => {
 
       const result = await controller.paymentsByMethod(query, ACTOR);
 
-      expect(service.paymentsByMethod).toHaveBeenCalledWith(
-        query,
-        RoleName.SELLER,
-      );
+      expect(service.paymentsByMethod).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.SELLER,
+      });
       expect(result).toBe(expected);
     });
   });

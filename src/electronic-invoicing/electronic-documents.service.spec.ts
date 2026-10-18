@@ -9,11 +9,13 @@ import {
   ElectronicDocumentStatus,
   FiscalDocumentType,
   Prisma,
+  RoleName,
   SaleStatus,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { ElectronicDocumentsService } from './electronic-documents.service';
 import { FiscalSeriesService } from './fiscal-series.service';
 import {
@@ -28,12 +30,20 @@ const DOCUMENT_ID = '22222222-2222-4222-8222-222222222222';
 const FISCAL_SERIES_ID = '33333333-3333-4333-8333-333333333333';
 const ACTOR_ID = '44444444-4444-4444-8444-444444444444';
 const SALE_NUMBER = 'NV-000001';
+/** P6-C2: vendedor por defecto de la venta fixture (distinto de ACTOR_ID). */
+const SALE_SELLER_ID = 'seller-owner-of-sale';
+
+/** Mismo helper que PaymentsService.list()/QuotesService.findOne() (P1-P6). */
+function asRole(role: RoleName, id: string = ACTOR_ID): SaleAccessRequester {
+  return { id, role };
+}
 
 function makeSaleRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: SALE_ID,
     number: SALE_NUMBER,
     status: SaleStatus.ACTIVE,
+    sellerId: SALE_SELLER_ID,
     customerIsGeneric: false,
     customerDocumentType: CustomerDocumentType.RUC,
     customerDocumentNumber: '20123456789',
@@ -83,6 +93,7 @@ function makeCommand(
     documentType: FiscalDocumentType.FACTURA,
     series: 'F001',
     actorUserId: ACTOR_ID,
+    actorRole: RoleName.ADMIN,
     ipAddress: null,
     ...overrides,
   };
@@ -290,6 +301,236 @@ describe('ElectronicDocumentsService', () => {
 
       await expect(service.issue(makeCommand())).resolves.toBeDefined();
     });
+  });
+
+  // ====================================================================
+  // issue() — P6-C2: autorización por propiedad de la venta
+  // ====================================================================
+  describe('issue — P6-C2 autorización por propiedad de la venta', () => {
+    const OWN_SELLER_ID = SALE_SELLER_ID;
+    const OTHER_SELLER_ID = 'other-seller-id';
+
+    it('1. SELLER emite el comprobante de su propia venta', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OWN_SELLER_ID }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).resolves.toBeDefined();
+      expect(fiscalSeriesService.allocateNext).toHaveBeenCalled();
+    });
+
+    it('2. SELLER intenta emitir sobre la venta del ADMIN (ajena) -> 404, sin efectos', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: 'admin-id' }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+      expect(fiscalSeriesService.allocateNext).not.toHaveBeenCalled();
+      expect(tx.electronicDocument.create).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('3. SELLER intenta emitir sobre la venta de OTRO SELLER (ajena) -> 404', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OTHER_SELLER_ID }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+    });
+
+    it('4. venta ajena e inexistente producen el MISMO 404 ("La venta no existe")', async () => {
+      tx.sale.findUnique.mockResolvedValue(null);
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OTHER_SELLER_ID }),
+      );
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+    });
+
+    it('5a. venta ajena CANCELLED responde 404 (propiedad antes que estado), no 409', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({
+          sellerId: OTHER_SELLER_ID,
+          status: SaleStatus.CANCELLED,
+        }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+    });
+
+    it('5b. venta ajena ya facturada responde 404 (propiedad antes que documento primario), no 409', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OTHER_SELLER_ID }),
+      );
+      tx.electronicDocument.findFirst.mockResolvedValue({ id: 'existing-doc' });
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+      // La propiedad se resuelve ANTES de siquiera consultar el documento
+      // primario existente.
+      expect(tx.electronicDocument.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('6. la propiedad se comprueba antes de validar cliente/serie: BOLETA inválida de una venta ajena sigue dando 404, no 409', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({
+          sellerId: OTHER_SELLER_ID,
+          customerIsGeneric: true, // inválido para FACTURA (§9)
+        }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+            documentType: FiscalDocumentType.FACTURA,
+          }),
+        ),
+      ).rejects.toThrow(new NotFoundException('La venta no existe'));
+    });
+
+    it('7. la autorización usa el sellerId REAL de la fila cargada, nunca un valor derivado del comando', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OWN_SELLER_ID }),
+      );
+
+      await service.issue(
+        makeCommand({ actorUserId: OWN_SELLER_ID, actorRole: RoleName.SELLER }),
+      );
+
+      // loadSaleSnapshot consulta por el id de la venta solicitada, nunca
+      // filtrando por el actor: la propiedad se decide DESPUÉS de leerla.
+      const call = tx.sale.findUnique.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({ id: SALE_ID });
+    });
+
+    it('8. ninguna emisión denegada reserva numeración, crea el documento ni audita', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OTHER_SELLER_ID }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({
+            actorUserId: OWN_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(fiscalSeriesService.allocateNext).not.toHaveBeenCalled();
+      expect(tx.electronicDocument.create).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+      expect(provider.submit).not.toHaveBeenCalled();
+    });
+
+    it('9. ADMIN emite el comprobante de una venta de SELLER sin restricción', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OWN_SELLER_ID }),
+      );
+
+      await expect(
+        service.issue(
+          makeCommand({ actorUserId: 'admin-id', actorRole: RoleName.ADMIN }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    it('10. la emisión nunca escribe sobre Sale (sellerId original intacto): sin tx.sale.update definido ni invocado', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OWN_SELLER_ID }),
+      );
+
+      await service.issue(
+        makeCommand({ actorUserId: OWN_SELLER_ID, actorRole: RoleName.SELLER }),
+      );
+
+      expect(
+        (tx.sale as unknown as { update?: unknown }).update,
+      ).toBeUndefined();
+    });
+
+    it('11. la auditoría registra al actor REAL como emisor, incluso emitiendo sobre una venta ajena permitida (ADMIN)', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({ sellerId: OWN_SELLER_ID }),
+      );
+
+      await service.issue(
+        makeCommand({ actorUserId: 'admin-id', actorRole: RoleName.ADMIN }),
+      );
+
+      const call = auditService.record.mock.calls[0][0] as {
+        userId: string;
+      };
+      expect(call.userId).toBe('admin-id');
+    });
+
+    it.each([RoleName.MANAGEMENT, RoleName.WAREHOUSE])(
+      '12. %s no recibe permisos de emisión: 404 también a nivel de servicio (defensa en profundidad)',
+      async (role) => {
+        tx.sale.findUnique.mockResolvedValue(
+          makeSaleRow({ sellerId: OWN_SELLER_ID }),
+        );
+
+        await expect(
+          service.issue(
+            makeCommand({ actorUserId: OWN_SELLER_ID, actorRole: role }),
+          ),
+        ).rejects.toThrow(new NotFoundException('La venta no existe'));
+      },
+    );
   });
 
   // ====================================================================
@@ -1021,7 +1262,7 @@ describe('ElectronicDocumentsService', () => {
     });
 
     it('nunca selecciona items (select de listado sin relación anidada)', async () => {
-      await service.list({});
+      await service.list({}, asRole(RoleName.ADMIN));
 
       const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
         select: Record<string, unknown>;
@@ -1030,7 +1271,7 @@ describe('ElectronicDocumentsService', () => {
     });
 
     it('computa fullNumber y nunca expone providerExternalId', async () => {
-      const result = await service.list({});
+      const result = await service.list({}, asRole(RoleName.ADMIN));
 
       expect(result.data[0].fullNumber).toBe('F001-00000007');
       expect(result.data[0]).not.toHaveProperty('providerExternalId');
@@ -1038,7 +1279,7 @@ describe('ElectronicDocumentsService', () => {
     });
 
     it('pagina con page/limit por defecto y respeta el máximo de 100', async () => {
-      await service.list({ limit: 500 });
+      await service.list({ limit: 500 }, asRole(RoleName.ADMIN));
 
       const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
         take: number;
@@ -1049,7 +1290,7 @@ describe('ElectronicDocumentsService', () => {
     });
 
     it('ordena issuedAt desc, id desc', async () => {
-      await service.list({});
+      await service.list({}, asRole(RoleName.ADMIN));
 
       const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
         orderBy: unknown;
@@ -1064,7 +1305,7 @@ describe('ElectronicDocumentsService', () => {
       ['saleId', { saleId: SALE_ID }],
       ['customerDocumentNumber', { customerDocumentNumber: '20123456789' }],
     ])('aplica el filtro %s', async (_name, filter) => {
-      await service.list(filter);
+      await service.list(filter, asRole(RoleName.ADMIN));
 
       const call = prisma.electronicDocument.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
@@ -1074,8 +1315,77 @@ describe('ElectronicDocumentsService', () => {
 
     it('issuedFrom posterior a issuedTo -> BadRequestException', async () => {
       await expect(
-        service.list({ issuedFrom: '2026-03-31', issuedTo: '2026-03-01' }),
+        service.list(
+          { issuedFrom: '2026-03-31', issuedTo: '2026-03-01' },
+          asRole(RoleName.ADMIN),
+        ),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    // ==================================================================
+    // P6-C1 — alcance por propiedad (ElectronicDocument -> Sale.sellerId)
+    // ==================================================================
+    describe('permisos por vendedor (P6-C1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+
+      function whereOf(call: 'findMany' | 'count'): unknown {
+        return (
+          prisma.electronicDocument[call].mock.calls[0][0] as {
+            where: unknown;
+          }
+        ).where;
+      }
+
+      it('ADMIN: sin condición de venta', async () => {
+        await service.list({}, asRole(RoleName.ADMIN));
+        expect(whereOf('findMany')).toEqual({});
+      });
+
+      it('MANAGEMENT: sin condición de venta', async () => {
+        await service.list({}, asRole(RoleName.MANAGEMENT));
+        expect(whereOf('findMany')).toEqual({});
+      });
+
+      it('SELLER sin filtros: AND por la venta asociada (sale.sellerId = actor)', async () => {
+        await service.list({}, asRole(RoleName.SELLER, OWN_SELLER_ID));
+        expect(whereOf('findMany')).toEqual({
+          AND: [{ sale: { sellerId: OWN_SELLER_ID } }, {}],
+        });
+      });
+
+      it('SELLER con saleId ajeno: el filtro no amplía el alcance (AND, no OR)', async () => {
+        await service.list(
+          { saleId: SALE_ID },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(whereOf('findMany')).toEqual({
+          AND: [
+            { sale: { sellerId: OWN_SELLER_ID } },
+            { AND: [{ saleId: SALE_ID }] },
+          ],
+        });
+      });
+
+      it('findMany y count usan exactamente el mismo where restringido', async () => {
+        await service.list(
+          { documentType: FiscalDocumentType.FACTURA },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(whereOf('count')).toEqual(whereOf('findMany'));
+      });
+
+      it('WAREHOUSE: página vacía sin consultar Prisma', async () => {
+        const result = await service.list({}, asRole(RoleName.WAREHOUSE));
+        expect(result).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+        expect(prisma.electronicDocument.findMany).not.toHaveBeenCalled();
+        expect(prisma.electronicDocument.count).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -1253,6 +1563,159 @@ describe('ElectronicDocumentsService', () => {
         taxAmount: '16.20',
         total: '106.20',
       });
+    });
+  });
+
+  // ====================================================================
+  // P6-C1 — findDetailForRequester() (alcance por propiedad de la venta)
+  // ====================================================================
+  describe('findDetailForRequester', () => {
+    const OWN_SELLER_ID = 'seller-own';
+
+    function makeDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: DOCUMENT_ID,
+        saleId: SALE_ID,
+        sale: {
+          number: SALE_NUMBER,
+          taxEnabled: true,
+          taxRate: new Prisma.Decimal('18.00'),
+        },
+        pricesIncludeTax: false,
+        documentType: FiscalDocumentType.FACTURA,
+        series: 'F001',
+        number: 7,
+        status: ElectronicDocumentStatus.ACCEPTED,
+        currencyCode: 'PEN',
+        customerDocumentType: CustomerDocumentType.RUC,
+        customerDocumentNumber: '20123456789',
+        customerName: 'Distribuidora Fiscal SAC',
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('0.00'),
+        taxableBase: new Prisma.Decimal('100.00'),
+        taxAmount: new Prisma.Decimal('18.00'),
+        total: new Prisma.Decimal('118.00'),
+        providerCode: 'MOCK',
+        providerStatus: 'ACCEPTED',
+        issuedAt: new Date('2026-03-15T12:00:00.000Z'),
+        lastSubmittedAt: new Date('2026-03-15T12:00:01.000Z'),
+        acceptedAt: new Date('2026-03-15T12:00:02.000Z'),
+        rejectedAt: null,
+        createdAt: new Date('2026-03-15T12:00:00.000Z'),
+        updatedAt: new Date('2026-03-15T12:00:02.000Z'),
+        issuerTaxId: '20100000001',
+        issuerBusinessName: 'Empresa Demo SAC',
+        issuerAddress: 'Av. Principal 100',
+        customerAddress: 'Av. Siempre Viva 123',
+        providerMessage:
+          'Documento aceptado por el proveedor de demostración (MOCK).',
+        submissionCount: 1,
+        items: [
+          {
+            lineNumber: 1,
+            productSku: 'SKU-001',
+            description: 'Producto Fiscal',
+            unitCode: 'UND',
+            unitName: 'Unidad',
+            unitAbbreviation: 'und',
+            quantity: new Prisma.Decimal('2.000'),
+            unitPrice: new Prisma.Decimal('50.00'),
+            lineTotal: new Prisma.Decimal('100.00'),
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('documento inexistente -> NotFoundException ("El documento fiscal no existe")', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.findDetailForRequester(DOCUMENT_ID, asRole(RoleName.ADMIN)),
+      ).rejects.toThrow(new NotFoundException('El documento fiscal no existe'));
+    });
+
+    it('ADMIN: consulta sin condición de venta', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetailForRequester(DOCUMENT_ID, asRole(RoleName.ADMIN));
+
+      const call = prisma.electronicDocument.findUnique.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({ id: DOCUMENT_ID });
+    });
+
+    it('MANAGEMENT: consulta sin condición de venta', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetailForRequester(
+        DOCUMENT_ID,
+        asRole(RoleName.MANAGEMENT),
+      );
+
+      const call = prisma.electronicDocument.findUnique.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({ id: DOCUMENT_ID });
+    });
+
+    it('SELLER: combina el id con la condición de venta (sale.sellerId = actor)', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetailForRequester(
+        DOCUMENT_ID,
+        asRole(RoleName.SELLER, OWN_SELLER_ID),
+      );
+
+      const call = prisma.electronicDocument.findUnique.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(call.where).toEqual({
+        id: DOCUMENT_ID,
+        sale: { sellerId: OWN_SELLER_ID },
+      });
+    });
+
+    it('SELLER: documento de una venta ajena (Prisma no encuentra fila) -> MISMO 404 que inexistente', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.findDetailForRequester(
+          DOCUMENT_ID,
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        ),
+      ).rejects.toThrow(new NotFoundException('El documento fiscal no existe'));
+    });
+
+    it('SELLER: documento de su propia venta -> detalle normal', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      const result = await service.findDetailForRequester(
+        DOCUMENT_ID,
+        asRole(RoleName.SELLER, OWN_SELLER_ID),
+      );
+
+      expect(result.id).toBe(DOCUMENT_ID);
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('WAREHOUSE: 404 sin consultar Prisma (sin ningún acceso de lectura)', async () => {
+      await expect(
+        service.findDetailForRequester(DOCUMENT_ID, asRole(RoleName.WAREHOUSE)),
+      ).rejects.toThrow(new NotFoundException('El documento fiscal no existe'));
+      expect(prisma.electronicDocument.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('no escribe ni altera el documento (solo lectura)', async () => {
+      prisma.electronicDocument.findUnique.mockResolvedValue(makeDetailRow());
+
+      await service.findDetailForRequester(
+        DOCUMENT_ID,
+        asRole(RoleName.SELLER, OWN_SELLER_ID),
+      );
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 });

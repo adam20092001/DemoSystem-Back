@@ -15,7 +15,12 @@ import {
 } from '../common/date/business-date';
 import { PrismaService } from '../database/prisma.service';
 import { calculateDaysOutstanding } from '../payments/receivable-calculator';
+import { quoteReadScopeWhere } from '../quotes/quote-access.policy';
 import { buildEffectiveQuoteStatusCondition } from '../quotes/quote-calculator';
+import {
+  SaleAccessRequester,
+  saleReadScopeWhere,
+} from '../sales/sale-access.policy';
 import {
   DashboardCollectionsSection,
   DashboardLowStockSection,
@@ -141,9 +146,19 @@ function firstDayOfLimaMonth(dateOnly: string): string {
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * P6-E2: `requester` es siempre el usuario autenticado (id + rol ACTIVO
+   * revalidado por JwtAuthGuard), nunca un dato enviado por el cliente.
+   * Dentro de las secciones visibles para SELLER (sales/collections/
+   * quotes/receivables), cada método privado aplica el alcance por
+   * propiedad reutilizando `saleReadScopeWhere`/`quoteReadScopeWhere` — las
+   * mismas policies ya probadas en Sales/Quotes/Payments/Reports (P1/
+   * P6-B1/P6-E1). `lowStock` nunca recibe `requester`: no tiene dimensión
+   * de vendedor y su visibilidad ya depende solo del rol.
+   */
   async getDashboard(
     query: DashboardQuery,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<DashboardResult> {
     // El período se resuelve/valida siempre, sin importar el rol: es un
     // eco de entrada genérico (no una de las 5 secciones), así que un rol
@@ -152,7 +167,7 @@ export class DashboardService {
     // resolución es pura (sin tocar Prisma), así que no viola la regla de
     // "cero consultas" para roles sin acceso.
     const period = this.resolvePeriod(query);
-    const visibility = resolveSectionVisibility(requesterRole);
+    const visibility = resolveSectionVisibility(requester.role);
 
     const periodStart = startOfBusinessDayUtc(period.from);
     const periodEndExclusive = endOfBusinessDayExclusiveUtc(period.to);
@@ -164,17 +179,21 @@ export class DashboardService {
     const [sales, collections, lowStock, quotes, receivables] =
       await Promise.all([
         visibility.sales
-          ? this.getSalesSection(periodStart, periodEndExclusive)
+          ? this.getSalesSection(periodStart, periodEndExclusive, requester)
           : Promise.resolve(null),
         visibility.collections
-          ? this.getCollectionsSection(periodStart, periodEndExclusive)
+          ? this.getCollectionsSection(
+              periodStart,
+              periodEndExclusive,
+              requester,
+            )
           : Promise.resolve(null),
         visibility.lowStock ? this.getLowStockSection() : Promise.resolve(null),
         visibility.quotes
-          ? this.getQuotesSection(period.from, period.to)
+          ? this.getQuotesSection(period.from, period.to, requester)
           : Promise.resolve(null),
         visibility.receivables
-          ? this.getReceivablesSection()
+          ? this.getReceivablesSection(requester)
           : Promise.resolve(null),
       ]);
 
@@ -222,15 +241,26 @@ export class DashboardService {
     return { from, to };
   }
 
-  /** Sale ACTIVE con confirmedAt en el período. CANCELLED nunca cuenta; nunca AccountingEntry. */
+  /**
+   * Sale ACTIVE con confirmedAt en el período. CANCELLED nunca cuenta;
+   * nunca AccountingEntry. P6-E2: para SELLER, el alcance (`Sale.sellerId
+   * = requester.id`) se agrega al WHERE del propio `aggregate()` — nunca
+   * se calcula el total global para restarle o filtrarle algo después.
+   */
   private async getSalesSection(
     periodStart: Date,
     periodEndExclusive: Date,
+    requester: SaleAccessRequester,
   ): Promise<DashboardSalesSection> {
+    const scope = saleReadScopeWhere(requester);
+    if (scope === null) {
+      return { count: 0, total: '0.00' };
+    }
     const agg = await this.prisma.sale.aggregate({
       where: {
         status: SaleStatus.ACTIVE,
         confirmedAt: { gte: periodStart, lt: periodEndExclusive },
+        ...scope,
       },
       _count: { _all: true },
       _sum: { total: true },
@@ -246,15 +276,27 @@ export class DashboardService {
    * actual: un pago cuyo paidAt cae en el período pero que HOY está
    * CANCELLED no cuenta. Nunca se deriva de Sale.paidAmount ni de
    * AccountingEntry.
+   *
+   * P6-E2: el alcance de SELLER se decide por la venta del cobro (Payment
+   * -> Sale.sellerId), NUNCA por Payment.createdByUserId — mismo criterio
+   * exacto que PaymentsService.list() (P5) y el reporte R9 (P6-E1). Un
+   * cobro de un ADMIN sobre una venta del SELLER cuenta; uno histórico del
+   * propio SELLER sobre una venta ajena no.
    */
   private async getCollectionsSection(
     periodStart: Date,
     periodEndExclusive: Date,
+    requester: SaleAccessRequester,
   ): Promise<DashboardCollectionsSection> {
+    const scope = saleReadScopeWhere(requester);
+    if (scope === null) {
+      return { count: 0, total: '0.00' };
+    }
     const agg = await this.prisma.payment.aggregate({
       where: {
         status: PaymentStatus.ACTIVE,
         paidAt: { gte: periodStart, lt: periodEndExclusive },
+        ...(Object.keys(scope).length > 0 ? { sale: scope } : {}),
       },
       _count: { _all: true },
       _sum: { amount: true },
@@ -351,9 +393,23 @@ export class DashboardService {
   private async getQuotesSection(
     from: string,
     to: string,
+    requester: SaleAccessRequester,
   ): Promise<DashboardQuotesSection> {
+    // P6-E2: el alcance (`Quote.sellerId = requester.id` para SELLER) se
+    // agrega a `baseWhere` UNA sola vez, antes de construir cualquier
+    // consulta: como `total` y los 5 conteos por estado reutilizan este
+    // mismo objeto, la restricción llega a TODOS ellos, nunca solo al
+    // total general.
+    const scope = quoteReadScopeWhere(requester);
+    if (scope === null) {
+      return {
+        total: 0,
+        byStatus: QUOTE_STATUS_ORDER.map((status) => ({ status, count: 0 })),
+      };
+    }
     const baseWhere: Prisma.QuoteWhereInput = {
       issueDate: { gte: toPrismaDate(from), lte: toPrismaDate(to) },
+      ...scope,
     };
     const businessDateAsDate = toPrismaDate(businessToday());
 
@@ -389,11 +445,24 @@ export class DashboardService {
    * calculator.ts) en vez de duplicar la fórmula de antigüedad; no se
    * inyecta AccountsReceivableService: es solo un import de función pura,
    * no una dependencia de servicio de dominio.
+   *
+   * P6-E2: el alcance (`Sale.sellerId = requester.id` para SELLER) se
+   * agrega al MISMO `where` que alimenta tanto el `aggregate()` (count/
+   * totalBalance) como el `findMany()` del top 5 — la restricción por
+   * propiedad ocurre ANTES del `take: 5`, nunca después: un vendedor
+   * nunca ve el nombre ni el saldo de un cliente de una venta ajena.
    */
-  private async getReceivablesSection(): Promise<DashboardReceivablesSection> {
+  private async getReceivablesSection(
+    requester: SaleAccessRequester,
+  ): Promise<DashboardReceivablesSection> {
+    const scope = saleReadScopeWhere(requester);
+    if (scope === null) {
+      return { count: 0, totalBalance: '0.00', oldest: [] };
+    }
     const where: Prisma.SaleWhereInput = {
       status: SaleStatus.ACTIVE,
       balanceDue: { gt: 0 },
+      ...scope,
     };
 
     const [agg, oldestRows] = await Promise.all([

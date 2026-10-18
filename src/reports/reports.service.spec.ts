@@ -1,7 +1,15 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma, RoleName } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { ReportsService } from './reports.service';
+
+const ACTOR_ID = 'actor-id';
+
+/** Mismo helper que PaymentsService.list()/QuotesService.findOne() (P1-P6). */
+function asRole(role: RoleName, id: string = ACTOR_ID): SaleAccessRequester {
+  return { id, role };
+}
 
 function createPrismaMock() {
   return {
@@ -35,7 +43,7 @@ describe('ReportsService', () => {
     it.each(FORBIDDEN_ROLES)(
       'salesByProduct: %s -> página vacía, $queryRaw nunca llamado',
       async (role) => {
-        const result = await service.salesByProduct({}, role);
+        const result = await service.salesByProduct({}, asRole(role));
         expect(result).toEqual({
           data: [],
           page: 1,
@@ -50,7 +58,7 @@ describe('ReportsService', () => {
     it.each(FORBIDDEN_ROLES)(
       'salesByCustomer: %s -> página vacía, $queryRaw nunca llamado',
       async (role) => {
-        const result = await service.salesByCustomer({}, role);
+        const result = await service.salesByCustomer({}, asRole(role));
         expect(result).toEqual({
           data: [],
           page: 1,
@@ -65,7 +73,7 @@ describe('ReportsService', () => {
     it.each(FORBIDDEN_ROLES)(
       'salesBySeller: %s -> página vacía, $queryRaw nunca llamado',
       async (role) => {
-        const result = await service.salesBySeller({}, role);
+        const result = await service.salesBySeller({}, asRole(role));
         expect(result).toEqual({
           data: [],
           page: 1,
@@ -80,7 +88,7 @@ describe('ReportsService', () => {
     it.each(FORBIDDEN_ROLES)(
       'quotesByStatus: %s -> página vacía, Prisma.quote nunca llamado',
       async (role) => {
-        const result = await service.quotesByStatus({}, role);
+        const result = await service.quotesByStatus({}, asRole(role));
         expect(result).toEqual({
           data: [],
           page: 1,
@@ -96,7 +104,7 @@ describe('ReportsService', () => {
     it.each(FORBIDDEN_ROLES)(
       'paymentsByMethod: %s -> página vacía, Prisma.payment nunca llamado',
       async (role) => {
-        const result = await service.paymentsByMethod({}, role);
+        const result = await service.paymentsByMethod({}, asRole(role));
         expect(result).toEqual({
           data: [],
           page: 1,
@@ -110,7 +118,10 @@ describe('ReportsService', () => {
     );
 
     it('rol desconocido (default del switch) también falla cerrado', async () => {
-      const result = await service.salesByProduct({}, 'NOT_A_ROLE' as RoleName);
+      const result = await service.salesByProduct(
+        {},
+        asRole('NOT_A_ROLE' as RoleName),
+      );
       expect(result.data).toEqual([]);
       expect(prisma.$queryRaw).not.toHaveBeenCalled();
     });
@@ -124,7 +135,7 @@ describe('ReportsService', () => {
       await expect(
         service.salesByProduct(
           { from: '2026-08-31', to: '2026-08-01' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.$queryRaw).not.toHaveBeenCalled();
@@ -132,7 +143,10 @@ describe('ReportsService', () => {
 
     it('from con formato inválido -> 400', async () => {
       await expect(
-        service.paymentsByMethod({ from: '2026/08/01' }, RoleName.ADMIN),
+        service.paymentsByMethod(
+          { from: '2026/08/01' },
+          asRole(RoleName.ADMIN),
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.payment.findMany).not.toHaveBeenCalled();
     });
@@ -154,7 +168,7 @@ describe('ReportsService', () => {
           categoryId: 'cat-1',
           productId: 'prod-1',
         },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
@@ -173,7 +187,7 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesByProduct({}, RoleName.MANAGEMENT);
+      await service.salesByProduct({}, asRole(RoleName.MANAGEMENT));
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       const text = rowsSql.text.replace(/\s+/g, ' ');
@@ -188,7 +202,7 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesByProduct({}, RoleName.ADMIN);
+      await service.salesByProduct({}, asRole(RoleName.ADMIN));
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       const text = rowsSql.text.replace(/\s+/g, ' ');
@@ -220,7 +234,7 @@ describe('ReportsService', () => {
         ])
         .mockResolvedValueOnce([{ total: 1 }]);
 
-      const result = await service.salesByProduct({}, RoleName.SELLER);
+      const result = await service.salesByProduct({}, asRole(RoleName.SELLER));
 
       expect(result.data[0].quantitySold).toBe('12.000');
       expect(result.data[0].totalSold).toBe('1250.50');
@@ -233,7 +247,10 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesByProduct({ page: 3, limit: 10 }, RoleName.ADMIN);
+      await service.salesByProduct(
+        { page: 3, limit: 10 },
+        asRole(RoleName.ADMIN),
+      );
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       expect(rowsSql.values).toEqual(expect.arrayContaining([10, 20]));
@@ -244,12 +261,84 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 3 }]);
 
-      const result = await service.salesByProduct({}, RoleName.ADMIN);
+      const result = await service.salesByProduct({}, asRole(RoleName.ADMIN));
 
       const countSql = prisma.$queryRaw.mock.calls[1][0];
       expect(countSql.text).toContain('GROUP BY si.product_id');
       expect(countSql.text).toContain('COUNT(*)::int');
       expect(result.total).toBe(3);
+    });
+
+    describe('permisos por vendedor (P6-E1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+
+      it('1. SELLER: solo agrega SaleItem de sus propias ventas (s.seller_id en el WHERE de ambas consultas)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesByProduct(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        const countSql = prisma.$queryRaw.mock.calls[1][0];
+        expect(rowsSql.text).toContain('s.seller_id =');
+        expect(rowsSql.values).toEqual(expect.arrayContaining([OWN_SELLER_ID]));
+        expect(countSql.text).toContain('s.seller_id =');
+        expect(countSql.values).toEqual(
+          expect.arrayContaining([OWN_SELLER_ID]),
+        );
+      });
+
+      it('ADMIN y MANAGEMENT: sin condición de propiedad en el WHERE', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.$queryRaw.mockClear();
+          prisma.$queryRaw
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([{ total: 0 }]);
+
+          await service.salesByProduct({}, asRole(role));
+
+          const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+          expect(rowsSql.text).not.toContain('s.seller_id =');
+        }
+      });
+
+      it('16/18. WAREHOUSE mantiene el acceso denegado; ADMIN no se ve afectado', async () => {
+        const denied = await service.salesByProduct(
+          {},
+          asRole(RoleName.WAREHOUSE),
+        );
+        expect(denied).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('20. SELLER sin productos propios en el período: página vacía (no error)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        const result = await service.salesByProduct(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        expect(result).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+      });
     });
   });
 
@@ -264,7 +353,7 @@ describe('ReportsService', () => {
 
       await service.salesByCustomer(
         { customerId: 'cust-1', customerType: 'PERSON' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
@@ -281,7 +370,7 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesByCustomer({}, RoleName.MANAGEMENT);
+      await service.salesByCustomer({}, asRole(RoleName.MANAGEMENT));
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       expect(rowsSql.text).toContain('SUM(s.total)');
@@ -306,7 +395,7 @@ describe('ReportsService', () => {
         ])
         .mockResolvedValueOnce([{ total: 1 }]);
 
-      const result = await service.salesByCustomer({}, RoleName.SELLER);
+      const result = await service.salesByCustomer({}, asRole(RoleName.SELLER));
 
       expect(result.data[0]).toEqual({
         customerId: 'public-general',
@@ -325,10 +414,64 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesByCustomer({}, RoleName.ADMIN);
+      await service.salesByCustomer({}, asRole(RoleName.ADMIN));
 
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       expect(rowsSql.text).toContain('ORDER BY SUM(s.total) DESC, c.id ASC');
+    });
+
+    describe('permisos por vendedor (P6-E1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+
+      it('2. SELLER: solo agrega clientes e importes de sus propias ventas (s.seller_id en el WHERE de ambas consultas)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesByCustomer(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        const countSql = prisma.$queryRaw.mock.calls[1][0];
+        expect(rowsSql.text).toContain('s.seller_id =');
+        expect(rowsSql.values).toEqual(expect.arrayContaining([OWN_SELLER_ID]));
+        expect(countSql.text).toContain('s.seller_id =');
+      });
+
+      it('un cliente sin ventas propias del vendedor no aparece: el alcance se aplica antes de SUM/GROUP BY, nunca filtrando después', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        const result = await service.salesByCustomer(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        // El propio mock de PostgreSQL ya refleja el resultado correcto
+        // (vacío); lo relevante es que la condición viaja en el WHERE de
+        // la consulta agregada, no en un post-filtrado en memoria.
+        expect(result.data).toEqual([]);
+        const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+        const text = rowsSql.text.replace(/\s+/g, ' ');
+        expect(text).toMatch(/WHERE[^G]*s\.seller_id =[^G]*GROUP BY/);
+      });
+
+      it('ADMIN y MANAGEMENT: sin condición de propiedad en el WHERE', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.$queryRaw.mockClear();
+          prisma.$queryRaw
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([{ total: 0 }]);
+
+          await service.salesByCustomer({}, asRole(role));
+
+          const rowsSql = prisma.$queryRaw.mock.calls[0][0];
+          expect(rowsSql.text).not.toContain('s.seller_id =');
+        }
+      });
     });
   });
 
@@ -343,7 +486,7 @@ describe('ReportsService', () => {
 
       await service.salesBySeller(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const mainSql = prisma.$queryRaw.mock.calls[0][0];
@@ -363,7 +506,7 @@ describe('ReportsService', () => {
 
       await service.salesBySeller(
         { from: '2026-08-01', to: '2026-08-31', sellerId: 'seller-1' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const mainSql = prisma.$queryRaw.mock.calls[0][0];
@@ -379,7 +522,7 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([]) // agregación principal: sin vendedores
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesBySeller({}, RoleName.ADMIN);
+      await service.salesBySeller({}, asRole(RoleName.ADMIN));
 
       // Solo 2 llamadas: agregación principal + total de grupos.
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
@@ -412,7 +555,7 @@ describe('ReportsService', () => {
 
       const result = await service.salesBySeller(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
@@ -457,7 +600,7 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 7 }]);
 
-      const result = await service.salesBySeller({}, RoleName.ADMIN);
+      const result = await service.salesBySeller({}, asRole(RoleName.ADMIN));
 
       const totalSql = prisma.$queryRaw.mock.calls[1][0];
       expect(totalSql.text).toContain('COUNT(DISTINCT s.seller_id)::int');
@@ -469,12 +612,185 @@ describe('ReportsService', () => {
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ total: 0 }]);
 
-      await service.salesBySeller({}, RoleName.ADMIN);
+      await service.salesBySeller({}, asRole(RoleName.ADMIN));
 
       const mainSql = prisma.$queryRaw.mock.calls[0][0];
       expect(mainSql.text).toContain(
         'ORDER BY sa.total_sold DESC, sa.seller_id ASC',
       );
+    });
+
+    describe('permisos por vendedor (P6-E1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+      const OTHER_SELLER_ID = 'seller-other';
+
+      it('3. SELLER sin sellerId: el cohorte (eligible_sales) queda acotado a su propia identidad', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller({}, asRole(RoleName.SELLER, OWN_SELLER_ID));
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(mainSql.text).toContain('s.seller_id =');
+        expect(mainSql.values).toEqual(expect.arrayContaining([OWN_SELLER_ID]));
+      });
+
+      it('4. SELLER con sellerId propio: ambas condiciones (obligatoria y solicitada) coexisten, compatibles', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller(
+          { sellerId: OWN_SELLER_ID },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        const occurrences = mainSql.values.filter(
+          (v: unknown) => v === OWN_SELLER_ID,
+        );
+        // Una vez por el alcance obligatorio, otra por el filtro solicitado.
+        expect(occurrences).toHaveLength(2);
+      });
+
+      it('5. SELLER con sellerId ajeno: el alcance obligatorio y el filtro solicitado se combinan con AND, nunca se sustituyen (SQL contradictorio -> 0 filas en PostgreSQL real)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller(
+          { sellerId: OTHER_SELLER_ID },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        // Las DOS condiciones conviven en el mismo WHERE (AND): nunca se
+        // reemplaza el alcance propio por el sellerId solicitado.
+        const sellerIdConditions = (
+          mainSql.text.match(/s\.seller_id = \$\d+/g) ?? []
+        ).length;
+        expect(sellerIdConditions).toBe(2);
+        expect(mainSql.values).toEqual(
+          expect.arrayContaining([OWN_SELLER_ID, OTHER_SELLER_ID]),
+        );
+      });
+
+      it('ADMIN sin sellerId: ninguna condición de propiedad forzada en el cohorte', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller({}, asRole(RoleName.ADMIN));
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(mainSql.text).not.toContain('s.seller_id =');
+      });
+
+      it('MANAGEMENT sin sellerId: ninguna condición de propiedad forzada en el cohorte', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller({}, asRole(RoleName.MANAGEMENT));
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        expect(mainSql.text).not.toContain('s.seller_id =');
+      });
+
+      it('6. payment_agg nunca agrega pagos de otros vendedores: deriva exclusivamente de eligible_sales, ya acotado en el mismo WHERE', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        await service.salesBySeller({}, asRole(RoleName.SELLER, OWN_SELLER_ID));
+
+        const mainSql = prisma.$queryRaw.mock.calls[0][0];
+        const text = mainSql.text.replace(/\s+/g, ' ');
+        // eligible_sales es la ÚNICA fuente de sale_agg/payment_agg: basta
+        // con que su propio WHERE esté acotado (ya verificado arriba) para
+        // que ambas CTE lo hereden sin tocar su JOIN.
+        expect(text).toMatch(
+          /eligible_sales AS \( SELECT s\.id, s\.seller_id, s\.total FROM sales s WHERE[^)]*s\.seller_id =/,
+        );
+      });
+
+      it('7. convertedQuotes aplica el alcance comercial correcto mediante Quote.sellerId (defensa en profundidad, además de pageSellerIds)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            {
+              sellerId: OWN_SELLER_ID,
+              username: 'jdoe',
+              firstName: 'Juan',
+              lastName: 'Doe',
+              saleCount: 1,
+              totalSold: new Prisma.Decimal('100'),
+              totalCollected: new Prisma.Decimal('0'),
+            },
+          ])
+          .mockResolvedValueOnce([{ total: 1 }])
+          .mockResolvedValueOnce([]);
+
+        await service.salesBySeller({}, asRole(RoleName.SELLER, OWN_SELLER_ID));
+
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
+        const quotesSql = prisma.$queryRaw.mock.calls[2][0];
+        expect(quotesSql.text).toContain('q.seller_id =');
+        expect(quotesSql.values).toEqual(
+          expect.arrayContaining([OWN_SELLER_ID]),
+        );
+      });
+
+      it('9/16/17. ADMIN conserva todos los resultados (comparación global sin restricción)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            {
+              sellerId: OTHER_SELLER_ID,
+              username: 'msmith',
+              firstName: 'María',
+              lastName: 'Smith',
+              saleCount: 1,
+              totalSold: new Prisma.Decimal('200'),
+              totalCollected: new Prisma.Decimal('0'),
+            },
+          ])
+          .mockResolvedValueOnce([{ total: 1 }])
+          .mockResolvedValueOnce([]);
+
+        const result = await service.salesBySeller({}, asRole(RoleName.ADMIN));
+
+        expect(result.data).toHaveLength(1);
+        expect(result.data[0].seller.id).toBe(OTHER_SELLER_ID);
+      });
+
+      it('18. WAREHOUSE mantiene el acceso denegado (página vacía, sin tocar Prisma)', async () => {
+        const result = await service.salesBySeller(
+          {},
+          asRole(RoleName.WAREHOUSE),
+        );
+        expect(result).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('20. SELLER sin ventas elegibles en el período: página vacía, sin consultar convertedQuotes', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ total: 0 }]);
+
+        const result = await service.salesBySeller(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        expect(result.data).toEqual([]);
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+      });
     });
   });
 
@@ -488,7 +804,7 @@ describe('ReportsService', () => {
 
       await service.quotesByStatus(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.quote.findMany.mock.calls[0][0] as {
@@ -527,7 +843,7 @@ describe('ReportsService', () => {
       ]);
       prisma.quote.count.mockResolvedValue(2);
 
-      const result = await service.quotesByStatus({}, RoleName.SELLER);
+      const result = await service.quotesByStatus({}, asRole(RoleName.SELLER));
 
       expect(result.data[0].resultingSale).toBeNull();
       expect(result.data[0].total).toBe('350.00');
@@ -541,7 +857,7 @@ describe('ReportsService', () => {
       prisma.quote.findMany.mockResolvedValue([]);
       prisma.quote.count.mockResolvedValue(0);
 
-      await service.quotesByStatus({}, RoleName.ADMIN);
+      await service.quotesByStatus({}, asRole(RoleName.ADMIN));
 
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: unknown;
@@ -559,7 +875,7 @@ describe('ReportsService', () => {
           sellerId: 'seller-1',
           customerId: 'cust-1',
         },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.quote.findMany.mock.calls[0][0] as {
@@ -595,7 +911,10 @@ describe('ReportsService', () => {
           ]);
           prisma.quote.count.mockResolvedValue(1);
 
-          const result = await service.quotesByStatus({}, RoleName.ADMIN);
+          const result = await service.quotesByStatus(
+            {},
+            asRole(RoleName.ADMIN),
+          );
 
           expect(result.data[0].status).toBe('EXPIRED');
         } finally {
@@ -609,7 +928,10 @@ describe('ReportsService', () => {
           prisma.quote.findMany.mockResolvedValue([]);
           prisma.quote.count.mockResolvedValue(0);
 
-          await service.quotesByStatus({ status: 'EXPIRED' }, RoleName.ADMIN);
+          await service.quotesByStatus(
+            { status: 'EXPIRED' },
+            asRole(RoleName.ADMIN),
+          );
 
           const args = prisma.quote.findMany.mock.calls[0][0] as {
             where: { AND: Array<Record<string, unknown>> };
@@ -640,7 +962,10 @@ describe('ReportsService', () => {
           prisma.quote.findMany.mockResolvedValue([]);
           prisma.quote.count.mockResolvedValue(0);
 
-          await service.quotesByStatus({ status: 'PENDING' }, RoleName.ADMIN);
+          await service.quotesByStatus(
+            { status: 'PENDING' },
+            asRole(RoleName.ADMIN),
+          );
 
           const args = prisma.quote.findMany.mock.calls[0][0] as {
             where: { AND: Array<Record<string, unknown>> };
@@ -674,7 +999,10 @@ describe('ReportsService', () => {
           ]);
           prisma.quote.count.mockResolvedValue(1);
 
-          const result = await service.quotesByStatus({}, RoleName.ADMIN);
+          const result = await service.quotesByStatus(
+            {},
+            asRole(RoleName.ADMIN),
+          );
 
           expect(result.data[0].status).toBe('PENDING');
         } finally {
@@ -705,7 +1033,7 @@ describe('ReportsService', () => {
         ]);
         prisma.quote.count.mockResolvedValue(2);
 
-        const result = await service.quotesByStatus({}, RoleName.ADMIN);
+        const result = await service.quotesByStatus({}, asRole(RoleName.ADMIN));
 
         expect(result.data[0].status).toBe('REJECTED');
         expect(result.data[1].status).toBe('CONVERTED');
@@ -717,7 +1045,10 @@ describe('ReportsService', () => {
           prisma.quote.findMany.mockResolvedValue([]);
           prisma.quote.count.mockResolvedValue(0);
 
-          await service.quotesByStatus({ status: 'EXPIRED' }, RoleName.ADMIN);
+          await service.quotesByStatus(
+            { status: 'EXPIRED' },
+            asRole(RoleName.ADMIN),
+          );
 
           const findManyArgs = prisma.quote.findMany.mock.calls[0][0] as {
             where: unknown;
@@ -745,7 +1076,7 @@ describe('ReportsService', () => {
               to: '2020-01-31',
               status: 'EXPIRED',
             },
-            RoleName.ADMIN,
+            asRole(RoleName.ADMIN),
           );
 
           const args = prisma.quote.findMany.mock.calls[0][0] as {
@@ -772,6 +1103,97 @@ describe('ReportsService', () => {
         }
       });
     });
+
+    describe('permisos por vendedor (P6-E1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+      const OTHER_SELLER_ID = 'seller-other';
+
+      it('8. SELLER: solo cotizaciones propias (Quote.sellerId = requester.id)', async () => {
+        prisma.quote.findMany.mockResolvedValue([]);
+        prisma.quote.count.mockResolvedValue(0);
+
+        await service.quotesByStatus(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.quote.findMany.mock.calls[0][0] as {
+          where: { AND: [Record<string, unknown>, unknown] };
+        };
+        expect(args.where.AND[0]).toEqual({ sellerId: OWN_SELLER_ID });
+      });
+
+      it('9. SELLER con sellerId ajeno: resultado vacío — el filtro se combina con AND, nunca reemplaza el alcance', async () => {
+        prisma.quote.findMany.mockResolvedValue([]);
+        prisma.quote.count.mockResolvedValue(0);
+
+        await service.quotesByStatus(
+          { sellerId: OTHER_SELLER_ID },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.quote.findMany.mock.calls[0][0] as {
+          where: {
+            AND: [Record<string, unknown>, { AND: Record<string, unknown>[] }];
+          };
+        };
+        expect(args.where.AND[0]).toEqual({ sellerId: OWN_SELLER_ID });
+        expect(args.where.AND[1]).toEqual({
+          AND: [{ sellerId: OTHER_SELLER_ID }],
+        });
+      });
+
+      it('10. findMany y count usan exactamente el mismo where restringido', async () => {
+        prisma.quote.findMany.mockResolvedValue([]);
+        prisma.quote.count.mockResolvedValue(0);
+
+        await service.quotesByStatus(
+          { status: 'CONVERTED' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const findManyArgs = prisma.quote.findMany.mock.calls[0][0] as {
+          where: unknown;
+        };
+        const countArgs = prisma.quote.count.mock.calls[0][0] as {
+          where: unknown;
+        };
+        expect(countArgs.where).toEqual(findManyArgs.where);
+      });
+
+      it('ADMIN y MANAGEMENT: filtros tal cual, sin condición de propiedad', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.quote.findMany.mockClear();
+          prisma.quote.findMany.mockResolvedValue([]);
+          prisma.quote.count.mockResolvedValue(0);
+
+          await service.quotesByStatus(
+            { sellerId: OTHER_SELLER_ID },
+            asRole(role, OWN_SELLER_ID),
+          );
+
+          const args = prisma.quote.findMany.mock.calls[0][0] as {
+            where: { AND: Record<string, unknown>[] };
+          };
+          expect(args.where.AND).toEqual([{ sellerId: OTHER_SELLER_ID }]);
+        }
+      });
+
+      it('18. WAREHOUSE mantiene el acceso denegado (página vacía, sin tocar Prisma)', async () => {
+        const result = await service.quotesByStatus(
+          {},
+          asRole(RoleName.WAREHOUSE),
+        );
+        expect(result).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+        expect(prisma.quote.findMany).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ==========================================================================
@@ -784,7 +1206,7 @@ describe('ReportsService', () => {
 
       await service.paymentsByMethod(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.payment.findMany.mock.calls[0][0] as {
@@ -822,7 +1244,10 @@ describe('ReportsService', () => {
       ]);
       prisma.payment.count.mockResolvedValue(1);
 
-      const result = await service.paymentsByMethod({}, RoleName.SELLER);
+      const result = await service.paymentsByMethod(
+        {},
+        asRole(RoleName.SELLER),
+      );
 
       expect(result.data[0]).toEqual({
         paidAt: new Date('2026-08-10T10:00:00.000Z'),
@@ -848,7 +1273,7 @@ describe('ReportsService', () => {
       prisma.payment.findMany.mockResolvedValue([]);
       prisma.payment.count.mockResolvedValue(0);
 
-      await service.paymentsByMethod({}, RoleName.ADMIN);
+      await service.paymentsByMethod({}, asRole(RoleName.ADMIN));
 
       const args = prisma.payment.findMany.mock.calls[0][0] as {
         where: unknown;
@@ -866,7 +1291,7 @@ describe('ReportsService', () => {
           status: 'CANCELLED',
           createdByUserId: 'user-1',
         },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.payment.findMany.mock.calls[0][0] as {
@@ -879,6 +1304,145 @@ describe('ReportsService', () => {
           { createdByUserId: 'user-1' },
         ]),
       );
+    });
+
+    describe('permisos por vendedor (P6-E1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+
+      it('11. SELLER: AND por la venta asociada (Payment -> Sale.sellerId), nunca por Payment.createdByUserId', async () => {
+        prisma.payment.findMany.mockResolvedValue([]);
+        prisma.payment.count.mockResolvedValue(0);
+
+        await service.paymentsByMethod(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.findMany.mock.calls[0][0] as {
+          where: { AND: [{ sale: Record<string, unknown> }, unknown] };
+        };
+        expect(args.where.AND[0]).toEqual({
+          sale: { sellerId: OWN_SELLER_ID },
+        });
+        expect(JSON.stringify(args.where)).not.toContain('createdByUserId');
+      });
+
+      it('A. un cobro registrado por el ADMIN sobre una venta del SELLER queda DENTRO del alcance (el filtro es la venta, no el cobrador)', async () => {
+        prisma.payment.findMany.mockResolvedValue([]);
+        prisma.payment.count.mockResolvedValue(0);
+
+        await service.paymentsByMethod(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.findMany.mock.calls[0][0] as {
+          where: { AND: [{ sale: Record<string, unknown> }, unknown] };
+        };
+        // La condición es exclusivamente sobre Sale.sellerId: un Payment
+        // con createdByUserId distinto de OWN_SELLER_ID (p. ej. el ADMIN)
+        // satisface igual esta condición mientras sale.sellerId coincida.
+        expect(args.where.AND[0]).toEqual({
+          sale: { sellerId: OWN_SELLER_ID },
+        });
+      });
+
+      it('B/14. C. createdByUserId se combina con AND: solo ve cobros de SUS ventas realizados por ese usuario', async () => {
+        prisma.payment.findMany.mockResolvedValue([]);
+        prisma.payment.count.mockResolvedValue(0);
+
+        await service.paymentsByMethod(
+          { createdByUserId: 'other-user-id' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.findMany.mock.calls[0][0] as {
+          where: {
+            AND: [
+              { sale: Record<string, unknown> },
+              { AND: Record<string, unknown>[] },
+            ];
+          };
+        };
+        expect(args.where.AND[0]).toEqual({
+          sale: { sellerId: OWN_SELLER_ID },
+        });
+        expect(args.where.AND[1]).toEqual({
+          AND: [{ createdByUserId: 'other-user-id' }],
+        });
+      });
+
+      it('13/B. un cobro histórico del propio SELLER sobre una venta ajena NO aparece: el alcance es la venta, no quien cobró', async () => {
+        prisma.payment.findMany.mockResolvedValue([]);
+        prisma.payment.count.mockResolvedValue(0);
+
+        await service.paymentsByMethod(
+          { createdByUserId: OWN_SELLER_ID },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.findMany.mock.calls[0][0] as {
+          where: { AND: [{ sale: Record<string, unknown> }, unknown] };
+        };
+        // createdByUserId = propio NO sustituye la condición de la venta:
+        // sigue exigiéndose sale.sellerId = OWN_SELLER_ID.
+        expect(args.where.AND[0]).toEqual({
+          sale: { sellerId: OWN_SELLER_ID },
+        });
+      });
+
+      it('15. findMany y count usan exactamente el mismo where restringido', async () => {
+        prisma.payment.findMany.mockResolvedValue([]);
+        prisma.payment.count.mockResolvedValue(0);
+
+        await service.paymentsByMethod(
+          { method: 'cash' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const findManyArgs = prisma.payment.findMany.mock.calls[0][0] as {
+          where: unknown;
+        };
+        const countArgs = prisma.payment.count.mock.calls[0][0] as {
+          where: unknown;
+        };
+        expect(countArgs.where).toEqual(findManyArgs.where);
+      });
+
+      it('ADMIN y MANAGEMENT: filtros tal cual, sin condición de venta', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.payment.findMany.mockClear();
+          prisma.payment.findMany.mockResolvedValue([]);
+          prisma.payment.count.mockResolvedValue(0);
+
+          await service.paymentsByMethod(
+            { createdByUserId: 'other-user-id' },
+            asRole(role, OWN_SELLER_ID),
+          );
+
+          const args = prisma.payment.findMany.mock.calls[0][0] as {
+            where: { AND: Record<string, unknown>[] };
+          };
+          expect(args.where.AND).toEqual([
+            { createdByUserId: 'other-user-id' },
+          ]);
+        }
+      });
+
+      it('18. WAREHOUSE mantiene el acceso denegado (página vacía, sin tocar Prisma)', async () => {
+        const result = await service.paymentsByMethod(
+          {},
+          asRole(RoleName.WAREHOUSE),
+        );
+        expect(result).toEqual({
+          data: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+        });
+        expect(prisma.payment.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 });

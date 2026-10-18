@@ -23,6 +23,8 @@ export interface SaleFiscalSnapshot {
   id: string;
   number: string;
   status: SaleStatus;
+  /** P6-C2: propiedad real de la venta, para assertCanOperateSale() en issue(). */
+  sellerId: string;
 
   customerIsGeneric: boolean;
   customerDocumentType: CustomerDocumentType | null;

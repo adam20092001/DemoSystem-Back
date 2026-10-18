@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma, RoleName, SaleStatus } from '@prisma/client';
+import { Prisma, SaleStatus } from '@prisma/client';
 import {
   businessToday,
   endOfBusinessDayExclusiveUtc,
@@ -8,6 +8,11 @@ import {
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
+import {
+  applySaleReadScope,
+  SaleAccessRequester,
+  saleReadScopeWhere,
+} from '../sales/sale-access.policy';
 import { calculateDaysOutstanding } from './receivable-calculator';
 import { ListReceivablesQuery } from './types/list-receivables.query';
 import { ReceivableItem } from './types/receivable-item';
@@ -33,24 +38,6 @@ const RECEIVABLE_SELECT = {
 type ReceivableRow = Prisma.SaleGetPayload<{
   select: typeof RECEIVABLE_SELECT;
 }>;
-
-/**
- * Roles con acceso de lectura a Cuentas por Cobrar (defensa en
- * profundidad; el controller igualmente rechaza con 403 vía guards).
- * WAREHOUSE no tiene ningún acceso, igual que en Sales/Payments.
- * `default` también falla cerrado.
- */
-function hasReceivableReadAccess(role: RoleName): boolean {
-  switch (role) {
-    case RoleName.ADMIN:
-    case RoleName.SELLER:
-    case RoleName.MANAGEMENT:
-      return true;
-    case RoleName.WAREHOUSE:
-    default:
-      return false;
-  }
-}
 
 function toReceivableItem(row: ReceivableRow, today: string): ReceivableItem {
   return {
@@ -81,9 +68,16 @@ function toReceivableItem(row: ReceivableRow, today: string): ReceivableItem {
 export class AccountsReceivableService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Permisos por vendedor (P5): cada cuenta por cobrar es una venta, así que
+   * se aplica el alcance de propiedad de ventas (SELLER -> solo
+   * Sale.sellerId = requester.id; ADMIN/MANAGEMENT -> todas; WAREHOUSE/
+   * desconocido -> ninguna) combinado con AND con la definición fija y los
+   * filtros, y el MISMO where alimenta findMany y count.
+   */
   async list(
     query: ListReceivablesQuery,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<ReceivableItem>> {
     const page =
       query.page !== undefined && query.page > 0
@@ -97,7 +91,7 @@ export class AccountsReceivableService {
     );
     const skip = (page - 1) * limit;
 
-    if (!hasReceivableReadAccess(requesterRole)) {
+    if (saleReadScopeWhere(requester) === null) {
       // Rol sin ningún acceso (WAREHOUSE u otro no contemplado): página
       // vacía sin tocar Prisma. Defensa en profundidad; el controller
       // igualmente rechaza esto con 403 en la capa HTTP.
@@ -133,7 +127,10 @@ export class AccountsReceivableService {
       });
     }
 
-    const where: Prisma.SaleWhereInput = { AND: conditions };
+    const where = applySaleReadScope(requester, { AND: conditions });
+    if (where === null) {
+      return { data: [], page, limit, total: 0, totalPages: 0 };
+    }
 
     const [rows, total] = await Promise.all([
       this.prisma.sale.findMany({
