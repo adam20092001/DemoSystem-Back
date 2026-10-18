@@ -1,7 +1,15 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma, QuoteStatus, RoleName } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { DashboardService } from './dashboard.service';
+
+const ACTOR_ID = 'actor-id';
+
+/** Mismo helper que PaymentsService.list()/ReportsService (P1-P6-E1). */
+function asRole(role: RoleName, id: string = ACTOR_ID): SaleAccessRequester {
+  return { id, role };
+}
 
 function createPrismaMock() {
   return {
@@ -55,7 +63,7 @@ describe('DashboardService', () => {
       // diferencia de sobreescribir Date.now a mano.
       jest.useFakeTimers({ now: new Date('2026-08-23T12:00:00.000Z') });
       try {
-        const result = await service.getDashboard({}, RoleName.ADMIN);
+        const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
         expect(result.period).toEqual({ from: '2026-08-01', to: '2026-08-23' });
       } finally {
         jest.useRealTimers();
@@ -65,21 +73,21 @@ describe('DashboardService', () => {
     it('ambos provistos: se usan tal cual', async () => {
       const result = await service.getDashboard(
         { from: '2026-08-05', to: '2026-08-10' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       expect(result.period).toEqual({ from: '2026-08-05', to: '2026-08-10' });
     });
 
     it('from sin to -> 400, sin tocar Prisma', async () => {
       await expect(
-        service.getDashboard({ from: '2026-08-01' }, RoleName.ADMIN),
+        service.getDashboard({ from: '2026-08-01' }, asRole(RoleName.ADMIN)),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.sale.aggregate).not.toHaveBeenCalled();
     });
 
     it('to sin from -> 400, sin tocar Prisma', async () => {
       await expect(
-        service.getDashboard({ to: '2026-08-10' }, RoleName.ADMIN),
+        service.getDashboard({ to: '2026-08-10' }, asRole(RoleName.ADMIN)),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.sale.aggregate).not.toHaveBeenCalled();
     });
@@ -88,14 +96,17 @@ describe('DashboardService', () => {
       await expect(
         service.getDashboard(
           { from: '2026-08-10', to: '2026-08-01' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
     it('la resolución/validación del período ocurre incluso para un rol sin ninguna sección visible', async () => {
       await expect(
-        service.getDashboard({ from: '2026-08-10' }, 'NOT_A_ROLE' as RoleName),
+        service.getDashboard(
+          { from: '2026-08-10' },
+          asRole('NOT_A_ROLE' as RoleName),
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
@@ -107,7 +118,7 @@ describe('DashboardService', () => {
     it('filtra Sale ACTIVE con confirmedAt en el período (gte/lt exclusivo)', async () => {
       await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.sale.aggregate.mock.calls[0][0] as {
@@ -125,7 +136,7 @@ describe('DashboardService', () => {
     it('serializa count/total, vacío -> 0 / "0.00"', async () => {
       const result = await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       expect(result.sales).toEqual({ count: 0, total: '0.00' });
     });
@@ -145,7 +156,7 @@ describe('DashboardService', () => {
       );
       const result = await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       expect(result.sales).toEqual({ count: 4, total: '1250.50' });
     });
@@ -158,7 +169,7 @@ describe('DashboardService', () => {
     it('filtra Payment ACTIVE con paidAt en el período', async () => {
       await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const args = prisma.payment.aggregate.mock.calls[0][0] as {
@@ -176,7 +187,7 @@ describe('DashboardService', () => {
     it('serializa count/total, vacío -> 0 / "0.00"', async () => {
       const result = await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       expect(result.collections).toEqual({ count: 0, total: '0.00' });
     });
@@ -188,7 +199,7 @@ describe('DashboardService', () => {
       });
       const result = await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       expect(result.collections).toEqual({ count: 3, total: '980.00' });
     });
@@ -201,7 +212,7 @@ describe('DashboardService', () => {
     it('no aplica el período del Dashboard (siempre exactamente 2 $queryRaw sin filtros de fecha)', async () => {
       await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.WAREHOUSE,
+        asRole(RoleName.WAREHOUSE),
       );
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
@@ -215,7 +226,7 @@ describe('DashboardService', () => {
     });
 
     it('orden: mayor faltante primero, desempate sku ASC, id ASC; LIMIT 5', async () => {
-      await service.getDashboard({}, RoleName.WAREHOUSE);
+      await service.getDashboard({}, asRole(RoleName.WAREHOUSE));
       const rowsSql = prisma.$queryRaw.mock.calls[0][0];
       expect(rowsSql.text).toContain(
         'ORDER BY (p.stock_minimum - p.stock_current) DESC, p.sku ASC, p.id ASC',
@@ -228,7 +239,7 @@ describe('DashboardService', () => {
         .mockResolvedValueOnce([]) // filas top-5
         .mockResolvedValueOnce([{ total: 42 }]); // count real
 
-      const result = await service.getDashboard({}, RoleName.WAREHOUSE);
+      const result = await service.getDashboard({}, asRole(RoleName.WAREHOUSE));
 
       const countSql = prisma.$queryRaw.mock.calls[1][0];
       expect(countSql.text).toContain('COUNT(*)::int');
@@ -249,7 +260,7 @@ describe('DashboardService', () => {
         ])
         .mockResolvedValueOnce([{ total: 1 }]);
 
-      const result = await service.getDashboard({}, RoleName.WAREHOUSE);
+      const result = await service.getDashboard({}, asRole(RoleName.WAREHOUSE));
 
       expect(result.lowStock?.items).toEqual([
         {
@@ -271,7 +282,7 @@ describe('DashboardService', () => {
     it('filtra Quote.issueDate en el período (gte/lte inclusive vía toPrismaDate)', async () => {
       await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.SELLER,
+        asRole(RoleName.ADMIN),
       );
 
       const firstCallArgs = prisma.quote.count.mock.calls[0][0] as {
@@ -287,7 +298,7 @@ describe('DashboardService', () => {
 
     it('los 5 valores del enum QuoteStatus aparecen exactamente una vez, en el orden del enum, incluidos los de conteo cero', async () => {
       prisma.quote.count.mockResolvedValue(0);
-      const result = await service.getDashboard({}, RoleName.SELLER);
+      const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
 
       const statuses = result.quotes?.byStatus.map((row) => row.status);
       expect(statuses).toEqual([
@@ -312,7 +323,7 @@ describe('DashboardService', () => {
         .mockResolvedValueOnce(0) // EXPIRED
         .mockResolvedValueOnce(3); // CONVERTED
 
-      const result = await service.getDashboard({}, RoleName.SELLER);
+      const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
 
       expect(prisma.quote.count).toHaveBeenCalledTimes(6);
       expect(result.quotes?.total).toBe(6);
@@ -331,7 +342,7 @@ describe('DashboardService', () => {
 
           await service.getDashboard(
             { from: '2026-08-01', to: '2026-08-31' },
-            RoleName.SELLER,
+            asRole(RoleName.ADMIN),
           );
 
           const calls = prisma.quote.count.mock.calls;
@@ -382,7 +393,7 @@ describe('DashboardService', () => {
           .mockResolvedValueOnce(1) // EXPIRED (la que venció)
           .mockResolvedValueOnce(1); // CONVERTED
 
-        const result = await service.getDashboard({}, RoleName.SELLER);
+        const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
 
         const byStatus = new Map(
           result.quotes!.byStatus.map((r) => [r.status, r.count]),
@@ -410,7 +421,7 @@ describe('DashboardService', () => {
           // `to` en vez de "hoy", la condición usaría 2020-01-31.
           await service.getDashboard(
             { from: '2020-01-01', to: '2020-01-31' },
-            RoleName.SELLER,
+            asRole(RoleName.ADMIN),
           );
 
           const expiredCall = prisma.quote.count.mock.calls[4][0] as {
@@ -440,7 +451,7 @@ describe('DashboardService', () => {
     it('Sale.status=ACTIVE AND balanceDue>0, SIN filtro de período', async () => {
       await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
 
       const aggCalls = prisma.sale.aggregate.mock.calls as Array<
@@ -457,7 +468,7 @@ describe('DashboardService', () => {
     });
 
     it('serializa count/totalBalance, vacío -> 0 / "0.00" / []', async () => {
-      const result = await service.getDashboard({}, RoleName.ADMIN);
+      const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
       expect(result.receivables).toEqual({
         count: 0,
         totalBalance: '0.00',
@@ -492,7 +503,7 @@ describe('DashboardService', () => {
             ),
         );
 
-        const result = await service.getDashboard({}, RoleName.ADMIN);
+        const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
 
         expect(result.receivables).toEqual({
           count: 1,
@@ -532,7 +543,7 @@ describe('DashboardService', () => {
   // ==========================================================================
   describe('matriz de roles y elisión de consultas ocultas', () => {
     it('ADMIN: las 5 secciones no-null, las 5 familias de consulta se ejecutan', async () => {
-      const result = await service.getDashboard({}, RoleName.ADMIN);
+      const result = await service.getDashboard({}, asRole(RoleName.ADMIN));
       expect(result.sales).not.toBeNull();
       expect(result.collections).not.toBeNull();
       expect(result.lowStock).not.toBeNull();
@@ -546,7 +557,10 @@ describe('DashboardService', () => {
     });
 
     it('MANAGEMENT: idéntico a ADMIN (las 5 no-null)', async () => {
-      const result = await service.getDashboard({}, RoleName.MANAGEMENT);
+      const result = await service.getDashboard(
+        {},
+        asRole(RoleName.MANAGEMENT),
+      );
       expect(result.sales).not.toBeNull();
       expect(result.collections).not.toBeNull();
       expect(result.lowStock).not.toBeNull();
@@ -555,7 +569,7 @@ describe('DashboardService', () => {
     });
 
     it('SELLER: lowStock=null y CERO consultas $queryRaw; el resto no-null', async () => {
-      const result = await service.getDashboard({}, RoleName.SELLER);
+      const result = await service.getDashboard({}, asRole(RoleName.SELLER));
       expect(result.lowStock).toBeNull();
       expect(result.sales).not.toBeNull();
       expect(result.collections).not.toBeNull();
@@ -565,7 +579,7 @@ describe('DashboardService', () => {
     });
 
     it('WAREHOUSE: únicamente lowStock no-null; CERO consultas de sales/collections/quotes/receivables', async () => {
-      const result = await service.getDashboard({}, RoleName.WAREHOUSE);
+      const result = await service.getDashboard({}, asRole(RoleName.WAREHOUSE));
       expect(result.lowStock).not.toBeNull();
       expect(result.sales).toBeNull();
       expect(result.collections).toBeNull();
@@ -578,7 +592,10 @@ describe('DashboardService', () => {
     });
 
     it('rol desconocido: las 5 secciones null, CERO consultas de ninguna sección', async () => {
-      const result = await service.getDashboard({}, 'NOT_A_ROLE' as RoleName);
+      const result = await service.getDashboard(
+        {},
+        asRole('NOT_A_ROLE' as RoleName),
+      );
       expect(result.sales).toBeNull();
       expect(result.collections).toBeNull();
       expect(result.lowStock).toBeNull();
@@ -594,9 +611,339 @@ describe('DashboardService', () => {
     it('el período resuelto siempre está presente, incluso cuando las 5 secciones son null', async () => {
       const result = await service.getDashboard(
         { from: '2026-08-01', to: '2026-08-31' },
-        'NOT_A_ROLE' as RoleName,
+        asRole('NOT_A_ROLE' as RoleName),
       );
       expect(result.period).toEqual({ from: '2026-08-01', to: '2026-08-31' });
+    });
+  });
+
+  // ==========================================================================
+  // P6-E2 — permisos por vendedor
+  // ==========================================================================
+  describe('permisos por vendedor (P6-E2)', () => {
+    const OWN_SELLER_ID = 'seller-own';
+
+    describe('sales', () => {
+      it('1/2/20. SELLER: Sale.sellerId se agrega al WHERE del propio aggregate, antes de calcularlo (nunca un total global filtrado después)', async () => {
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.sale.aggregate.mock.calls[0][0] as {
+          where: { status: string; sellerId?: string };
+        };
+        expect(args.where.sellerId).toBe(OWN_SELLER_ID);
+      });
+
+      it('13/14. ADMIN y MANAGEMENT: sin condición de propiedad en sales', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.sale.aggregate.mockClear();
+          prisma.sale.aggregate.mockResolvedValue(emptySaleAgg());
+
+          await service.getDashboard(
+            { from: '2026-08-01', to: '2026-08-31' },
+            asRole(role, OWN_SELLER_ID),
+          );
+
+          const args = prisma.sale.aggregate.mock.calls[0][0] as {
+            where: { sellerId?: string };
+          };
+          expect(args.where.sellerId).toBeUndefined();
+        }
+      });
+
+      it('12. SELLER sin ventas propias en el período: count 0, total "0.00" (contrato vigente, nunca cifras ajenas)', async () => {
+        prisma.sale.aggregate.mockResolvedValue(emptySaleAgg());
+        const result = await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(result.sales).toEqual({ count: 0, total: '0.00' });
+      });
+    });
+
+    describe('collections', () => {
+      it('3/4/20. SELLER: el alcance es Payment -> Sale.sellerId (nunca Payment.createdByUserId), agregado ANTES del aggregate', async () => {
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.aggregate.mock.calls[0][0] as {
+          where: { sale?: { sellerId: string }; createdByUserId?: unknown };
+        };
+        expect(args.where.sale).toEqual({ sellerId: OWN_SELLER_ID });
+        expect(args.where.createdByUserId).toBeUndefined();
+        expect(JSON.stringify(args.where)).not.toContain('createdByUserId');
+      });
+
+      it('5. un cobro histórico del propio SELLER sobre una venta ajena no se incluye: la condición es sobre la VENTA, no sobre quien cobró', async () => {
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const args = prisma.payment.aggregate.mock.calls[0][0] as {
+          where: { sale?: { sellerId: string } };
+        };
+        // La restricción exige sale.sellerId = OWN_SELLER_ID sin importar
+        // quién registró el pago: un Payment con createdByUserId distinto
+        // (p. ej. un ADMIN) satisface igual esta condición mientras la
+        // venta sea del SELLER; uno sobre una venta ajena, nunca.
+        expect(args.where.sale).toEqual({ sellerId: OWN_SELLER_ID });
+      });
+
+      it('13/14. ADMIN y MANAGEMENT: sin condición de venta en collections', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.payment.aggregate.mockClear();
+          prisma.payment.aggregate.mockResolvedValue(emptyPaymentAgg());
+
+          await service.getDashboard(
+            { from: '2026-08-01', to: '2026-08-31' },
+            asRole(role, OWN_SELLER_ID),
+          );
+
+          const args = prisma.payment.aggregate.mock.calls[0][0] as {
+            where: { sale?: unknown };
+          };
+          expect(args.where.sale).toBeUndefined();
+        }
+      });
+
+      it('12. SELLER sin cobros propios en el período: count 0, total "0.00"', async () => {
+        prisma.payment.aggregate.mockResolvedValue(emptyPaymentAgg());
+        const result = await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(result.collections).toEqual({ count: 0, total: '0.00' });
+      });
+    });
+
+    describe('quotes', () => {
+      it('6/7/20. SELLER: Quote.sellerId se agrega a baseWhere UNA sola vez — llega a los 6 conteos (total + 5 estados), nunca solo al total', async () => {
+        prisma.quote.count.mockResolvedValue(0);
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        expect(prisma.quote.count).toHaveBeenCalledTimes(6);
+        const calls = prisma.quote.count.mock.calls as Array<
+          [{ where: { sellerId?: string; AND?: unknown[] } }]
+        >;
+        // Llamada 0: total, condición plana (sellerId junto a issueDate).
+        expect(calls[0][0].where.sellerId).toBe(OWN_SELLER_ID);
+        // Llamadas 1-5 (por estado): sellerId viaje dentro del AND junto
+        // con issueDate (mismo baseWhere reutilizado), no se pierde.
+        for (let i = 1; i <= 5; i++) {
+          const where = calls[i][0].where;
+          expect(JSON.stringify(where)).toContain(OWN_SELLER_ID);
+        }
+      });
+
+      it('13/14. ADMIN y MANAGEMENT: sin condición de propiedad en quotes', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.quote.count.mockClear();
+          prisma.quote.count.mockResolvedValue(0);
+
+          await service.getDashboard(
+            { from: '2026-08-01', to: '2026-08-31' },
+            asRole(role, OWN_SELLER_ID),
+          );
+
+          const firstCall = prisma.quote.count.mock.calls[0][0] as {
+            where: { sellerId?: string };
+          };
+          expect(firstCall.where.sellerId).toBeUndefined();
+        }
+      });
+
+      it('12. SELLER sin cotizaciones propias en el período: total 0, los 5 estados en 0 (nunca cifras ajenas)', async () => {
+        prisma.quote.count.mockResolvedValue(0);
+        const result = await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(result.quotes?.total).toBe(0);
+        expect(result.quotes?.byStatus.every((row) => row.count === 0)).toBe(
+          true,
+        );
+      });
+    });
+
+    describe('receivables', () => {
+      it('8/9/20. SELLER: Sale.sellerId se agrega al MISMO where que alimenta aggregate() y findMany()', async () => {
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        const aggCalls = prisma.sale.aggregate.mock.calls as Array<
+          [{ where: Record<string, unknown> }]
+        >;
+        const receivableAggArgs = aggCalls.find(
+          ([args]) => args.where.balanceDue !== undefined,
+        )![0];
+        expect(receivableAggArgs.where.sellerId).toBe(OWN_SELLER_ID);
+
+        const findManyArgs = prisma.sale.findMany.mock.calls[0][0] as {
+          where: Record<string, unknown>;
+        };
+        expect(findManyArgs.where.sellerId).toBe(OWN_SELLER_ID);
+        expect(findManyArgs.where.balanceDue).toEqual({ gt: 0 });
+      });
+
+      it('10/11. el top 5 se construye con el where YA restringido (antes de take:5): nunca nombres ni saldos de ventas ajenas', async () => {
+        prisma.sale.findMany.mockResolvedValue([
+          {
+            id: 'sale-own',
+            number: 'NV-000099',
+            customerId: 'cust-own',
+            customerName: 'Cliente Propio',
+            confirmedAt: new Date('2026-08-10T15:00:00.000Z'),
+            total: new Prisma.Decimal('500'),
+            paidAmount: new Prisma.Decimal('200'),
+            balanceDue: new Prisma.Decimal('300'),
+          },
+        ]);
+        prisma.sale.aggregate.mockImplementation(
+          (args: { where: { balanceDue?: unknown } }) =>
+            Promise.resolve(
+              args.where.balanceDue !== undefined
+                ? {
+                    _count: { _all: 1 },
+                    _sum: { balanceDue: new Prisma.Decimal('300') },
+                  }
+                : emptySaleAgg(),
+            ),
+        );
+
+        const result = await service.getDashboard(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+
+        expect(result.receivables?.oldest).toHaveLength(1);
+        expect(result.receivables?.oldest[0].customerName).toBe(
+          'Cliente Propio',
+        );
+        const findManyArgs = prisma.sale.findMany.mock.calls[0][0] as {
+          where: { sellerId?: string };
+          take: number;
+        };
+        // La restricción por propietario está en el MISMO where que ya
+        // lleva `take: 5` — no es un post-filtrado tras recibir más filas.
+        expect(findManyArgs.where.sellerId).toBe(OWN_SELLER_ID);
+        expect(findManyArgs.take).toBe(5);
+      });
+
+      it('13/14. ADMIN y MANAGEMENT: sin condición de propiedad en receivables', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.sale.aggregate.mockClear();
+          prisma.sale.findMany.mockClear();
+          prisma.sale.aggregate.mockResolvedValue(emptySaleAgg());
+          prisma.sale.findMany.mockResolvedValue([]);
+
+          await service.getDashboard({}, asRole(role, OWN_SELLER_ID));
+
+          const findManyArgs = prisma.sale.findMany.mock.calls[0][0] as {
+            where: { sellerId?: string };
+          };
+          expect(findManyArgs.where.sellerId).toBeUndefined();
+        }
+      });
+
+      it('12. SELLER sin cuentas por cobrar propias: count 0, totalBalance "0.00", oldest []', async () => {
+        prisma.sale.aggregate.mockResolvedValue(emptySaleAgg());
+        prisma.sale.findMany.mockResolvedValue([]);
+        const result = await service.getDashboard(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(result.receivables).toEqual({
+          count: 0,
+          totalBalance: '0.00',
+          oldest: [],
+        });
+      });
+    });
+
+    describe('lowStock y matriz general', () => {
+      it('16. SELLER sigue sin lowStock (ya oculto por rol, sin relación con la propiedad); el resto no-null', async () => {
+        const result = await service.getDashboard(
+          {},
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(result.lowStock).toBeNull();
+        expect(result.sales).not.toBeNull();
+        expect(result.collections).not.toBeNull();
+        expect(result.quotes).not.toBeNull();
+        expect(result.receivables).not.toBeNull();
+      });
+
+      it('15. WAREHOUSE conserva únicamente lowStock; cero consultas de sales/collections/quotes/receivables, igual que antes de P6-E2', async () => {
+        const result = await service.getDashboard(
+          {},
+          asRole(RoleName.WAREHOUSE, OWN_SELLER_ID),
+        );
+        expect(result.lowStock).not.toBeNull();
+        expect(result.sales).toBeNull();
+        expect(result.collections).toBeNull();
+        expect(result.quotes).toBeNull();
+        expect(result.receivables).toBeNull();
+        expect(prisma.sale.aggregate).not.toHaveBeenCalled();
+        expect(prisma.payment.aggregate).not.toHaveBeenCalled();
+        expect(prisma.quote.count).not.toHaveBeenCalled();
+        expect(prisma.sale.findMany).not.toHaveBeenCalled();
+      });
+
+      it('17. cambio de rol activo: mismo id, distinto rol -> distinto alcance (SELLER acotado, luego ADMIN global)', async () => {
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        const sellerArgs = prisma.sale.aggregate.mock.calls[0][0] as {
+          where: { sellerId?: string };
+        };
+        expect(sellerArgs.where.sellerId).toBe(OWN_SELLER_ID);
+
+        prisma.sale.aggregate.mockClear();
+        prisma.sale.aggregate.mockResolvedValue(emptySaleAgg());
+
+        await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.ADMIN, OWN_SELLER_ID),
+        );
+        const adminArgs = prisma.sale.aggregate.mock.calls[0][0] as {
+          where: { sellerId?: string };
+        };
+        expect(adminArgs.where.sellerId).toBeUndefined();
+      });
+
+      it('19. la forma JSON de la respuesta no cambia (mismas 5 claves, mismos tipos)', async () => {
+        const result = await service.getDashboard(
+          { from: '2026-08-01', to: '2026-08-31' },
+          asRole(RoleName.SELLER, OWN_SELLER_ID),
+        );
+        expect(Object.keys(result).sort()).toEqual(
+          [
+            'collections',
+            'lowStock',
+            'period',
+            'quotes',
+            'receivables',
+            'sales',
+          ].sort(),
+        );
+        expect(result.sales).toEqual(
+          expect.objectContaining({
+            count: expect.any(Number) as number,
+            total: expect.any(String) as string,
+          }),
+        );
+      });
     });
   });
 });

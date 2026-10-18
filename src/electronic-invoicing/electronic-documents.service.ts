@@ -24,6 +24,11 @@ import {
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import {
+  assertCanOperateSale,
+  SaleAccessRequester,
+  saleReadScopeWhere,
+} from '../sales/sale-access.policy';
+import {
   BOLETA_GENERIC_CUSTOMER_MAX_TOTAL,
   RUC_PATTERN,
 } from './constants/electronic-invoicing.constants';
@@ -56,6 +61,12 @@ import {
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+
+/**
+ * Mismo mensaje para "no existe" y "pertenece a otra venta" (P6-C1): un
+ * SELLER nunca distingue ambos casos por el cuerpo de la respuesta 404.
+ */
+const ELECTRONIC_DOCUMENT_NOT_FOUND_MESSAGE = 'El documento fiscal no existe';
 
 /**
  * Motor de emisión fiscal interna (Fase 11, Bloque C). Sin controller, sin
@@ -91,6 +102,12 @@ export class ElectronicDocumentsService {
    * Emite un documento fiscal nuevo para una venta y lo envía al proveedor.
    * La serie es SIEMPRE explícita (§5): nunca se elige automáticamente la
    * primera FiscalSeries activa del tipo de documento solicitado.
+   *
+   * P6-C2: la propiedad de la venta (Sale.sellerId) se comprueba dentro de
+   * `createFiscalDocument()`, sobre la fila REAL ya cargada por
+   * `loadSaleSnapshot()` — nunca por un sellerId enviado por el cliente —
+   * antes de cualquier otra validación comercial o efecto persistente.
+   * SELLER solo emite sobre sus propias ventas; ADMIN sin restricción.
    */
   async issue(
     command: IssueElectronicDocumentCommand,
@@ -128,12 +145,17 @@ export class ElectronicDocumentsService {
 
   /**
    * Listado paginado (§10/§11/§24). NUNCA carga ítems (select dedicado, sin
-   * relación anidada). SELLER tiene acceso total, mismo criterio ya
-   * descubierto y preservado de SalesController/SalesService (§6 del
-   * kickoff): esta capa NO aplica ningún filtro de propiedad por vendedor.
+   * relación anidada). P6-C1: la propiedad se decide por la venta del
+   * documento (ElectronicDocument -> Sale.sellerId), reutilizando la misma
+   * policy de Ventas (`saleReadScopeWhere`) que ya aplican Payments/
+   * AccountsReceivable sobre su propia relación con Sale. SELLER ve solo
+   * los comprobantes de sus propias ventas; ADMIN/MANAGEMENT conservan
+   * lectura global. El alcance se combina con AND con los filtros
+   * solicitados, y el MISMO where alimenta findMany y count.
    */
   async list(
     query: ListElectronicDocumentsQuery,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<SafeElectronicDocumentListItem>> {
     const page =
       query.page !== undefined && query.page > 0
@@ -146,6 +168,14 @@ export class ElectronicDocumentsService {
       MAX_LIMIT,
     );
     const skip = (page - 1) * limit;
+
+    const saleScope = saleReadScopeWhere(requester);
+    if (saleScope === null) {
+      // Rol sin ningún acceso de lectura (WAREHOUSE u otro no contemplado):
+      // página vacía sin tocar Prisma. Defensa en profundidad; RolesGuard ya
+      // rechaza esto con 403 en la capa HTTP.
+      return { data: [], page, limit, total: 0, totalPages: 0 };
+    }
 
     this.assertValidDateRangeQuery(query);
 
@@ -178,8 +208,15 @@ export class ElectronicDocumentsService {
       });
     }
 
-    const where: Prisma.ElectronicDocumentWhereInput =
+    const requested: Prisma.ElectronicDocumentWhereInput =
       conditions.length > 0 ? { AND: conditions } : {};
+    // Sin restricción de propiedad ({}): filtros tal cual. Con alcance
+    // (SELLER): AND por la venta asociada; ningún filtro (incluido saleId)
+    // lo amplía — una venta ajena produce una condición insatisfacible.
+    const where: Prisma.ElectronicDocumentWhereInput =
+      Object.keys(saleScope).length === 0
+        ? requested
+        : { AND: [{ sale: saleScope }, requested] };
 
     const [rows, total] = await Promise.all([
       this.prisma.electronicDocument.findMany({
@@ -203,8 +240,12 @@ export class ElectronicDocumentsService {
 
   /**
    * Detalle (§13/§15/§24): un único select anidado para los ítems, sin
-   * N+1. Mismo criterio de visibilidad que list(): sin restricción de
-   * propiedad por vendedor (SELLER ya tiene acceso total en Sales).
+   * N+1. SIN restricción de propiedad — uso exclusivamente INTERNO desde
+   * el propio motor de emisión/reintento (`issue()`/`retrySubmission()`,
+   * vía los controllers que ya resolvieron su propia autorización de
+   * escritura antes de llamar aquí). Los endpoints HTTP de LECTURA
+   * (GET /electronic-documents/:id, GET /electronic-documents/:id/print)
+   * usan `findDetailForRequester()` (P6-C1), nunca este método.
    */
   async findDetail(id: string): Promise<SafeElectronicDocument> {
     const row = await this.prisma.electronicDocument.findUnique({
@@ -212,7 +253,35 @@ export class ElectronicDocumentsService {
       select: ELECTRONIC_DOCUMENT_DETAIL_SELECT,
     });
     if (row === null) {
-      throw new NotFoundException('El documento fiscal no existe');
+      throw new NotFoundException(ELECTRONIC_DOCUMENT_NOT_FOUND_MESSAGE);
+    }
+    return toSafeElectronicDocument(row);
+  }
+
+  /**
+   * Detalle con alcance por propiedad (P6-C1): la venta del documento
+   * (ElectronicDocument -> Sale.sellerId) decide el acceso, reutilizando
+   * `saleReadScopeWhere` de la policy de Ventas. SELLER recibe el MISMO 404
+   * para un documento ajeno y uno inexistente (nunca revela su existencia).
+   * ADMIN/MANAGEMENT conservan lectura global. Usado por
+   * GET /electronic-documents/:id y GET /electronic-documents/:id/print.
+   */
+  async findDetailForRequester(
+    id: string,
+    requester: SaleAccessRequester,
+  ): Promise<SafeElectronicDocument> {
+    const saleScope = saleReadScopeWhere(requester);
+    if (saleScope === null) {
+      throw new NotFoundException(ELECTRONIC_DOCUMENT_NOT_FOUND_MESSAGE);
+    }
+    const where: Prisma.ElectronicDocumentWhereUniqueInput =
+      Object.keys(saleScope).length === 0 ? { id } : { id, sale: saleScope };
+    const row = await this.prisma.electronicDocument.findUnique({
+      where,
+      select: ELECTRONIC_DOCUMENT_DETAIL_SELECT,
+    });
+    if (row === null) {
+      throw new NotFoundException(ELECTRONIC_DOCUMENT_NOT_FOUND_MESSAGE);
     }
     return toSafeElectronicDocument(row);
   }
@@ -275,6 +344,19 @@ export class ElectronicDocumentsService {
     command: IssueElectronicDocumentCommand,
   ): Promise<string> {
     const sale = await this.loadSaleSnapshot(tx, command.saleId);
+
+    // P6-C2: la propiedad se comprueba INMEDIATAMENTE después de cargar la
+    // venta real, antes de CUALQUIER otra validación comercial (anulada,
+    // comprobante primario existente, emisor, cliente, serie) o efecto
+    // persistente (numeración, creación del documento, auditoría). Una
+    // venta ajena responde el MISMO 404 ("La venta no existe") que una
+    // inexistente — ya lanzado arriba por loadSaleSnapshot() — sin revelar
+    // si está anulada, ya facturada o en qué estado se encuentra.
+    assertCanOperateSale(
+      { id: command.actorUserId, role: command.actorRole },
+      sale.sellerId,
+      'La venta no existe',
+    );
 
     // §6: ni PAID, ni saldo cero. Solo ACTIVE/CANCELLED importan aquí.
     if (sale.status === SaleStatus.CANCELLED) {
@@ -402,6 +484,7 @@ export class ElectronicDocumentsService {
         id: true,
         number: true,
         status: true,
+        sellerId: true,
         customerIsGeneric: true,
         customerDocumentType: true,
         customerDocumentNumber: true,

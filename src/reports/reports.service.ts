@@ -9,10 +9,15 @@ import {
 } from '../common/date/business-date';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
+import { applyQuoteReadScope } from '../quotes/quote-access.policy';
 import {
   buildEffectiveQuoteStatusCondition,
   effectiveStatus,
 } from '../quotes/quote-calculator';
+import {
+  SaleAccessRequester,
+  saleReadScopeWhere,
+} from '../sales/sale-access.policy';
 import { PaymentsByMethodQueryDto } from './dto/payments-by-method-query.dto';
 import { QuotesByStatusQueryDto } from './dto/quotes-by-status-query.dto';
 import { SalesByCustomerQueryDto } from './dto/sales-by-customer-query.dto';
@@ -35,11 +40,12 @@ const MAX_LIMIT = 100;
  * controller ya rechaza con 403 vía `@Roles()`/RolesGuard). A diferencia de
  * Contabilidad básica (solo ADMIN/MANAGEMENT), SELLER sí tiene acceso a los
  * 5 reportes de esta fase — son reportes operativos de venta/cobranza, no
- * el libro contable interno — pero sin restricción a sus propias ventas
- * (misma visibilidad de toda la empresa que ya tienen /sales, /quotes,
- * /payments). WAREHOUSE no tiene ningún acceso: sus reportes son
- * exclusivamente de inventario (R5/R6/R7, ya cubiertos fuera de este
- * módulo). `default` también falla cerrado.
+ * el libro contable interno. P6-E1: SELLER ya NO tiene la visibilidad
+ * completa de toda la empresa — cada método aplica el alcance por
+ * propiedad (`Sale.sellerId`/`Quote.sellerId`) sobre este mismo rol, igual
+ * que `/sales`, `/quotes` y `/payments` desde P1/P6-B1. WAREHOUSE no tiene
+ * ningún acceso: sus reportes son exclusivamente de inventario (R5/R6/R7,
+ * ya cubiertos fuera de este módulo). `default` también falla cerrado.
  */
 function hasReportReadAccess(role: RoleName): boolean {
   switch (role) {
@@ -146,16 +152,22 @@ export class ReportsService {
    * Product/Category ACTUALES: un producto real siempre produce una sola
    * fila agrupada. `categoryId` filtra por Product.categoryId actual (no
    * por la categoría histórica del snapshot de SaleItem).
+   *
+   * P6-E1: para SELLER se agrega `s.seller_id = requester.id` como
+   * condición OBLIGATORIA del WHERE (antes de GROUP BY/SUM, nunca después):
+   * solo sus propias ventas contribuyen a quantitySold/totalSold. ADMIN/
+   * MANAGEMENT conservan la agregación global sin ninguna condición
+   * adicional.
    */
   async salesByProduct(
     query: SalesByProductQueryDto,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<SalesByProductRow>> {
     const page = normalizePage(query.page);
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
-    if (!hasReportReadAccess(requesterRole)) {
+    if (!hasReportReadAccess(requester.role)) {
       return emptyPage(page, limit);
     }
     this.assertValidDateRangeQuery(query.from, query.to);
@@ -163,6 +175,7 @@ export class ReportsService {
     const conditions: Prisma.Sql[] = [
       Prisma.sql`s.status = 'ACTIVE'::"SaleStatus"`,
     ];
+    this.pushSellerScopeCondition(conditions, requester);
     if (query.from !== undefined) {
       conditions.push(
         Prisma.sql`s.confirmed_at >= ${startOfBusinessDayUtc(query.from)}`,
@@ -254,16 +267,22 @@ export class ReportsService {
    * Hechos desde Sale (paidAmount/balanceDue operativos), nunca desde
    * Payment ni AccountingEntry. Dimensión de Customer ACTUAL: Público
    * general participa como un grupo normal, sin fila pseudo-cliente.
+   *
+   * P6-E1: para SELLER se agrega `s.seller_id = requester.id` como
+   * condición OBLIGATORIA del WHERE, antes de GROUP BY/SUM: un cliente sin
+   * ventas propias del vendedor simplemente no genera fila (nunca se
+   * calcula su agregado y luego se descarta). ADMIN/MANAGEMENT conservan
+   * la agregación global.
    */
   async salesByCustomer(
     query: SalesByCustomerQueryDto,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<SalesByCustomerRow>> {
     const page = normalizePage(query.page);
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
-    if (!hasReportReadAccess(requesterRole)) {
+    if (!hasReportReadAccess(requester.role)) {
       return emptyPage(page, limit);
     }
     this.assertValidDateRangeQuery(query.from, query.to);
@@ -271,6 +290,7 @@ export class ReportsService {
     const conditions: Prisma.Sql[] = [
       Prisma.sql`s.status = 'ACTIVE'::"SaleStatus"`,
     ];
+    this.pushSellerScopeCondition(conditions, requester);
     if (query.from !== undefined) {
       conditions.push(
         Prisma.sql`s.confirmed_at >= ${startOfBusinessDayUtc(query.from)}`,
@@ -353,16 +373,31 @@ export class ReportsService {
    * si la venta resultante sigue activa). Ninguno de los dos se usa para
    * filtrar los grupos: un vendedor con 0 cobros o 0 conversiones sigue
    * apareciendo con "0.00"/0.
+   *
+   * P6-E1: para SELLER, `pushSellerScopeCondition` agrega SIEMPRE
+   * `s.seller_id = requester.id` a `cohortConditions` — nunca en lugar del
+   * `query.sellerId` opcional, sino ADEMÁS de él (ambos se combinan con
+   * AND vía `Prisma.join`). Consecuencia exacta y deseada: sin
+   * `query.sellerId`, el cohorte queda acotado a sus propias ventas; con
+   * `query.sellerId = requester.id`, el resultado es el mismo (condición
+   * redundante); con un `query.sellerId` ajeno, las dos condiciones son
+   * contradictorias para cualquier fila real y el cohorte queda VACÍO
+   * (nunca se sustituye un id por otro). `eligible_sales` es la ÚNICA
+   * fuente de la que se derivan `sale_agg` y `payment_agg`: al acotar la
+   * CTE base, ambas quedan acotadas automáticamente, sin necesidad de
+   * tocar sus propios JOIN. `convertedQuotes` añade su propia condición
+   * `q.seller_id` (ver más abajo) como defensa en profundidad, aunque
+   * `pageSellerIds` ya llega acotado por venir de `rows` (ya restringido).
    */
   async salesBySeller(
     query: SalesBySellerQueryDto,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<SalesBySellerRow>> {
     const page = normalizePage(query.page);
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
-    if (!hasReportReadAccess(requesterRole)) {
+    if (!hasReportReadAccess(requester.role)) {
       return emptyPage(page, limit);
     }
     this.assertValidDateRangeQuery(query.from, query.to);
@@ -370,6 +405,7 @@ export class ReportsService {
     const cohortConditions: Prisma.Sql[] = [
       Prisma.sql`s.status = 'ACTIVE'::"SaleStatus"`,
     ];
+    this.pushSellerScopeCondition(cohortConditions, requester);
     if (query.from !== undefined) {
       cohortConditions.push(
         Prisma.sql`s.confirmed_at >= ${startOfBusinessDayUtc(query.from)}`,
@@ -436,6 +472,14 @@ export class ReportsService {
         Prisma.sql`q.status = 'CONVERTED'::"QuoteStatus"`,
         Prisma.sql`q.seller_id IN (${Prisma.join(pageSellerIds.map((id) => Prisma.sql`${id}::uuid`))})`,
       ];
+      // P6-E1, defensa en profundidad: `pageSellerIds` ya viene acotado
+      // (deriva de `rows`, ya restringido por `cohortWhereClause`), pero el
+      // alcance comercial correcto de un indicador derivado de Quote es
+      // SIEMPRE Quote.sellerId — se agrega explícitamente, nunca se infiere
+      // solo del IN anterior.
+      if (requester.role === RoleName.SELLER) {
+        quoteConditions.push(Prisma.sql`q.seller_id = ${requester.id}::uuid`);
+      }
       if (query.from !== undefined) {
         quoteConditions.push(
           Prisma.sql`q.issue_date >= ${toPrismaDate(query.from)}`,
@@ -485,16 +529,23 @@ export class ReportsService {
    * Quote.issueDate (@db.Date), límites inclusivos vía toPrismaDate, mismo
    * criterio que QuotesService. resultingSale permanece visible aunque la
    * venta generada haya sido anulada después.
+   *
+   * P6-E1: reutiliza `applyQuoteReadScope` de `quote-access.policy.ts` (la
+   * misma policy ya aplicada en QuotesService.list() desde P6-B1) — SELLER
+   * solo ve cotizaciones con `Quote.sellerId = requester.id`; el filtro
+   * `sellerId` opcional se combina con AND, nunca sustituye el alcance:
+   * uno ajeno produce un listado vacío. ADMIN/MANAGEMENT conservan lectura
+   * global (`applyQuoteReadScope` devuelve los `conditions` tal cual).
    */
   async quotesByStatus(
     query: QuotesByStatusQueryDto,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<QuotesByStatusRow>> {
     const page = normalizePage(query.page);
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
-    if (!hasReportReadAccess(requesterRole)) {
+    if (!hasReportReadAccess(requester.role)) {
       return emptyPage(page, limit);
     }
     this.assertValidDateRangeQuery(query.from, query.to);
@@ -527,8 +578,12 @@ export class ReportsService {
     if (query.customerId !== undefined) {
       conditions.push({ customerId: query.customerId });
     }
-    const where: Prisma.QuoteWhereInput =
+    const requested: Prisma.QuoteWhereInput =
       conditions.length > 0 ? { AND: conditions } : {};
+    const where = applyQuoteReadScope(requester, requested);
+    if (where === null) {
+      return emptyPage(page, limit);
+    }
 
     const [rows, total] = await Promise.all([
       this.prisma.quote.findMany({
@@ -579,16 +634,28 @@ export class ReportsService {
    * no de este listado histórico). `from`/`to` filtran Payment.paidAt
    * (instante real). saleNumber/customerName vienen del snapshot de la
    * Sale asociada; `reference` se expone tal cual.
+   *
+   * P6-E1: el alcance de SELLER se decide por la venta del cobro (Payment
+   * -> Sale.sellerId), NUNCA por Payment.createdByUserId (quien registró
+   * el pago) — mismo criterio exacto que PaymentsService.list() (P5) y
+   * ElectronicDocumentsService.list() (P6-C1). `createdByUserId` sigue
+   * siendo un filtro opcional adicional, combinado con AND: un cobro de un
+   * ADMIN sobre una venta del SELLER aparece; uno del propio SELLER sobre
+   * una venta ajena no.
    */
   async paymentsByMethod(
     query: PaymentsByMethodQueryDto,
-    requesterRole: RoleName,
+    requester: SaleAccessRequester,
   ): Promise<PaginatedResult<PaymentsByMethodRow>> {
     const page = normalizePage(query.page);
     const limit = normalizeLimit(query.limit);
     const skip = (page - 1) * limit;
 
-    if (!hasReportReadAccess(requesterRole)) {
+    if (!hasReportReadAccess(requester.role)) {
+      return emptyPage(page, limit);
+    }
+    const saleScope = saleReadScopeWhere(requester);
+    if (saleScope === null) {
       return emptyPage(page, limit);
     }
     this.assertValidDateRangeQuery(query.from, query.to);
@@ -615,8 +682,15 @@ export class ReportsService {
     if (query.createdByUserId !== undefined) {
       conditions.push({ createdByUserId: query.createdByUserId });
     }
-    const where: Prisma.PaymentWhereInput =
+    const requested: Prisma.PaymentWhereInput =
       conditions.length > 0 ? { AND: conditions } : {};
+    // Sin restricción de propiedad ({}): filtros tal cual. Con alcance
+    // (SELLER): AND por la venta asociada; ningún filtro (incluido
+    // createdByUserId) lo amplía.
+    const where: Prisma.PaymentWhereInput =
+      Object.keys(saleScope).length === 0
+        ? requested
+        : { AND: [{ sale: saleScope }, requested] };
 
     const [rows, total] = await Promise.all([
       this.prisma.payment.findMany({
@@ -665,6 +739,29 @@ export class ReportsService {
       limit,
       total,
     );
+  }
+
+  /**
+   * P6-E1: alcance obligatorio por propiedad para las consultas SQL raw
+   * (R2/R3/R4), que en las tres alias la tabla `sales` como `s`. Solo
+   * SELLER recibe una condición adicional — ADMIN/MANAGEMENT no se
+   * modifican (`hasReportReadAccess` ya cerró el acceso a WAREHOUSE antes
+   * de llegar aquí). Se EMPUJA la condición (nunca reemplaza ni elimina
+   * ninguna otra): combinada por `Prisma.join(..., ' AND ')` con el resto
+   * de `conditions`, de modo que un filtro adicional ajeno (p. ej. R4 con
+   * `sellerId` de otro vendedor) produce una condición contradictoria — y
+   * por tanto 0 filas — en vez de ampliar o sustituir el alcance. El valor
+   * interpolado es siempre `requester.id` (parametrizado, nunca
+   * concatenado): identidad real del usuario autenticado, jamás un dato
+   * del body/query.
+   */
+  private pushSellerScopeCondition(
+    conditions: Prisma.Sql[],
+    requester: SaleAccessRequester,
+  ): void {
+    if (requester.role === RoleName.SELLER) {
+      conditions.push(Prisma.sql`s.seller_id = ${requester.id}::uuid`);
+    }
   }
 
   /**

@@ -13,7 +13,6 @@ import {
   Prisma,
   ProductStatus,
   QuoteStatus,
-  RoleName,
   UnitStatus,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -48,6 +47,25 @@ import {
   parseDiscountAmount,
   parseQuantity,
 } from './quote-calculator';
+import {
+  applyQuoteReadScope,
+  assertCanOperateQuote,
+  assertCanReadQuote,
+  QUOTE_NOT_FOUND_MESSAGE,
+  QuoteAccessRequester,
+  quoteReadScopeWhere,
+} from './quote-access.policy';
+
+/**
+ * 404 único de las mutaciones (editar/aceptar/rechazar): cotización
+ * inexistente o ajena. Es el mensaje histórico de lockQuote.
+ */
+const QUOTE_MUTATION_NOT_FOUND_MESSAGE = 'La cotización no existe';
+
+/** Acción sobre una cotización existente con el rol activo del solicitante (P6-B2). */
+type OwnedQuoteActionInput = QuoteActionInput & {
+  actorRole: QuoteAccessRequester['role'];
+};
 import { CreateQuoteInput } from './types/create-quote.input';
 import { QuoteActionInput } from './types/quote-action.input';
 import { ListQuotesQuery } from './types/list-quotes.query';
@@ -82,6 +100,8 @@ interface LockedQuoteRow {
   id: string;
   number: string;
   status: QuoteStatus;
+  // P6-B2: propietario, leído bajo el mismo bloqueo para decidir la propiedad.
+  sellerId: string;
   issueDate: Date;
   expirationDate: Date;
   subtotal: Prisma.Decimal;
@@ -90,24 +110,6 @@ interface LockedQuoteRow {
   total: Prisma.Decimal;
   // R2-B3: semántica de precios con la que se calcularon los montos.
   pricesIncludeTax: boolean;
-}
-
-/**
- * Roles con acceso de lectura a Cotizaciones (defensa en profundidad; el
- * Bloque C decide el acceso HTTP real vía guards). WAREHOUSE no tiene
- * ningún acceso, igual que en Customers: `default` también falla cerrado
- * para que un rol futuro/desconocido nunca herede acceso por omisión.
- */
-function hasQuoteReadAccess(role: RoleName): boolean {
-  switch (role) {
-    case RoleName.ADMIN:
-    case RoleName.SELLER:
-    case RoleName.MANAGEMENT:
-      return true;
-    case RoleName.WAREHOUSE:
-    default:
-      return false;
-  }
 }
 
 function normalizeNotes(notes: string | null | undefined): string | null {
@@ -266,7 +268,16 @@ export class QuotesService {
     });
   }
 
-  async update(input: UpdateQuoteInput): Promise<SafeQuote> {
+  /**
+   * Permisos por vendedor (P6-B2): solo el propietario (Quote.sellerId) o
+   * ADMIN edita. La propiedad se comprueba sobre la fila bloqueada ANTES de
+   * cualquier validación de estado/precio (una cotización ajena vencida,
+   * aceptada, convertida o con precios históricos responde 404, nunca 409)
+   * y antes de cualquier escritura; mismo 404 que una inexistente.
+   */
+  async update(
+    input: UpdateQuoteInput & { actorRole: QuoteAccessRequester['role'] },
+  ): Promise<SafeQuote> {
     const hasHeaderChange =
       input.expirationDate !== undefined ||
       input.discountAmount !== undefined ||
@@ -313,6 +324,11 @@ export class QuotesService {
 
     return this.prisma.$transaction(async (tx) => {
       const existing = await this.lockQuote(tx, input.quoteId);
+      assertCanOperateQuote(
+        { id: input.actorUserId, role: input.actorRole },
+        existing.sellerId,
+        QUOTE_MUTATION_NOT_FOUND_MESSAGE,
+      );
       const effective = effectiveStatus(
         existing.status,
         existing.expirationDate,
@@ -389,7 +405,7 @@ export class QuotesService {
     });
   }
 
-  async accept(input: QuoteActionInput): Promise<SafeQuote> {
+  async accept(input: OwnedQuoteActionInput): Promise<SafeQuote> {
     return this.transitionStatus(
       input,
       QuoteStatus.ACCEPTED,
@@ -398,7 +414,7 @@ export class QuotesService {
     );
   }
 
-  async reject(input: QuoteActionInput): Promise<SafeQuote> {
+  async reject(input: OwnedQuoteActionInput): Promise<SafeQuote> {
     return this.transitionStatus(
       input,
       QuoteStatus.REJECTED,
@@ -407,9 +423,14 @@ export class QuotesService {
     );
   }
 
+  /**
+   * Permisos por vendedor (P6-B1): alcance de propiedad (Quote.sellerId)
+   * AND filtros comerciales; el MISMO where alimenta findMany y count.
+   * SELLER -> solo sus cotizaciones; ADMIN/MANAGEMENT -> todas.
+   */
   async list(
     query: ListQuotesQuery,
-    requesterRole: RoleName,
+    requester: QuoteAccessRequester,
   ): Promise<PaginatedResult<SafeQuoteListItem>> {
     const page =
       query.page !== undefined && query.page > 0
@@ -423,7 +444,7 @@ export class QuotesService {
     );
     const skip = (page - 1) * limit;
 
-    if (!hasQuoteReadAccess(requesterRole)) {
+    if (quoteReadScopeWhere(requester) === null) {
       // Rol sin ningún acceso a Quote (WAREHOUSE u otro no contemplado):
       // página vacía sin tocar Prisma. Defensa en profundidad; el Bloque C
       // igualmente rechaza esto con 403 en la capa HTTP.
@@ -476,8 +497,14 @@ export class QuotesService {
       });
     }
 
-    const where: Prisma.QuoteWhereInput =
+    const requested: Prisma.QuoteWhereInput =
       conditions.length > 0 ? { AND: conditions } : {};
+    // Alcance obligatorio AND filtros: un sellerId ajeno, su omisión o el
+    // OR de búsqueda nunca amplían lo que un SELLER puede ver.
+    const where = applyQuoteReadScope(requester, requested);
+    if (where === null) {
+      return { data: [], page, limit, total: 0, totalPages: 0 };
+    }
 
     const [rows, total] = await Promise.all([
       this.prisma.quote.findMany({
@@ -499,23 +526,39 @@ export class QuotesService {
     };
   }
 
-  async findOne(quoteId: string, requesterRole: RoleName): Promise<SafeQuote> {
-    if (!hasQuoteReadAccess(requesterRole)) {
-      throw new NotFoundException('Cotización no encontrada');
+  /**
+   * Detalle (también usado por GET /quotes/:id/print). El alcance viaja
+   * DENTRO de la consulta: una cotización ajena nunca se lee para un SELLER
+   * y responde el mismo 404 que una inexistente; assertCanReadQuote queda
+   * como defensa en profundidad sobre la fila obtenida.
+   */
+  async findOne(
+    quoteId: string,
+    requester: QuoteAccessRequester,
+  ): Promise<SafeQuote> {
+    const scope = quoteReadScopeWhere(requester);
+    if (scope === null) {
+      throw new NotFoundException(QUOTE_NOT_FOUND_MESSAGE);
     }
     const businessDate = businessToday();
     const quote = await this.prisma.quote.findUnique({
-      where: { id: quoteId },
+      where: { id: quoteId, AND: [scope] },
       select: QUOTE_DETAIL_SELECT,
     });
     if (quote === null) {
-      throw new NotFoundException('Cotización no encontrada');
+      throw new NotFoundException(QUOTE_NOT_FOUND_MESSAGE);
     }
+    assertCanReadQuote(requester, quote.sellerId);
     return toSafeQuote(quote, businessDate);
   }
 
+  /**
+   * P6-B2: la propiedad se comprueba sobre la fila bloqueada antes de
+   * assertGuard (que revelaría el estado con un 409) y de cualquier
+   * escritura o auditoría; una cotización ajena responde el mismo 404.
+   */
   private async transitionStatus(
-    input: QuoteActionInput,
+    input: OwnedQuoteActionInput,
     nextStatus: QuoteStatus,
     action: AuditAction,
     assertGuard: (effective: QuoteStatus) => void,
@@ -523,6 +566,11 @@ export class QuotesService {
     const businessDate = businessToday();
     return this.prisma.$transaction(async (tx) => {
       const existing = await this.lockQuote(tx, input.quoteId);
+      assertCanOperateQuote(
+        { id: input.actorUserId, role: input.actorRole },
+        existing.sellerId,
+        QUOTE_MUTATION_NOT_FOUND_MESSAGE,
+      );
       const effective = effectiveStatus(
         existing.status,
         existing.expirationDate,
@@ -702,6 +750,7 @@ export class QuotesService {
         id,
         number,
         status,
+        seller_id        AS "sellerId",
         issue_date       AS "issueDate",
         expiration_date  AS "expirationDate",
         subtotal,
@@ -715,7 +764,7 @@ export class QuotesService {
     `);
     const row = rows[0];
     if (row === undefined) {
-      throw new NotFoundException('La cotización no existe');
+      throw new NotFoundException(QUOTE_MUTATION_NOT_FOUND_MESSAGE);
     }
     return row;
   }

@@ -24,7 +24,12 @@ const controllerPrototype =
   AccountsReceivableController.prototype as unknown as Record<string, object>;
 
 function createServiceMock() {
-  return { list: jest.fn<Promise<unknown>, [unknown, RoleName]>() };
+  return {
+    list: jest.fn<
+      Promise<unknown>,
+      [unknown, { id: string; role: RoleName }]
+    >(),
+  };
 }
 
 describe('AccountsReceivableController', () => {
@@ -52,7 +57,10 @@ describe('AccountsReceivableController', () => {
 
       const result = await controller.list(query, ACTOR);
 
-      expect(service.list).toHaveBeenCalledWith(query, RoleName.ADMIN);
+      expect(service.list).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.ADMIN,
+      });
       expect(result).toBe(expected);
     });
   });

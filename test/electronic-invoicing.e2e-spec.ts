@@ -18,6 +18,7 @@ import {
   PrismaClient,
   ProductStatus,
   ProductType,
+  RoleName,
   UnitStatus,
 } from '@prisma/client';
 import request from 'supertest';
@@ -415,6 +416,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
         documentType: FiscalDocumentType.FACTURA,
         series: FACTURA_SERIES,
         actorUserId: adminId,
+        actorRole: RoleName.ADMIN,
         ipAddress: null,
       });
       createdDocumentIds.push(doc.id);
@@ -467,6 +469,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
           documentType: FiscalDocumentType.FACTURA,
           series: FACTURA_SERIES,
           actorUserId: adminId,
+          actorRole: RoleName.ADMIN,
           ipAddress: null,
         });
 
@@ -535,6 +538,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
           documentType: FiscalDocumentType.BOLETA,
           series: BOLETA_SERIES,
           actorUserId: adminId,
+          actorRole: RoleName.ADMIN,
           ipAddress: null,
         }),
         electronicDocumentsService.issue({
@@ -542,6 +546,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
           documentType: FiscalDocumentType.BOLETA,
           series: BOLETA_SERIES,
           actorUserId: adminId,
+          actorRole: RoleName.ADMIN,
           ipAddress: null,
         }),
       ]);
@@ -583,6 +588,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
           documentType: FiscalDocumentType.FACTURA,
           series: FACTURA_SERIES,
           actorUserId: adminId,
+          actorRole: RoleName.ADMIN,
           ipAddress: null,
         }),
       ).rejects.toThrow(ServiceUnavailableException);
@@ -636,6 +642,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
           documentType: FiscalDocumentType.FACTURA,
           series: FACTURA_SERIES,
           actorUserId: adminId,
+          actorRole: RoleName.ADMIN,
           ipAddress: null,
         }),
       ).rejects.toThrow(ServiceUnavailableException);

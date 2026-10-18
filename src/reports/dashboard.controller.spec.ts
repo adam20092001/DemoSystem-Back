@@ -3,6 +3,7 @@ import { RequestMethod } from '@nestjs/common';
 import { RoleName } from '@prisma/client';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
 
@@ -34,7 +35,7 @@ const EXPECTED_ROLES = [
 
 function createServiceMock() {
   return {
-    getDashboard: jest.fn<Promise<unknown>, [unknown, RoleName]>(),
+    getDashboard: jest.fn<Promise<unknown>, [unknown, SaleAccessRequester]>(),
   };
 }
 
@@ -64,10 +65,10 @@ describe('DashboardController', () => {
 
       const result = await controller.getDashboard(query, ACTOR);
 
-      expect(service.getDashboard).toHaveBeenCalledWith(
-        query,
-        RoleName.WAREHOUSE,
-      );
+      expect(service.getDashboard).toHaveBeenCalledWith(query, {
+        id: ACTOR.id,
+        role: RoleName.WAREHOUSE,
+      });
       expect(result).toBe(expected);
     });
 
@@ -84,7 +85,13 @@ describe('DashboardController', () => {
 
       const result = await controller.getDashboard({}, ACTOR);
 
-      expect(service.getDashboard).toHaveBeenCalledWith({}, RoleName.WAREHOUSE);
+      expect(service.getDashboard).toHaveBeenCalledWith(
+        {},
+        {
+          id: ACTOR.id,
+          role: RoleName.WAREHOUSE,
+        },
+      );
       expect(result).toBe(expected);
     });
   });

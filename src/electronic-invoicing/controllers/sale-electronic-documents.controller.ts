@@ -32,8 +32,13 @@ import { IssueElectronicDocumentDto } from '../dto/issue-electronic-document.dto
 /**
  * Mismos roles de escritura ya vigentes en Ventas (WRITE_ROLES de
  * SalesController, Bloque 11D §5/§6: descubierto y preservado, no
- * reinventado). SELLER tiene acceso total sobre cualquier venta, sin
- * restricción de propiedad — mismo criterio exacto que Sales.
+ * reinventado).
+ *
+ * P6-C2: dentro de estos roles, la propiedad de la venta (Sale.sellerId)
+ * decide QUÉ ventas puede facturar cada uno (ver `assertCanOperateSale()`
+ * en ElectronicDocumentsService.issue()): SELLER solo emite comprobantes
+ * de sus propias ventas; una venta ajena responde 404, igual que una
+ * inexistente. ADMIN conserva acceso total, sin restricción de propiedad.
  */
 const ISSUE_ROLES = [RoleName.ADMIN, RoleName.SELLER] as const;
 
@@ -52,7 +57,7 @@ export class SaleElectronicDocumentsController {
   @ApiOperation({
     summary: 'Emitir un documento fiscal (FACTURA o BOLETA) para una venta',
     description:
-      'FACTURA/BOLETA son documentos fiscales SEPARADOS de la Sale comercial (Fase 11): la venta sigue siendo la única fuente de verdad económica; este documento es un agregado fiscal aparte. documentType y series son SIEMPRE explícitos — nunca se elige automáticamente la primera serie activa ni se infiere el tipo desde el cliente. Un rechazo FUNCIONAL del proveedor (REJECTED) es un resultado definitivo válido: responde 201 igualmente, porque el documento fiscal se creó y recibió una resolución. Solo un fallo TÉCNICO o un resultado DESCONOCIDO del proveedor responde 503 (ver abajo). El proveedor actual es "MOCK" (demo): su ACCEPTED nunca implica una aceptación real de SUNAT.',
+      'FACTURA/BOLETA son documentos fiscales SEPARADOS de la Sale comercial (Fase 11): la venta sigue siendo la única fuente de verdad económica; este documento es un agregado fiscal aparte. documentType y series son SIEMPRE explícitos — nunca se elige automáticamente la primera serie activa ni se infiere el tipo desde el cliente. Un rechazo FUNCIONAL del proveedor (REJECTED) es un resultado definitivo válido: responde 201 igualmente, porque el documento fiscal se creó y recibió una resolución. Solo un fallo TÉCNICO o un resultado DESCONOCIDO del proveedor responde 503 (ver abajo). El proveedor actual es "MOCK" (demo): su ACCEPTED nunca implica una aceptación real de SUNAT. P6-C2: SELLER solo puede emitir sobre sus propias ventas; ADMIN conserva acceso total.',
   })
   @ApiParam({ name: 'saleId', format: 'uuid' })
   @ApiCreatedResponse({
@@ -64,7 +69,10 @@ export class SaleElectronicDocumentsController {
     description:
       'Body inválido, o el emisor (CompanySettings) no cumple los requisitos fiscales mínimos.',
   })
-  @ApiNotFoundResponse({ description: 'La venta no existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'La venta no existe, o (rol SELLER) pertenece a otro vendedor: mismo 404 en ambos casos.',
+  })
   @ApiConflictResponse({
     description:
       'La venta está anulada; ya tiene un documento fiscal primario (FACTURA o BOLETA), sin importar su estado; o el cliente congelado en la venta no cumple las reglas de FACTURA/BOLETA.',
@@ -86,6 +94,7 @@ export class SaleElectronicDocumentsController {
       documentType: dto.documentType,
       series: dto.series,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
     // issue() devuelve el snapshot INTERNO del motor (incluye

@@ -6,6 +6,7 @@ import {
   SaleStatus,
 } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
+import { SaleAccessRequester } from '../sales/sale-access.policy';
 import { AccountsReceivableService } from './accounts-receivable.service';
 
 function makeReceivableRow(overrides: Partial<Record<string, unknown>> = {}) {
@@ -34,6 +35,15 @@ function createPrismaMock() {
   };
 }
 
+const REQUESTER_ID = 'requester-1';
+// Permisos por vendedor (P5): solicitante = usuario autenticado (id + rol activo).
+function asRole(
+  role: RoleName,
+  id: string = REQUESTER_ID,
+): SaleAccessRequester {
+  return { id, role };
+}
+
 describe('AccountsReceivableService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let service: AccountsReceivableService;
@@ -47,7 +57,7 @@ describe('AccountsReceivableService', () => {
 
   describe('definición fija de cuenta por cobrar', () => {
     it('siempre filtra status=ACTIVE y balanceDue>0, sin importar los filtros del llamador', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const call = prisma.sale.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
       };
@@ -60,7 +70,7 @@ describe('AccountsReceivableService', () => {
     });
 
     it('no agrega un filtro especial para el cliente genérico (la invariante de BD ya lo excluye)', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const call = prisma.sale.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
       };
@@ -69,7 +79,7 @@ describe('AccountsReceivableService', () => {
     });
 
     it('no excluye clientes BLOCKED (ningún filtro sobre Customer.status)', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const call = prisma.sale.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
       };
@@ -83,7 +93,7 @@ describe('AccountsReceivableService', () => {
     it('customerId/sellerId se incluyen en el where', async () => {
       await service.list(
         { customerId: 'customer-1', sellerId: 'seller-1' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       const call = prisma.sale.findMany.mock.calls[0][0] as {
         where: { AND: Record<string, unknown>[] };
@@ -98,7 +108,7 @@ describe('AccountsReceivableService', () => {
 
     it('confirmedFrom/confirmedTo inválidos -> 400', async () => {
       await expect(
-        service.list({ confirmedFrom: 'no-es-fecha' }, RoleName.ADMIN),
+        service.list({ confirmedFrom: 'no-es-fecha' }, asRole(RoleName.ADMIN)),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -106,7 +116,7 @@ describe('AccountsReceivableService', () => {
       await expect(
         service.list(
           { confirmedFrom: '2026-03-20', confirmedTo: '2026-03-10' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
@@ -114,7 +124,7 @@ describe('AccountsReceivableService', () => {
 
   describe('orden y paginación', () => {
     it('orden confirmedAt asc, id asc (deuda más antigua primero)', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const call = prisma.sale.findMany.mock.calls[0][0] as {
         orderBy: unknown;
       };
@@ -122,7 +132,7 @@ describe('AccountsReceivableService', () => {
     });
 
     it('findMany y count usan el mismo where', async () => {
-      await service.list({ customerId: 'customer-1' }, RoleName.ADMIN);
+      await service.list({ customerId: 'customer-1' }, asRole(RoleName.ADMIN));
       const findManyWhere = (
         prisma.sale.findMany.mock.calls[0][0] as { where: unknown }
       ).where;
@@ -133,17 +143,20 @@ describe('AccountsReceivableService', () => {
     });
 
     it('limit por defecto 20, máximo 100', async () => {
-      const defaultResult = await service.list({}, RoleName.ADMIN);
+      const defaultResult = await service.list({}, asRole(RoleName.ADMIN));
       expect(defaultResult.limit).toBe(20);
 
-      const cappedResult = await service.list({ limit: 500 }, RoleName.ADMIN);
+      const cappedResult = await service.list(
+        { limit: 500 },
+        asRole(RoleName.ADMIN),
+      );
       expect(cappedResult.limit).toBe(100);
     });
 
     it('sin resultados: totalPages=0', async () => {
       prisma.sale.findMany.mockResolvedValue([]);
       prisma.sale.count.mockResolvedValue(0);
-      const result = await service.list({}, RoleName.ADMIN);
+      const result = await service.list({}, asRole(RoleName.ADMIN));
       expect(result.totalPages).toBe(0);
     });
   });
@@ -154,7 +167,7 @@ describe('AccountsReceivableService', () => {
       prisma.sale.findMany.mockResolvedValue([
         makeReceivableRow({ confirmedAt }),
       ]);
-      const result = await service.list({}, RoleName.ADMIN);
+      const result = await service.list({}, asRole(RoleName.ADMIN));
       expect(result.data[0].total).toBe('100.00');
       expect(result.data[0].paidAmount).toBe('40.00');
       expect(result.data[0].balanceDue).toBe('60.00');
@@ -163,7 +176,7 @@ describe('AccountsReceivableService', () => {
     });
 
     it('nunca expone Customer.status, notas internas, referencia de Payment ni filas de Payment', async () => {
-      const result = await service.list({}, RoleName.ADMIN);
+      const result = await service.list({}, asRole(RoleName.ADMIN));
       const serialized = JSON.stringify(result.data[0]);
       expect(serialized).not.toMatch(/status.*customer|customerStatus/i);
       expect(serialized).not.toMatch(/internalNotes/i);
@@ -180,13 +193,13 @@ describe('AccountsReceivableService', () => {
         RoleName.MANAGEMENT,
       ]) {
         prisma.sale.findMany.mockClear();
-        await service.list({}, role);
+        await service.list({}, asRole(role));
         expect(prisma.sale.findMany).toHaveBeenCalled();
       }
     });
 
     it('WAREHOUSE: página vacía sin ejecutar Sale findMany/count', async () => {
-      const result = await service.list({}, RoleName.WAREHOUSE);
+      const result = await service.list({}, asRole(RoleName.WAREHOUSE));
       expect(result).toEqual({
         data: [],
         page: 1,
@@ -199,20 +212,69 @@ describe('AccountsReceivableService', () => {
     });
 
     it('rol desconocido: página vacía sin ejecutar Sale findMany/count', async () => {
-      const result = await service.list({}, 'UNKNOWN' as RoleName);
+      const result = await service.list({}, asRole('UNKNOWN' as RoleName));
       expect(result.data).toEqual([]);
       expect(prisma.sale.findMany).not.toHaveBeenCalled();
       expect(prisma.sale.count).not.toHaveBeenCalled();
     });
 
-    it('sin restricción de propiedad para SELLER: sin sellerId en la query, el where no agrega ningún filtro de vendedor', async () => {
-      await service.list({}, RoleName.SELLER);
+    it('SELLER: restringido a sus ventas aunque no envíe sellerId (P5)', async () => {
+      await service.list({}, asRole(RoleName.SELLER));
       const call = prisma.sale.findMany.mock.calls[0][0] as {
-        where: { AND: Record<string, unknown>[] };
+        where: { AND: unknown[] };
       };
-      expect(call.where.AND.some((condition) => 'sellerId' in condition)).toBe(
-        false,
+      expect(call.where.AND[0]).toEqual({ sellerId: REQUESTER_ID });
+    });
+  });
+
+  describe('permisos por vendedor (P5)', () => {
+    const OWN_SELLER_ID = 'seller-own';
+    const OTHER_SELLER_ID = 'seller-other';
+    const seller = asRole(RoleName.SELLER, OWN_SELLER_ID);
+
+    function whereOf(call: 'findMany' | 'count'): {
+      AND: Record<string, unknown>[];
+    } {
+      return (
+        prisma.sale[call].mock.calls[0][0] as {
+          where: { AND: Record<string, unknown>[] };
+        }
+      ).where;
+    }
+
+    it('SELLER: alcance sellerId = actor AND definición fija de cuenta por cobrar', async () => {
+      await service.list({}, seller);
+      const where = whereOf('findMany');
+      expect(where.AND[0]).toEqual({ sellerId: OWN_SELLER_ID });
+      expect(where.AND[1]).toEqual({
+        AND: [{ status: 'ACTIVE' }, { balanceDue: { gt: 0 } }],
+      });
+    });
+
+    it('SELLER con sellerId de otro vendedor: condición insatisfacible (AND), nunca amplía', async () => {
+      await service.list({ sellerId: OTHER_SELLER_ID }, seller);
+      const where = whereOf('findMany');
+      expect(where.AND[0]).toEqual({ sellerId: OWN_SELLER_ID });
+      expect(
+        (where.AND[1] as { AND: Record<string, unknown>[] }).AND,
+      ).toContainEqual({ sellerId: OTHER_SELLER_ID });
+    });
+
+    it('findMany y count usan el mismo where restringido', async () => {
+      await service.list(
+        { sellerId: OTHER_SELLER_ID, customerId: 'customer-1' },
+        seller,
       );
+      expect(whereOf('count')).toEqual(whereOf('findMany'));
+    });
+
+    it('ADMIN y MANAGEMENT conservan la consulta completa (sin condición de vendedor obligatoria)', async () => {
+      for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+        prisma.sale.findMany.mockClear();
+        await service.list({}, asRole(role, OWN_SELLER_ID));
+        const where = whereOf('findMany');
+        expect(where.AND.some((c) => 'sellerId' in c)).toBe(false);
+      }
     });
   });
 });

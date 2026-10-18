@@ -20,9 +20,15 @@ import * as businessDateModule from '../common/date/business-date';
 import { CompanySettingsSnapshot } from '../configuration/types/company-settings-snapshot';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
+import { QuoteAccessRequester } from './quote-access.policy';
 import { QuotesService } from './quotes.service';
 
 const ACTOR_ID = 'actor-1';
+// Permisos por vendedor (P6-B1): solicitante = usuario autenticado. Con id
+// ACTOR_ID, que es el vendedor de la cotización fixture (propia).
+function asRole(role: RoleName, id: string = ACTOR_ID): QuoteAccessRequester {
+  return { id, role };
+}
 const CUSTOMER_ID = 'customer-1';
 const PRODUCT_ID = 'product-1';
 const QUOTE_ID = 'quote-1';
@@ -120,6 +126,8 @@ function makeLockedQuoteRow(overrides: Partial<Record<string, unknown>> = {}) {
     id: QUOTE_ID,
     number: 'COT-000001',
     status: QuoteStatus.PENDING,
+    // P6-B2: el SELECT ... FOR UPDATE de lockQuote incluye seller_id.
+    sellerId: ACTOR_ID,
     issueDate: new Date('2026-03-15T00:00:00.000Z'),
     expirationDate: new Date('2026-03-20T00:00:00.000Z'),
     subtotal: new Prisma.Decimal('10.00'),
@@ -1016,7 +1024,12 @@ describe('QuotesService', () => {
   });
 
   describe('update', () => {
-    const baseUpdateInput = { quoteId: QUOTE_ID, actorUserId: ACTOR_ID };
+    // ADMIN por defecto: sin restricción de propiedad (comportamiento previo).
+    const baseUpdateInput = {
+      quoteId: QUOTE_ID,
+      actorUserId: ACTOR_ID,
+      actorRole: RoleName.ADMIN,
+    };
 
     it('inexistente: 404', async () => {
       prisma.tx.$queryRaw.mockResolvedValue([]);
@@ -1029,6 +1042,111 @@ describe('QuotesService', () => {
       await expect(
         service.update({ ...baseUpdateInput, notes: 'Nota' }),
       ).resolves.toBeDefined();
+    });
+
+    describe('permisos por vendedor (P6-B2)', () => {
+      const OTHER_SELLER_ID = 'seller-other';
+
+      function sellerUpdate(actorUserId: string) {
+        return service.update({
+          ...baseUpdateInput,
+          actorUserId,
+          actorRole: RoleName.SELLER,
+          notes: 'Nota',
+        });
+      }
+
+      async function expectQuoteNotFound(promise: Promise<unknown>) {
+        const error = await promise.catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toBe(
+          'La cotización no existe',
+        );
+      }
+
+      function expectNoUpdateEffects() {
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        expect(prisma.tx.quoteItem.deleteMany).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      }
+
+      it('SELLER edita su propia cotización (sellerId de la fila bloqueada = actor)', async () => {
+        await expect(sellerUpdate(ACTOR_ID)).resolves.toBeDefined();
+        expect(prisma.tx.quote.update).toHaveBeenCalled();
+      });
+
+      it('SELLER no edita una cotización ajena: 404 sin escritura ni auditoría', async () => {
+        await expectQuoteNotFound(sellerUpdate(OTHER_SELLER_ID));
+        expectNoUpdateEffects();
+      });
+
+      it('inexistente: exactamente el mismo 404', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([]);
+        await expectQuoteNotFound(sellerUpdate(OTHER_SELLER_ID));
+      });
+
+      it.each([
+        ['aceptada', { status: QuoteStatus.ACCEPTED }],
+        ['convertida', { status: QuoteStatus.CONVERTED }],
+        ['rechazada', { status: QuoteStatus.REJECTED }],
+        ['vencida', { expirationDate: new Date('2026-03-01T00:00:00.000Z') }],
+        ['con precios históricos', { pricesIncludeTax: false }],
+      ])(
+        'cotización ajena %s: 404 antes de cualquier validación de estado o precio',
+        async (_label, overrides) => {
+          prisma.tx.$queryRaw.mockResolvedValue([
+            makeLockedQuoteRow(overrides),
+          ]);
+          await expectQuoteNotFound(
+            service.update({
+              ...baseUpdateInput,
+              actorUserId: OTHER_SELLER_ID,
+              actorRole: RoleName.SELLER,
+              discountAmount: '1.00',
+            }),
+          );
+          expectNoUpdateEffects();
+        },
+      );
+
+      it('la propiedad se decide con seller_id de la fila bloqueada (FOR UPDATE)', async () => {
+        await expectQuoteNotFound(sellerUpdate(OTHER_SELLER_ID));
+        const sql = (
+          prisma.tx.$queryRaw.mock.calls[0][0] as Prisma.Sql
+        ).strings.join(' ');
+        expect(sql).toContain('seller_id');
+        expect(sql).toContain('FOR UPDATE');
+      });
+
+      it('ADMIN edita una cotización ajena; auditoría con el ADMIN real; sellerId no se escribe', async () => {
+        await service.update({
+          ...baseUpdateInput,
+          actorUserId: OTHER_SELLER_ID,
+          actorRole: RoleName.ADMIN,
+          notes: 'Nota admin',
+        });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        };
+        expect(updateArgs.data).not.toHaveProperty('sellerId');
+        expect(
+          (auditService.record.mock.calls[0][0] as { userId: string }).userId,
+        ).toBe(OTHER_SELLER_ID);
+      });
+
+      it.each([RoleName.MANAGEMENT, RoleName.WAREHOUSE])(
+        '%s no obtiene permiso de edición (404 sin efectos)',
+        async (role) => {
+          await expectQuoteNotFound(
+            service.update({
+              ...baseUpdateInput,
+              actorRole: role,
+              notes: 'x',
+            }),
+          );
+          expectNoUpdateEffects();
+        },
+      );
     });
 
     it('ACCEPTED (almacenado, vigente): 409', async () => {
@@ -1308,7 +1426,11 @@ describe('QuotesService', () => {
 
     it('body sin campos efectivos: 400', async () => {
       await expect(
-        service.update({ quoteId: QUOTE_ID, actorUserId: ACTOR_ID }),
+        service.update({
+          quoteId: QUOTE_ID,
+          actorUserId: ACTOR_ID,
+          actorRole: RoleName.ADMIN,
+        }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -1720,7 +1842,12 @@ describe('QuotesService', () => {
     ['accept', QuoteStatus.ACCEPTED, AuditAction.QUOTE_ACCEPTED] as const,
     ['reject', QuoteStatus.REJECTED, AuditAction.QUOTE_REJECTED] as const,
   ])('%s', (methodName, nextStatus, auditAction) => {
-    const actionInput = { quoteId: QUOTE_ID, actorUserId: ACTOR_ID };
+    // ADMIN por defecto: sin restricción de propiedad (comportamiento previo).
+    const actionInput = {
+      quoteId: QUOTE_ID,
+      actorUserId: ACTOR_ID,
+      actorRole: RoleName.ADMIN,
+    };
 
     it('PENDING vigente -> transición exitosa', async () => {
       const result = await service[methodName](actionInput);
@@ -1729,6 +1856,90 @@ describe('QuotesService', () => {
         data: { status: QuoteStatus };
       };
       expect(updateArgs.data.status).toBe(nextStatus);
+    });
+
+    describe('permisos por vendedor (P6-B2)', () => {
+      const OTHER_SELLER_ID = 'seller-other';
+
+      async function expectQuoteNotFound(promise: Promise<unknown>) {
+        const error = await promise.catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toBe(
+          'La cotización no existe',
+        );
+      }
+
+      function expectNoTransitionEffects() {
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      }
+
+      it('SELLER sobre su propia cotización: transición exitosa auditada con su id', async () => {
+        await service[methodName]({
+          ...actionInput,
+          actorRole: RoleName.SELLER,
+        });
+        const audit = auditService.record.mock.calls.find(
+          (c) => (c[0] as { action: AuditAction }).action === auditAction,
+        );
+        expect((audit?.[0] as { userId: string }).userId).toBe(ACTOR_ID);
+      });
+
+      it('SELLER sobre una cotización ajena: 404 sin escritura ni auditoría', async () => {
+        await expectQuoteNotFound(
+          service[methodName]({
+            ...actionInput,
+            actorUserId: OTHER_SELLER_ID,
+            actorRole: RoleName.SELLER,
+          }),
+        );
+        expectNoTransitionEffects();
+      });
+
+      it('cotización ajena ya ACCEPTED/CONVERTED: 404, nunca el 409 de assertGuard', async () => {
+        for (const status of [QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED]) {
+          prisma.tx.$queryRaw.mockResolvedValue([
+            makeLockedQuoteRow({ status }),
+          ]);
+          await expectQuoteNotFound(
+            service[methodName]({
+              ...actionInput,
+              actorUserId: OTHER_SELLER_ID,
+              actorRole: RoleName.SELLER,
+            }),
+          );
+        }
+        expectNoTransitionEffects();
+      });
+
+      it('inexistente: el mismo 404', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([]);
+        await expectQuoteNotFound(
+          service[methodName]({ ...actionInput, actorRole: RoleName.SELLER }),
+        );
+      });
+
+      it('ADMIN opera una cotización ajena y queda auditado como actor', async () => {
+        await service[methodName]({
+          ...actionInput,
+          actorUserId: OTHER_SELLER_ID,
+          actorRole: RoleName.ADMIN,
+        });
+        expect(prisma.tx.quote.update).toHaveBeenCalled();
+        expect(
+          (auditService.record.mock.calls[0][0] as { userId: string }).userId,
+        ).toBe(OTHER_SELLER_ID);
+      });
+
+      it.each([RoleName.MANAGEMENT, RoleName.WAREHOUSE])(
+        '%s no obtiene permiso (404 sin efectos)',
+        async (role) => {
+          await expectQuoteNotFound(
+            service[methodName]({ ...actionInput, actorRole: role }),
+          );
+          expectNoTransitionEffects();
+        },
+      );
     });
 
     it('PENDING vencido (efectivo EXPIRED): 409', async () => {
@@ -1821,7 +2032,7 @@ describe('QuotesService', () => {
     });
 
     it('paginación por defecto (page=1, limit=20)', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         skip: number;
         take: number;
@@ -1831,13 +2042,13 @@ describe('QuotesService', () => {
     });
 
     it('límite máximo 100', async () => {
-      await service.list({ limit: 500 }, RoleName.ADMIN);
+      await service.list({ limit: 500 }, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as { take: number };
       expect(args.take).toBe(100);
     });
 
     it('filtra por customerId', async () => {
-      await service.list({ customerId: CUSTOMER_ID }, RoleName.ADMIN);
+      await service.list({ customerId: CUSTOMER_ID }, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1845,7 +2056,7 @@ describe('QuotesService', () => {
     });
 
     it('filtra por sellerId', async () => {
-      await service.list({ sellerId: ACTOR_ID }, RoleName.ADMIN);
+      await service.list({ sellerId: ACTOR_ID }, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1855,7 +2066,7 @@ describe('QuotesService', () => {
     it('rango de issueDate', async () => {
       await service.list(
         { issueDateFrom: '2026-01-01', issueDateTo: '2026-01-31' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
@@ -1872,7 +2083,7 @@ describe('QuotesService', () => {
       await expect(
         service.list(
           { issueDateFrom: '2026-02-01', issueDateTo: '2026-01-01' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
@@ -1881,13 +2092,13 @@ describe('QuotesService', () => {
       await expect(
         service.list(
           { expirationDateFrom: '2026-02-01', expirationDateTo: '2026-01-01' },
-          RoleName.ADMIN,
+          asRole(RoleName.ADMIN),
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
     it('búsqueda genera OR sobre number/customerName/customerDocumentNumber', async () => {
-      await service.list({ search: 'juan' }, RoleName.ADMIN);
+      await service.list({ search: 'juan' }, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1901,7 +2112,7 @@ describe('QuotesService', () => {
     });
 
     it('búsqueda de solo espacios se omite', async () => {
-      await service.list({ search: '   ' }, RoleName.ADMIN);
+      await service.list({ search: '   ' }, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND?: unknown[] };
       };
@@ -1909,7 +2120,7 @@ describe('QuotesService', () => {
     });
 
     it('orden determinista fijo: createdAt desc, id desc', async () => {
-      await service.list({}, RoleName.ADMIN);
+      await service.list({}, asRole(RoleName.ADMIN));
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         orderBy: unknown;
       };
@@ -1917,7 +2128,10 @@ describe('QuotesService', () => {
     });
 
     it('status=EXPIRED usa el predicado OR con la fecha de negocio (no CURRENT_DATE)', async () => {
-      await service.list({ status: QuoteStatus.EXPIRED }, RoleName.ADMIN);
+      await service.list(
+        { status: QuoteStatus.EXPIRED },
+        asRole(RoleName.ADMIN),
+      );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1933,7 +2147,10 @@ describe('QuotesService', () => {
     });
 
     it('status=PENDING excluye vencidas', async () => {
-      await service.list({ status: QuoteStatus.PENDING }, RoleName.ADMIN);
+      await service.list(
+        { status: QuoteStatus.PENDING },
+        asRole(RoleName.ADMIN),
+      );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1944,7 +2161,10 @@ describe('QuotesService', () => {
     });
 
     it('status=ACCEPTED excluye vencidas', async () => {
-      await service.list({ status: QuoteStatus.ACCEPTED }, RoleName.ADMIN);
+      await service.list(
+        { status: QuoteStatus.ACCEPTED },
+        asRole(RoleName.ADMIN),
+      );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1955,7 +2175,10 @@ describe('QuotesService', () => {
     });
 
     it('status=REJECTED sin condición de fecha (incluye histórico)', async () => {
-      await service.list({ status: QuoteStatus.REJECTED }, RoleName.ADMIN);
+      await service.list(
+        { status: QuoteStatus.REJECTED },
+        asRole(RoleName.ADMIN),
+      );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1963,7 +2186,10 @@ describe('QuotesService', () => {
     });
 
     it('status=CONVERTED sin condición de fecha', async () => {
-      await service.list({ status: QuoteStatus.CONVERTED }, RoleName.ADMIN);
+      await service.list(
+        { status: QuoteStatus.CONVERTED },
+        asRole(RoleName.ADMIN),
+      );
       const args = prisma.quote.findMany.mock.calls[0][0] as {
         where: { AND: unknown[] };
       };
@@ -1973,7 +2199,7 @@ describe('QuotesService', () => {
     it('findMany y count usan el mismo where', async () => {
       await service.list(
         { customerId: CUSTOMER_ID, search: 'ana' },
-        RoleName.ADMIN,
+        asRole(RoleName.ADMIN),
       );
       const findManyWhere = (
         prisma.quote.findMany.mock.calls[0][0] as { where: unknown }
@@ -1987,13 +2213,13 @@ describe('QuotesService', () => {
     it.each([RoleName.ADMIN, RoleName.SELLER, RoleName.MANAGEMENT])(
       '%s tiene acceso de lectura (consulta Prisma)',
       async (role) => {
-        await service.list({}, role);
+        await service.list({}, asRole(role));
         expect(prisma.quote.findMany).toHaveBeenCalled();
       },
     );
 
     it('WAREHOUSE: página vacía sin consultar Prisma', async () => {
-      const result = await service.list({}, RoleName.WAREHOUSE);
+      const result = await service.list({}, asRole(RoleName.WAREHOUSE));
       expect(result).toEqual({
         data: [],
         page: 1,
@@ -2006,22 +2232,80 @@ describe('QuotesService', () => {
     });
 
     it('rol desconocido: falla cerrado igual que WAREHOUSE', async () => {
-      const result = await service.list({}, 'UNKNOWN' as RoleName);
+      const result = await service.list({}, asRole('UNKNOWN' as RoleName));
       expect(result.data).toEqual([]);
       expect(prisma.quote.findMany).not.toHaveBeenCalled();
     });
 
     it('página vacía es válida (total=0 => totalPages=0)', async () => {
-      const result = await service.list({}, RoleName.ADMIN);
+      const result = await service.list({}, asRole(RoleName.ADMIN));
       expect(result.total).toBe(0);
       expect(result.totalPages).toBe(0);
+    });
+
+    describe('permisos por vendedor (P6-B1)', () => {
+      const OWN_SELLER_ID = 'seller-own';
+      const OTHER_SELLER_ID = 'seller-other';
+      const seller = asRole(RoleName.SELLER, OWN_SELLER_ID);
+
+      function whereOf(call: 'findMany' | 'count'): unknown {
+        return (prisma.quote[call].mock.calls[0][0] as { where: unknown })
+          .where;
+      }
+
+      it('SELLER sin filtros: solo Quote.sellerId = actor', async () => {
+        await service.list({}, seller);
+        expect(whereOf('findMany')).toEqual({
+          AND: [{ sellerId: OWN_SELLER_ID }, {}],
+        });
+      });
+
+      it('SELLER con sellerId ajeno: condición insatisfacible (AND), nunca amplía', async () => {
+        await service.list({ sellerId: OTHER_SELLER_ID }, seller);
+        expect(whereOf('findMany')).toEqual({
+          AND: [
+            { sellerId: OWN_SELLER_ID },
+            { AND: [{ sellerId: OTHER_SELLER_ID }] },
+          ],
+        });
+      });
+
+      it('el OR de búsqueda queda subordinado al alcance', async () => {
+        await service.list({ search: 'COT' }, seller);
+        const where = whereOf('findMany') as {
+          AND: [Record<string, unknown>, { AND: { OR?: unknown }[] }];
+        };
+        expect(where.AND[0]).toEqual({ sellerId: OWN_SELLER_ID });
+        expect(where.AND[1].AND.some((c) => c.OR !== undefined)).toBe(true);
+      });
+
+      it('findMany y count usan el mismo where restringido', async () => {
+        await service.list(
+          { sellerId: OTHER_SELLER_ID, status: QuoteStatus.PENDING },
+          seller,
+        );
+        expect(whereOf('count')).toEqual(whereOf('findMany'));
+      });
+
+      it('ADMIN y MANAGEMENT: filtros tal cual (lectura global)', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.quote.findMany.mockClear();
+          await service.list(
+            { sellerId: OTHER_SELLER_ID },
+            asRole(role, OWN_SELLER_ID),
+          );
+          expect(whereOf('findMany')).toEqual({
+            AND: [{ sellerId: OTHER_SELLER_ID }],
+          });
+        }
+      });
     });
   });
 
   describe('findOne', () => {
     it('encontrada: devuelve forma segura', async () => {
       prisma.quote.findUnique.mockResolvedValue(makeQuoteDetailRow());
-      const result = await service.findOne(QUOTE_ID, RoleName.ADMIN);
+      const result = await service.findOne(QUOTE_ID, asRole(RoleName.ADMIN));
       expect(result.id).toBe(QUOTE_ID);
     });
 
@@ -2031,19 +2315,19 @@ describe('QuotesService', () => {
           expirationDate: new Date('2026-03-01T00:00:00.000Z'),
         }),
       );
-      const result = await service.findOne(QUOTE_ID, RoleName.ADMIN);
+      const result = await service.findOne(QUOTE_ID, asRole(RoleName.ADMIN));
       expect(result.status).toBe(QuoteStatus.EXPIRED);
     });
 
     it('stockInfo en vivo', async () => {
       prisma.quote.findUnique.mockResolvedValue(makeQuoteDetailRow());
-      const result = await service.findOne(QUOTE_ID, RoleName.ADMIN);
+      const result = await service.findOne(QUOTE_ID, asRole(RoleName.ADMIN));
       expect(result.items[0].stockInfo).not.toBeNull();
     });
 
     it('vendedor solo con campos seguros', async () => {
       prisma.quote.findUnique.mockResolvedValue(makeQuoteDetailRow());
-      const result = await service.findOne(QUOTE_ID, RoleName.ADMIN);
+      const result = await service.findOne(QUOTE_ID, asRole(RoleName.ADMIN));
       expect(Object.keys(result.seller).sort()).toEqual(
         ['id', 'username', 'firstName', 'lastName'].sort(),
       );
@@ -2051,7 +2335,7 @@ describe('QuotesService', () => {
 
     it('no filtra por Customer/Product/User más allá del vendedor seguro (sin leak)', async () => {
       prisma.quote.findUnique.mockResolvedValue(makeQuoteDetailRow());
-      const result = await service.findOne(QUOTE_ID, RoleName.ADMIN);
+      const result = await service.findOne(QUOTE_ID, asRole(RoleName.ADMIN));
       const serialized = JSON.stringify(result);
       expect(serialized).not.toMatch(/passwordHash|roleId|internalNotes/i);
     });
@@ -2059,21 +2343,89 @@ describe('QuotesService', () => {
     it('inexistente: 404', async () => {
       prisma.quote.findUnique.mockResolvedValue(null);
       await expect(
-        service.findOne(QUOTE_ID, RoleName.ADMIN),
+        service.findOne(QUOTE_ID, asRole(RoleName.ADMIN)),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('WAREHOUSE: 404 sin consultar Prisma', async () => {
       await expect(
-        service.findOne(QUOTE_ID, RoleName.WAREHOUSE),
+        service.findOne(QUOTE_ID, asRole(RoleName.WAREHOUSE)),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(prisma.quote.findUnique).not.toHaveBeenCalled();
     });
 
     it('rol desconocido: 404 (fail-closed)', async () => {
       await expect(
-        service.findOne(QUOTE_ID, 'UNKNOWN' as RoleName),
+        service.findOne(QUOTE_ID, asRole('UNKNOWN' as RoleName)),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    describe('permisos por vendedor (P6-B1)', () => {
+      const OTHER_SELLER_ID = 'seller-other';
+
+      beforeEach(() => {
+        // Fila de detalle propiedad de ACTOR_ID (vendedor de la fixture).
+        prisma.quote.findUnique.mockResolvedValue(makeQuoteDetailRow());
+      });
+
+      function findUniqueWhere(): unknown {
+        return (prisma.quote.findUnique.mock.calls[0][0] as { where: unknown })
+          .where;
+      }
+
+      async function expectNotFound(promise: Promise<unknown>) {
+        const error = await promise.catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toBe(
+          'Cotización no encontrada',
+        );
+      }
+
+      it('SELLER lee su propia cotización; el alcance viaja en la consulta', async () => {
+        const result = await service.findOne(QUOTE_ID, asRole(RoleName.SELLER));
+        expect(result.id).toBe(QUOTE_ID);
+        expect(findUniqueWhere()).toEqual({
+          id: QUOTE_ID,
+          AND: [{ sellerId: ACTOR_ID }],
+        });
+      });
+
+      it('SELLER con cotización ajena: la consulta con alcance no la encuentra -> 404', async () => {
+        prisma.quote.findUnique.mockResolvedValue(null);
+        await expectNotFound(
+          service.findOne(QUOTE_ID, asRole(RoleName.SELLER, OTHER_SELLER_ID)),
+        );
+        expect(findUniqueWhere()).toEqual({
+          id: QUOTE_ID,
+          AND: [{ sellerId: OTHER_SELLER_ID }],
+        });
+      });
+
+      it('defensa en profundidad: aunque la fila ajena llegara, 404 sin exponer datos', async () => {
+        await expectNotFound(
+          service.findOne(QUOTE_ID, asRole(RoleName.SELLER, OTHER_SELLER_ID)),
+        );
+      });
+
+      it('cotización inexistente: exactamente el mismo 404', async () => {
+        prisma.quote.findUnique.mockResolvedValue(null);
+        await expectNotFound(
+          service.findOne(QUOTE_ID, asRole(RoleName.SELLER)),
+        );
+      });
+
+      it('ADMIN y MANAGEMENT leen cotizaciones de otro vendedor; sellerId intacto', async () => {
+        for (const role of [RoleName.ADMIN, RoleName.MANAGEMENT]) {
+          prisma.quote.findUnique.mockClear();
+          const result = await service.findOne(
+            QUOTE_ID,
+            asRole(role, OTHER_SELLER_ID),
+          );
+          expect(findUniqueWhere()).toEqual({ id: QUOTE_ID, AND: [{}] });
+          // El detalle expone el vendedor persistido (no el solicitante).
+          expect(result.seller.id).toBe(ACTOR_ID);
+        }
+      });
     });
   });
 });

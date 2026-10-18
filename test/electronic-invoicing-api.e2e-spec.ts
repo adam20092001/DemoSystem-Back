@@ -199,10 +199,12 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
     customerId: string;
     quantity: string;
     payment?: { method: string; amount: string };
+    /** P6-C1: quién crea la venta decide su Sale.sellerId. Por defecto, ADMIN. */
+    cookie?: string;
   }): Promise<FixtureSale> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/sales')
-      .set('Cookie', adminCookie)
+      .set('Cookie', input.cookie ?? adminCookie)
       .send({
         customerId: input.customerId,
         items: [{ productId, quantity: input.quantity }],
@@ -257,6 +259,13 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
     return request(appInstance.getHttpServer())
       .post(`/api/v1/electronic-documents/${id}/retry`)
       .set('Cookie', cookie);
+  }
+
+  function cancelSale(cookie: string, saleId: string, reason: string) {
+    return request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/cancel`)
+      .set('Cookie', cookie)
+      .send({ reason });
   }
 
   function listSeries(cookie: string, query: Record<string, unknown> = {}) {
@@ -900,6 +909,10 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   describe('GET /electronic-documents — listado y detalle (§34)', () => {
     let saleA: FixtureSale;
     let docAId: string;
+    // P6-C1: venta propia de SELLER_USERNAME, usada por las pruebas de
+    // alcance por propiedad más abajo.
+    let saleB: FixtureSale;
+    let docBId: string;
 
     beforeAll(async () => {
       saleA = await createFixtureSale({
@@ -913,6 +926,19 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       expect(response.status).toBe(201);
       docAId = (response.body as { id: string }).id;
       createdDocumentIds.push(docAId);
+
+      saleB = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+        cookie: sellerCookie,
+      });
+      const responseB = await issueDoc(adminCookie, saleB.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(responseB.status).toBe(201);
+      docBId = (responseB.body as { id: string }).id;
+      createdDocumentIds.push(docBId);
     });
 
     it('paginación: page/limit respetados', async () => {
@@ -996,6 +1022,77 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       const response = await getDoc(adminCookie, NON_EXISTENT_UUID);
       expect(response.status).toBe(404);
     });
+
+    // ==================================================================
+    // P6-C1 — restricción de lectura por propiedad de la venta
+    // ==================================================================
+    it('SELLER lista el comprobante de su propia venta (saleB) filtrando por saleId', async () => {
+      const response = await listDocs(sellerCookie, { saleId: saleB.id });
+      expect(response.status).toBe(200);
+      const body = response.body as { data: { id: string }[] };
+      expect(body.data.map((d) => d.id)).toEqual([docBId]);
+    });
+
+    it('SELLER no lista el comprobante de una venta ajena (saleA), ni con saleId explícito', async () => {
+      const response = await listDocs(sellerCookie, { saleId: saleA.id });
+      expect(response.status).toBe(200);
+      const body = response.body as { data: unknown[]; total: number };
+      expect(body.data).toHaveLength(0);
+      expect(body.total).toBe(0);
+    });
+
+    it('SELLER sin filtros nunca incluye el comprobante ajeno docA en su listado', async () => {
+      const response = await listDocs(sellerCookie, { limit: 100 });
+      expect(response.status).toBe(200);
+      const body = response.body as { data: { id: string }[] };
+      expect(body.data.map((d) => d.id)).not.toContain(docAId);
+    });
+
+    it('SELLER consulta el detalle de su propio comprobante (docB)', async () => {
+      const response = await getDoc(sellerCookie, docBId);
+      expect(response.status).toBe(200);
+      const body = response.body as { id: string };
+      expect(body.id).toBe(docBId);
+    });
+
+    it('SELLER recibe 404 por el detalle de un comprobante ajeno (docA), idéntico al de uno inexistente', async () => {
+      const foreign = await getDoc(sellerCookie, docAId);
+      const nonExistent = await getDoc(sellerCookie, NON_EXISTENT_UUID);
+      expect(foreign.status).toBe(404);
+      expect(nonExistent.status).toBe(404);
+      // Mismo mensaje/error: nunca revela si la venta existe (path/timestamp
+      // del filtro global de excepciones varían legítimamente por request).
+      const foreignBody = foreign.body as { message: string; error: string };
+      const nonExistentBody = nonExistent.body as {
+        message: string;
+        error: string;
+      };
+      expect(foreignBody.message).toBe(nonExistentBody.message);
+      expect(foreignBody.error).toBe(nonExistentBody.error);
+    });
+
+    it('ADMIN y MANAGEMENT conservan lectura global: ven el detalle de la venta de SELLER (docB)', async () => {
+      const asAdmin = await getDoc(adminCookie, docBId);
+      expect(asAdmin.status).toBe(200);
+      const asManagement = await getDoc(managementCookie, docBId);
+      expect(asManagement.status).toBe(200);
+    });
+
+    it('ADMIN y MANAGEMENT ven docA y docB en el mismo listado sin filtro de propiedad', async () => {
+      const asAdmin = await listDocs(adminCookie, { limit: 100 });
+      const idsAdmin = (asAdmin.body as { data: { id: string }[] }).data.map(
+        (d) => d.id,
+      );
+      expect(idsAdmin).toContain(docAId);
+      expect(idsAdmin).toContain(docBId);
+
+      const asManagement = await listDocs(managementCookie, { limit: 100 });
+      const idsManagement = (
+        asManagement.body as { data: { id: string }[] }
+      ).data.map((d) => d.id);
+      expect(idsManagement).toContain(docAId);
+      expect(idsManagement).toContain(docBId);
+    });
   });
 
   // ====================================================================
@@ -1015,10 +1112,11 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       createdDocumentIds.push((response.body as { id: string }).id);
     });
 
-    it('SELLER puede emitir', async () => {
+    it('SELLER puede emitir (sobre su propia venta; P6-C2)', async () => {
       const sale = await createFixtureSale({
         customerId: rucCustomerId,
         quantity: '1',
+        cookie: sellerCookie,
       });
       const response = await issueDoc(sellerCookie, sale.id, {
         documentType: FiscalDocumentType.FACTURA,
@@ -1078,6 +1176,180 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   });
 
   // ====================================================================
+  // P6-C2 — autorización por propiedad en la EMISIÓN de comprobantes
+  // ====================================================================
+  describe('POST /sales/:saleId/electronic-documents — autorización por propiedad (P6-C2)', () => {
+    it('SELLER intenta emitir sobre la venta del ADMIN (ajena) -> 404', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const response = await issueDoc(sellerCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('SELLER intenta emitir sobre la venta de OTRO SELLER (ajena) -> 404', async () => {
+      const otherSellerLogin = await login(
+        app.getHttpServer(),
+        MULTI_ROLE_USERNAME,
+        MULTI_ROLE_PASSWORD,
+      );
+      const otherSellerCookie = await switchRole(
+        otherSellerLogin.cookie,
+        RoleName.SELLER,
+      );
+      const saleOfOtherSeller = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+        cookie: otherSellerCookie,
+      });
+
+      const response = await issueDoc(sellerCookie, saleOfOtherSeller.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('venta inexistente y venta ajena producen el MISMO 404 (mismo mensaje, sin revelar existencia)', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+
+      const foreign = await issueDoc(sellerCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      const nonExistent = await issueDoc(sellerCookie, NON_EXISTENT_UUID, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+
+      expect(foreign.status).toBe(404);
+      expect(nonExistent.status).toBe(404);
+      expect((foreign.body as { message: string }).message).toBe(
+        (nonExistent.body as { message: string }).message,
+      );
+    });
+
+    it('venta ajena ANULADA responde 404 (propiedad antes que estado), nunca 409 ni revela la anulación', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const cancelled = await cancelSale(
+        adminCookie,
+        sale.id,
+        'Motivo de prueba P6-C2',
+      );
+      expect(cancelled.status).toBe(200);
+
+      const response = await issueDoc(sellerCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(response.status).toBe(404);
+      expect(JSON.stringify(response.body)).not.toContain('anulad');
+    });
+
+    it('venta ajena YA FACTURADA responde 404 (propiedad antes que documento primario), nunca 409', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const firstIssue = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(firstIssue.status).toBe(201);
+      createdDocumentIds.push((firstIssue.body as { id: string }).id);
+
+      const response = await issueDoc(sellerCookie, sale.id, {
+        documentType: FiscalDocumentType.BOLETA,
+        series: BOLETA_SERIES,
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('ADMIN emite sobre una venta ajena (de SELLER) sin restricción', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+        cookie: sellerCookie,
+      });
+      const response = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(response.status).toBe(201);
+      createdDocumentIds.push((response.body as { id: string }).id);
+    });
+
+    it('sin cookie -> 401', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/electronic-documents`)
+        .send({
+          documentType: FiscalDocumentType.FACTURA,
+          series: FACTURA_SERIES,
+        });
+      expect(response.status).toBe(401);
+    });
+
+    it('una emisión denegada no crea ElectronicDocument, no consume el correlativo ni audita ELECTRONIC_DOCUMENT_CREATED', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+
+      const before = await prisma.fiscalSeries.findUniqueOrThrow({
+        where: {
+          documentType_series: {
+            documentType: FiscalDocumentType.FACTURA,
+            series: FACTURA_SERIES,
+          },
+        },
+      });
+
+      const response = await issueDoc(sellerCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      expect(response.status).toBe(404);
+
+      const documents = await prisma.electronicDocument.findMany({
+        where: { saleId: sale.id },
+      });
+      expect(documents).toHaveLength(0);
+
+      const after = await prisma.fiscalSeries.findUniqueOrThrow({
+        where: {
+          documentType_series: {
+            documentType: FiscalDocumentType.FACTURA,
+            series: FACTURA_SERIES,
+          },
+        },
+      });
+      expect(after.currentNumber).toBe(before.currentNumber);
+
+      const createdAudit = await prisma.auditLog.findFirst({
+        where: {
+          action: AuditAction.ELECTRONIC_DOCUMENT_CREATED,
+          metadata: { path: ['saleNumber'], equals: sale.number },
+        },
+      });
+      expect(createdAudit).toBeNull();
+    });
+  });
+
+  // ====================================================================
   // §36 — Comportamiento por ROL ACTIVO (no unión de roles asignados)
   // ====================================================================
   describe('rol activo (KAN-18) — mismo usuario, distinto comportamiento según el rol ACTIVO (§36)', () => {
@@ -1090,9 +1362,12 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       expect(loginResult.status).toBe(200);
 
       const asSeller = await switchRole(loginResult.cookie, RoleName.SELLER);
+      // P6-C2: la venta debe ser propia de este usuario (rol activo SELLER)
+      // para que la emisión tenga éxito.
       const saleForSeller = await createFixtureSale({
         customerId: rucCustomerId,
         quantity: '1',
+        cookie: asSeller,
       });
       const issueAsSeller = await issueDoc(asSeller, saleForSeller.id, {
         documentType: FiscalDocumentType.FACTURA,
@@ -1487,10 +1762,14 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       expect(printed.text).toContain('Público general');
     });
 
-    it('§37 autorización: ADMIN/SELLER/MANAGEMENT 200, WAREHOUSE 403, sin cookie 401', async () => {
+    it('§37 autorización: ADMIN/SELLER (venta propia)/MANAGEMENT 200, WAREHOUSE 403, sin cookie 401', async () => {
+      // P6-C1: la venta es de SELLER_USERNAME, para probar su acceso
+      // normal (venta propia) junto con la lectura global de ADMIN/
+      // MANAGEMENT. El caso de venta AJENA tiene su propia prueba abajo.
       const sale = await createFixtureSale({
         customerId: rucCustomerId,
         quantity: '1',
+        cookie: sellerCookie,
       });
       const issued = await issueDoc(adminCookie, sale.id, {
         documentType: FiscalDocumentType.FACTURA,
@@ -1508,6 +1787,23 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         `/api/v1/electronic-documents/${doc.id}/print`,
       );
       expect(unauthenticated.status).toBe(401);
+    });
+
+    it('§37b P6-C1: SELLER no puede imprimir el comprobante de una venta ajena -> 404', async () => {
+      // Venta creada por ADMIN: ajena para SELLER_USERNAME.
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(adminCookie, sale.id, {
+        documentType: FiscalDocumentType.FACTURA,
+        series: FACTURA_SERIES,
+      });
+      const doc = issued.body as { id: string };
+      createdDocumentIds.push(doc.id);
+
+      const response = await printDoc(sellerCookie, doc.id);
+      expect(response.status).toBe(404);
     });
 
     it('§38 documento inexistente -> 404', async () => {

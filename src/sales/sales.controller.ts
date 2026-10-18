@@ -45,10 +45,14 @@ import { SalesService } from './sales.service';
 import { SafeSale, SafeSaleListItem } from './types/safe-sale';
 
 /**
- * SELLER tiene acceso Total salvo anulación (matriz aprobada del plan de
- * Fase 6): sin distinción con ADMIN en creación/conversión/entrega/lectura.
- * Solo ADMIN puede anular (a diferencia de Quotes, donde SELLER también
- * podía aceptar/rechazar).
+ * Matriz de roles original (Fase 6): SELLER y ADMIN comparten los mismos
+ * roles de escritura; solo ADMIN puede anular (a diferencia de Quotes,
+ * donde SELLER también podía aceptar/rechazar). P1–P6-D: dentro de estos
+ * roles, la propiedad de la venta (`Sale.sellerId`) decide QUÉ ventas
+ * puede operar cada uno — ver `sale-access.policy.ts`: SELLER solo lee,
+ * convierte-desde-cotización, entrega u observa sus PROPIAS ventas (una
+ * ajena responde 404, igual que una inexistente); ADMIN conserva alcance
+ * total sin restricción de propiedad en todas las operaciones.
  */
 const WRITE_ROLES = [RoleName.ADMIN, RoleName.SELLER] as const;
 const READ_ROLES = [
@@ -130,7 +134,8 @@ export class SalesController {
       'quoteId inválido, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
   })
   @ApiNotFoundResponse({
-    description: 'La cotización, el cliente o algún producto no existe.',
+    description:
+      'La cotización, el cliente o algún producto no existe. Una cotización de otro vendedor (rol SELLER), con o sin pagos iniciales, responde el mismo 404 "La cotización no existe".',
   })
   @ApiConflictResponse({
     description:
@@ -159,6 +164,7 @@ export class SalesController {
         reference: payment.reference,
       })),
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -166,7 +172,7 @@ export class SalesController {
   @ApiOperation({
     summary: 'Listar ventas (paginado, con filtros)',
     description:
-      'SELLER tiene acceso Total (sin restricción de propiedad: ve todas las ventas, no solo las propias). El rango confirmedFrom/confirmedTo usa fechas de negocio America/Lima.',
+      'P2: SELLER ve solo sus propias ventas (Sale.sellerId); un sellerId ajeno enviado como filtro nunca amplía ese alcance. ADMIN/MANAGEMENT conservan la lectura global. El rango confirmedFrom/confirmedTo usa fechas de negocio America/Lima.',
   })
   @ApiOkResponse({ type: PaginatedSalesResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })
@@ -176,20 +182,23 @@ export class SalesController {
     @Query() query: ListSalesQueryDto,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeSaleListItem>> {
-    return this.salesService.list(query, user.role);
+    return this.salesService.list(query, { id: user.id, role: user.role });
   }
 
   @ApiOperation({ summary: 'Obtener el detalle de una venta' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: SaleResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a otro vendedor: mismo 404 "Venta no encontrada" en ambos casos.',
+  })
   @Roles(...READ_ROLES)
   @Get(':id')
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<SafeSale> {
-    return this.salesService.findOne(id, user.role);
+    return this.salesService.findOne(id, { id: user.id, role: user.role });
   }
 
   @ApiOperation({
@@ -228,7 +237,10 @@ export class SalesController {
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: SaleResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a otro vendedor: mismo 404 "Venta no encontrada" en ambos casos.',
+  })
   @ApiConflictResponse({
     description:
       'Transición de entrega inválida en el estado actual, o venta anulada.',
@@ -244,6 +256,7 @@ export class SalesController {
     return this.salesService.markDelivered({
       saleId: id,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -255,7 +268,10 @@ export class SalesController {
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: SaleResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a otro vendedor: mismo 404 "Venta no encontrada" en ambos casos.',
+  })
   @ApiConflictResponse({
     description:
       'Transición de entrega inválida en el estado actual, o venta anulada.',
@@ -271,6 +287,7 @@ export class SalesController {
     return this.salesService.markObserved({
       saleId: id,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -286,7 +303,10 @@ export class SalesController {
     description: 'Documento HTML imprimible.',
     content: { 'text/html': { schema: { type: 'string' } } },
   })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a otro vendedor: mismo 404 "Venta no encontrada" en ambos casos.',
+  })
   @Roles(...READ_ROLES)
   @Get(':id/print')
   @Header('Content-Type', 'text/html; charset=utf-8')
@@ -294,7 +314,10 @@ export class SalesController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<string> {
-    const sale = await this.salesService.findOne(id, user.role);
+    const sale = await this.salesService.findOne(id, {
+      id: user.id,
+      role: user.role,
+    });
     return this.renderer.render(sale);
   }
 }

@@ -488,7 +488,53 @@ describe('Accounts Receivable (e2e)', () => {
       expect(ids).not.toContain(unrelated.id);
     });
 
-    it('sellerId: sin restricción de propiedad para SELLER; filtrar por sellerId funciona para cualquier vendedor', async () => {
+    it('P5: SELLER solo ve sus cuentas por cobrar; sellerId ajeno → vacío; total sin registros ajenos', async () => {
+      const bySeller = await createFixtureSale({
+        total: '30.00',
+        paidAmount: '10.00',
+        sellerId,
+      });
+      const byOtherSeller = await createFixtureSale({
+        total: '30.00',
+        paidAmount: '10.00',
+        sellerId: otherSellerId,
+      });
+      const byAdmin = await createFixtureSale({
+        total: '30.00',
+        paidAmount: '10.00',
+      });
+
+      const unfiltered = await listReceivables(sellerCookie, { limit: 100 });
+      const unfilteredBody =
+        unfiltered.body as PaginatedBody<ReceivableItemBody>;
+      const unfilteredIds = unfilteredBody.data.map((row) => row.saleId);
+      expect(unfilteredIds).toContain(bySeller.id);
+      expect(unfilteredIds).not.toContain(byOtherSeller.id);
+      expect(unfilteredIds).not.toContain(byAdmin.id);
+      expect(
+        unfilteredBody.data.every((row) => row.sellerId === sellerId),
+      ).toBe(true);
+      expect(unfilteredBody.total).toBe(
+        await prisma.sale.count({
+          where: {
+            sellerId,
+            status: SaleStatus.ACTIVE,
+            balanceDue: { gt: 0 },
+          },
+        }),
+      );
+
+      const filtered = await listReceivables(sellerCookie, {
+        sellerId: otherSellerId,
+        limit: 100,
+      });
+      expect(filtered.status).toBe(200);
+      const filteredBody = filtered.body as PaginatedBody<ReceivableItemBody>;
+      expect(filteredBody.data).toEqual([]);
+      expect(filteredBody.total).toBe(0);
+    });
+
+    it('P5: ADMIN y MANAGEMENT conservan la lectura completa (con y sin filtro sellerId)', async () => {
       const bySeller = await createFixtureSale({
         total: '30.00',
         paidAmount: '10.00',
@@ -500,23 +546,24 @@ describe('Accounts Receivable (e2e)', () => {
         sellerId: otherSellerId,
       });
 
-      // SELLER, sin filtro, ve ambas (sin restricción de propiedad).
-      const unfiltered = await listReceivables(sellerCookie, { limit: 100 });
-      const unfilteredIds = (
-        unfiltered.body as PaginatedBody<ReceivableItemBody>
-      ).data.map((row) => row.saleId);
-      expect(unfilteredIds).toContain(bySeller.id);
-      expect(unfilteredIds).toContain(byOtherSeller.id);
+      for (const cookie of [adminCookie, managementCookie]) {
+        const all = await listReceivables(cookie, { limit: 100 });
+        const allIds = (all.body as PaginatedBody<ReceivableItemBody>).data.map(
+          (row) => row.saleId,
+        );
+        expect(allIds).toContain(bySeller.id);
+        expect(allIds).toContain(byOtherSeller.id);
 
-      const filtered = await listReceivables(sellerCookie, {
-        sellerId: otherSellerId,
-        limit: 100,
-      });
-      const filteredIds = (
-        filtered.body as PaginatedBody<ReceivableItemBody>
-      ).data.map((row) => row.saleId);
-      expect(filteredIds).toContain(byOtherSeller.id);
-      expect(filteredIds).not.toContain(bySeller.id);
+        const filtered = await listReceivables(cookie, {
+          sellerId: otherSellerId,
+          limit: 100,
+        });
+        const filteredIds = (
+          filtered.body as PaginatedBody<ReceivableItemBody>
+        ).data.map((row) => row.saleId);
+        expect(filteredIds).toContain(byOtherSeller.id);
+        expect(filteredIds).not.toContain(bySeller.id);
+      }
     });
 
     it('confirmedFrom/confirmedTo: excluye fuera de rango; fecha inválida o invertida → 400', async () => {

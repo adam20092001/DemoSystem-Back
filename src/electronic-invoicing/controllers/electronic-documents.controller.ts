@@ -42,9 +42,12 @@ import { SafeElectronicDocumentListItem } from '../types/safe-electronic-documen
 
 /**
  * Mismos roles de lectura ya vigentes en Ventas (READ_ROLES de
- * SalesController, Bloque 11D §6/§10/§13: descubierto y preservado). Sin
- * restricción de propiedad por vendedor — SELLER ve todos los documentos
- * fiscales, igual que ve todas las ventas.
+ * SalesController, Bloque 11D §6/§10/§13: descubierto y preservado).
+ * P6-C1: dentro de estos roles, la propiedad de la venta asociada
+ * (ElectronicDocument -> Sale.sellerId) decide QUÉ documentos ve cada uno
+ * (ver SaleAccessPolicy vía `findDetailForRequester()`/`list()` del
+ * servicio): SELLER solo sus propios comprobantes; ADMIN/MANAGEMENT
+ * conservan la lectura global. WAREHOUSE sigue sin acceso.
  */
 const READ_ROLES = [
   RoleName.ADMIN,
@@ -70,7 +73,7 @@ export class ElectronicDocumentsController {
   @ApiOperation({
     summary: 'Listar documentos fiscales (paginado, con filtros)',
     description:
-      'SELLER tiene acceso total (sin restricción de propiedad, mismo criterio que GET /sales). El rango issuedFrom/issuedTo usa fechas de negocio America/Lima. Nunca incluye ítems (ver el detalle).',
+      'P6-C1: SELLER ve solo los comprobantes de sus propias ventas (mismo criterio ya vigente en GET /sales); ADMIN/MANAGEMENT conservan la lectura global. El rango issuedFrom/issuedTo usa fechas de negocio America/Lima. Nunca incluye ítems (ver el detalle).',
   })
   @ApiOkResponse({ type: PaginatedElectronicDocumentsResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })
@@ -78,29 +81,42 @@ export class ElectronicDocumentsController {
   @Get()
   list(
     @Query() query: ListElectronicDocumentsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeElectronicDocumentListItem>> {
-    return this.electronicDocumentsService.list(query);
+    return this.electronicDocumentsService.list(query, {
+      id: user.id,
+      role: user.role,
+    });
   }
 
   @ApiOperation({
     summary: 'Obtener el detalle de un documento fiscal (incluye ítems)',
+    description:
+      'P6-C1: SELLER solo accede al comprobante de una venta propia; uno de una venta ajena responde el MISMO 404 que uno inexistente ("El documento fiscal no existe"), sin revelar su existencia. ADMIN/MANAGEMENT conservan la lectura global.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: ElectronicDocumentResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a la venta de otro vendedor: mismo 404 en ambos casos.',
+  })
   @Roles(...READ_ROLES)
   @Get(':id')
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<ElectronicDocumentResponseDto> {
-    return this.electronicDocumentsService.findDetail(id);
+    return this.electronicDocumentsService.findDetailForRequester(id, {
+      id: user.id,
+      role: user.role,
+    });
   }
 
   @ApiOperation({
     summary:
       'Representación impresa de demostración del documento fiscal (HTML)',
     description:
-      'HTML autocontenido pensado para visualizar/imprimir desde el navegador, generado en memoria ÚNICAMENTE a partir del snapshot ya persistido de ElectronicDocument/ElectronicDocumentItem (nunca CompanySettings/Customer/Product en vivo): la representación histórica no cambia aunque esos datos cambien después. No se genera ni almacena ningún archivo. NO es una representación fiscal real: sin QR, sin XML/UBL, sin CDR, sin firma digital. El proveedor "MOCK" es de demostración — su resultado ACCEPTED nunca implica aceptación, registro ni validez tributaria ante SUNAT, y el HTML lo declara explícitamente.',
+      'HTML autocontenido pensado para visualizar/imprimir desde el navegador, generado en memoria ÚNICAMENTE a partir del snapshot ya persistido de ElectronicDocument/ElectronicDocumentItem (nunca CompanySettings/Customer/Product en vivo): la representación histórica no cambia aunque esos datos cambien después. No se genera ni almacena ningún archivo. NO es una representación fiscal real: sin QR, sin XML/UBL, sin CDR, sin firma digital. El proveedor "MOCK" es de demostración — su resultado ACCEPTED nunca implica aceptación, registro ni validez tributaria ante SUNAT, y el HTML lo declara explícitamente. P6-C1: mismo alcance por propiedad que el detalle — SELLER solo imprime comprobantes de sus propias ventas; uno ajeno responde el mismo 404 que uno inexistente.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiProduces('text/html')
@@ -108,12 +124,21 @@ export class ElectronicDocumentsController {
     description: 'Documento HTML de demostración, listo para imprimir.',
     content: { 'text/html': { schema: { type: 'string' } } },
   })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe, o (rol SELLER) pertenece a la venta de otro vendedor: mismo 404 en ambos casos.',
+  })
   @Roles(...READ_ROLES)
   @Get(':id/print')
   @Header('Content-Type', 'text/html; charset=utf-8')
-  async print(@Param('id', ParseUUIDPipe) id: string): Promise<string> {
-    const doc = await this.electronicDocumentsService.findDetail(id);
+  async print(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<string> {
+    const doc = await this.electronicDocumentsService.findDetailForRequester(
+      id,
+      { id: user.id, role: user.role },
+    );
     return this.renderer.render(doc);
   }
 

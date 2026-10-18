@@ -44,7 +44,14 @@ import { QuoteDocumentRenderer } from './printing/quote-document.renderer';
 import { QuotesService } from './quotes.service';
 import { SafeQuote, SafeQuoteListItem } from './types/safe-quote';
 
-/** SELLER tiene acceso Total (D9): sin distinción con ADMIN en ninguno de los 7. */
+/**
+ * Matriz de roles original (D9): SELLER y ADMIN comparten los mismos roles
+ * de escritura en las 7 operaciones. P6-B1–P6-B2: dentro de estos roles, la
+ * propiedad de la cotización (`Quote.sellerId`) decide QUÉ cotizaciones
+ * puede leer u operar cada uno — ver `quote-access.policy.ts`: SELLER solo
+ * sus PROPIAS cotizaciones (una ajena responde 404, igual que una
+ * inexistente); ADMIN conserva alcance total sin restricción de propiedad.
+ */
 const WRITE_ROLES = [RoleName.ADMIN, RoleName.SELLER] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
@@ -66,7 +73,7 @@ export class QuotesController {
   @ApiOperation({
     summary: 'Listar cotizaciones (paginado, con filtros)',
     description:
-      'SELLER tiene acceso Total (sin restricción de propiedad: ve todas las cotizaciones, no solo las propias). WAREHOUSE no tiene acceso. El filtro status usa el estado EFECTIVO: EXPIRED se deriva de la fecha de negocio America/Lima y nunca se persiste en la base.',
+      'P6-B1: SELLER ve solo sus propias cotizaciones (Quote.sellerId); un sellerId ajeno enviado como filtro nunca amplía ese alcance. ADMIN/MANAGEMENT conservan la lectura global. WAREHOUSE no tiene acceso. El filtro status usa el estado EFECTIVO: EXPIRED se deriva de la fecha de negocio America/Lima y nunca se persiste en la base.',
   })
   @ApiOkResponse({ type: PaginatedQuotesResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })
@@ -76,20 +83,23 @@ export class QuotesController {
     @Query() query: ListQuotesQueryDto,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeQuoteListItem>> {
-    return this.quotesService.list(query, user.role);
+    return this.quotesService.list(query, { id: user.id, role: user.role });
   }
 
   @ApiOperation({ summary: 'Obtener el detalle de una cotización' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: QuoteResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe o (rol SELLER) pertenece a otro vendedor: mismo 404 "Cotización no encontrada".',
+  })
   @Roles(...READ_ROLES)
   @Get(':id')
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<SafeQuote> {
-    return this.quotesService.findOne(id, user.role);
+    return this.quotesService.findOne(id, { id: user.id, role: user.role });
   }
 
   @ApiOperation({
@@ -142,7 +152,8 @@ export class QuotesController {
       'Payload sin campos efectivos, ítems vacíos, producto repetido o descuento mayor al subtotal.',
   })
   @ApiNotFoundResponse({
-    description: 'No existe, o algún producto del reemplazo no existe.',
+    description:
+      'No existe o (rol SELLER) pertenece a otro vendedor — mismo 404 "La cotización no existe" en ambos casos —, o algún producto del reemplazo no existe.',
   })
   @ApiConflictResponse({
     description:
@@ -166,6 +177,7 @@ export class QuotesController {
         quantity: item.quantity,
       })),
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -173,7 +185,10 @@ export class QuotesController {
   @ApiOperation({ summary: 'Aceptar una cotización pendiente' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: QuoteResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe o (rol SELLER) pertenece a otro vendedor: mismo 404 "La cotización no existe" en ambos casos.',
+  })
   @ApiConflictResponse({ description: 'No está efectivamente PENDIENTE.' })
   @Roles(...WRITE_ROLES)
   @Post(':id/accept')
@@ -186,6 +201,7 @@ export class QuotesController {
     return this.quotesService.accept({
       quoteId: id,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -193,7 +209,10 @@ export class QuotesController {
   @ApiOperation({ summary: 'Rechazar una cotización pendiente' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: QuoteResponseDto })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe o (rol SELLER) pertenece a otro vendedor: mismo 404 "La cotización no existe" en ambos casos.',
+  })
   @ApiConflictResponse({ description: 'No está efectivamente PENDIENTE.' })
   @Roles(...WRITE_ROLES)
   @Post(':id/reject')
@@ -206,6 +225,7 @@ export class QuotesController {
     return this.quotesService.reject({
       quoteId: id,
       actorUserId: actor.id,
+      actorRole: actor.role,
       ipAddress: request.ip ?? null,
     });
   }
@@ -221,7 +241,10 @@ export class QuotesController {
     description: 'Documento HTML imprimible.',
     content: { 'text/html': { schema: { type: 'string' } } },
   })
-  @ApiNotFoundResponse({ description: 'No existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'No existe o (rol SELLER) pertenece a otro vendedor: mismo 404 "Cotización no encontrada".',
+  })
   @Roles(...READ_ROLES)
   @Get(':id/print')
   @Header('Content-Type', 'text/html; charset=utf-8')
@@ -229,7 +252,10 @@ export class QuotesController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<string> {
-    const quote = await this.quotesService.findOne(id, user.role);
+    const quote = await this.quotesService.findOne(id, {
+      id: user.id,
+      role: user.role,
+    });
     return this.renderer.render(quote);
   }
 }

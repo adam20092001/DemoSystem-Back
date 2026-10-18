@@ -861,7 +861,10 @@ describe('Payments (e2e)', () => {
   describe('matriz de roles HTTP', () => {
     it('registrar pago: ADMIN y SELLER permitidos; MANAGEMENT y WAREHOUSE 403', async () => {
       const saleAdmin = await createFixtureSale({ total: '10.00' });
-      const saleSeller = await createFixtureSale({ total: '10.00' });
+      const saleSeller = await createFixtureSale({
+        total: '10.00',
+        sellerId,
+      });
       const saleManagement = await createFixtureSale({ total: '10.00' });
       const saleWarehouse = await createFixtureSale({ total: '10.00' });
 
@@ -1687,8 +1690,11 @@ describe('Payments (e2e)', () => {
   // trasladados desde las suites retiradas de CashSessions
   // ==================================================================
   describe('cobro directo sin caja (Eliminación de Caja)', () => {
-    it('SELLER sin ninguna caja cobra una venta de otro vendedor -> 201; sin vínculo a caja; createdBy = cobrador real; sellerId de la venta intacto; asiento ORIGINAL', async () => {
-      const sale = await createFixtureSale({ total: '80.00' });
+    it('SELLER sin ninguna caja cobra su propia venta -> 201; sin vínculo a caja; createdBy = cobrador real; sellerId de la venta intacto; asiento ORIGINAL', async () => {
+      // P4: el cobro de una venta AJENA ya no se permite (ver "permisos por
+      // vendedor — cobros (P4)"); esta prueba conserva solo la cobertura de
+      // cobro directo sin caja, sobre una venta propia del SELLER.
+      const sale = await createFixtureSale({ total: '80.00', sellerId });
       const sessionsBefore = await prisma.cashSession.count({
         where: { userId: sellerId },
       });
@@ -1710,7 +1716,7 @@ describe('Payments (e2e)', () => {
       const saleRow = await prisma.sale.findUniqueOrThrow({
         where: { id: sale.id },
       });
-      expect(saleRow.sellerId).toBe(adminId);
+      expect(saleRow.sellerId).toBe(sellerId);
 
       // Nunca se crea una caja automática, ficticia ni oculta.
       expect(
@@ -1728,7 +1734,8 @@ describe('Payments (e2e)', () => {
     });
 
     it('40+60 concurrentes sin caja sobre saldo 100: ambas 201; PAID; ningún Payment queda vinculado a una caja', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const [first, second] = await Promise.all([
         registerPayment(adminCookie, sale.id, {
           method: 'CASH',
@@ -1757,7 +1764,8 @@ describe('Payments (e2e)', () => {
     });
 
     it('70+70 concurrentes sin caja sobre saldo 100: el sobrepago sigue bloqueado (una 201, otra 409); 1 Payment ACTIVE sin caja', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const responses = await Promise.all([
         registerPayment(adminCookie, sale.id, {
           method: 'CASH',
@@ -1802,6 +1810,428 @@ describe('Payments (e2e)', () => {
         .get('/api/v1/cash-sessions')
         .set('Cookie', adminCookie);
       expect(list.status).toBe(404);
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — cobros posteriores (P4)
+  // ==================================================================
+  describe('permisos por vendedor — cobros (P4)', () => {
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_payments_p4';
+    const MULTI_ROLE_PASSWORD = 'MultiRolePaymentsP4123';
+
+    /** Todo lo que un cobro podría persistir sobre la venta. */
+    async function paymentSnapshot(saleId: string) {
+      const [sale, payments, accountingEntries, registeredAudits] =
+        await Promise.all([
+          prisma.sale.findUniqueOrThrow({
+            where: { id: saleId },
+            select: {
+              sellerId: true,
+              paidAmount: true,
+              balanceDue: true,
+              paymentStatus: true,
+              status: true,
+              updatedAt: true,
+            },
+          }),
+          prisma.payment.count({ where: { saleId } }),
+          prisma.accountingEntry.count({
+            where: {
+              sourceType: AccountingSourceType.PAYMENT,
+              sourceId: {
+                in: (
+                  await prisma.payment.findMany({
+                    where: { saleId },
+                    select: { id: true },
+                  })
+                ).map((p) => p.id),
+              },
+            },
+          }),
+          prisma.auditLog.count({
+            where: {
+              action: AuditAction.PAYMENT_REGISTERED,
+              metadata: { path: ['saleId'], equals: saleId },
+            },
+          }),
+        ]);
+      return { sale, payments, accountingEntries, registeredAudits };
+    }
+
+    function messageOf(response: request.Response): unknown {
+      return (response.body as { message?: unknown }).message;
+    }
+
+    it('SELLER cobra su propia venta: 201; createdBy = SELLER; sellerId intacto', async () => {
+      const own = await createFixtureSale({ total: '50.00', sellerId });
+      const result = await registerPaymentOrThrow(sellerCookie, own.id, {
+        method: 'CASH',
+        amount: '20.00',
+      });
+      expect(result.payment.createdBy.id).toBe(sellerId);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: own.id },
+      });
+      expect(saleRow.sellerId).toBe(sellerId);
+    });
+
+    it('SELLER sobre una venta del ADMIN: 404 "La venta no existe", sin Payment, asientos, auditoría ni cambios en la venta', async () => {
+      const foreign = await createFixtureSale({ total: '80.00' });
+      const before = await paymentSnapshot(foreign.id);
+
+      const response = await registerPayment(sellerCookie, foreign.id, {
+        method: 'CASH',
+        amount: '30.00',
+      });
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('La venta no existe');
+      expect(JSON.stringify(response.body)).not.toContain(foreign.number);
+
+      expect(await paymentSnapshot(foreign.id)).toEqual(before);
+      expect(before.sale.sellerId).toBe(adminId);
+    });
+
+    it('SELLER sobre una venta de OTRO SELLER: 404 sin efectos', async () => {
+      const otherSellerSale = await createFixtureSale({
+        total: '40.00',
+        sellerId: fkCreatorId,
+      });
+      const before = await paymentSnapshot(otherSellerSale.id);
+      const response = await registerPayment(sellerCookie, otherSellerSale.id, {
+        method: 'CASH',
+        amount: '10.00',
+      });
+      expect(response.status).toBe(404);
+      expect(messageOf(response)).toBe('La venta no existe');
+      expect(await paymentSnapshot(otherSellerSale.id)).toEqual(before);
+    });
+
+    it('venta ajena e inexistente son indistinguibles; una ajena PAGADA o ANULADA también da 404 (nunca 409)', async () => {
+      const foreignPaid = await createFixtureSale({
+        total: '20.00',
+        paidAmount: '20.00',
+      });
+      // Anulada por la vía real (el CHECK de anulación impide insertarla así).
+      const foreignCancelled = await createFixtureSale({ total: '20.00' });
+      expect(
+        (await cancelSaleHttp(adminCookie, foreignCancelled.id)).status,
+      ).toBe(200);
+      const responses = await Promise.all([
+        registerPayment(sellerCookie, foreignPaid.id, {
+          method: 'CASH',
+          amount: '1.00',
+        }),
+        registerPayment(sellerCookie, foreignCancelled.id, {
+          method: 'CASH',
+          amount: '1.00',
+        }),
+        registerPayment(sellerCookie, '00000000-0000-4000-8000-000000000000', {
+          method: 'CASH',
+          amount: '1.00',
+        }),
+      ]);
+      for (const response of responses) {
+        expect(response.status).toBe(404);
+        expect(messageOf(response)).toBe('La venta no existe');
+      }
+    });
+
+    it('ADMIN cobra una venta del SELLER: 201; createdByUserId = ADMIN y sellerId = SELLER original; auditoría del ADMIN', async () => {
+      const sellerSale = await createFixtureSale({ total: '60.00', sellerId });
+      const result = await registerPaymentOrThrow(adminCookie, sellerSale.id, {
+        method: 'CASH',
+        amount: '60.00',
+      });
+      const row = await prisma.payment.findUniqueOrThrow({
+        where: { id: result.payment.id },
+      });
+      expect(row.createdByUserId).toBe(adminId);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sellerSale.id },
+      });
+      expect(saleRow.sellerId).toBe(sellerId);
+      const audit = await prisma.auditLog.findFirstOrThrow({
+        where: {
+          action: AuditAction.PAYMENT_REGISTERED,
+          entityType: 'Payment',
+          entityId: result.payment.id,
+        },
+      });
+      expect(audit.userId).toBe(adminId);
+    });
+
+    it('concurrencia: dueño y SELLER ajeno cobran la misma venta a la vez; solo persiste el del dueño', async () => {
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
+      const [ownerRes, foreignRes] = await Promise.all([
+        registerPayment(sellerCookie, sale.id, {
+          method: 'CASH',
+          amount: '40.00',
+        }),
+        registerPayment(fkCreatorCookie, sale.id, {
+          method: 'CASH',
+          amount: '40.00',
+        }),
+      ]);
+      expect(ownerRes.status).toBe(201);
+      expect(foreignRes.status).toBe(404);
+      const rows = await prisma.payment.findMany({
+        where: { saleId: sale.id },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].createdByUserId).toBe(sellerId);
+      const saleRow = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleRow.paidAmount.toFixed(2)).toBe('40.00');
+    }, 30000);
+
+    it('sin autenticación: 401 sin efectos', async () => {
+      const sale = await createFixtureSale({ total: '30.00', sellerId });
+      const before = await paymentSnapshot(sale.id);
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .send({ method: 'CASH', amount: '10.00' });
+      expect(response.status).toBe(401);
+      expect(await paymentSnapshot(sale.id)).toEqual(before);
+    });
+
+    it('usuario multirol: como SELLER 404 sobre una venta ajena; tras cambiar a ADMIN, 201 con createdBy = ese usuario', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_payments_p4@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const foreign = await createFixtureSale({ total: '25.00' });
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        const denied = await registerPayment(asSeller, foreign.id, {
+          method: 'CASH',
+          amount: '5.00',
+        });
+        expect(denied.status).toBe(404);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        expect(asAdmin).not.toBe('');
+
+        const allowed = await registerPayment(asAdmin, foreign.id, {
+          method: 'CASH',
+          amount: '5.00',
+        });
+        expect(allowed.status).toBe(201);
+        expect((allowed.body as PaymentMutationBody).payment.createdBy.id).toBe(
+          multiRoleUser.id,
+        );
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
+    });
+  });
+
+  // ==================================================================
+  // Permisos por vendedor — listado de cobros (P5)
+  // ==================================================================
+  describe('permisos por vendedor — listado de cobros (P5)', () => {
+    const MULTI_ROLE_USERNAME = 'e2e_multirole_payments_p5';
+    const MULTI_ROLE_PASSWORD = 'MultiRolePaymentsP5123';
+
+    async function listPayments(
+      cookie: string,
+      query: Record<string, string | number> = {},
+    ): Promise<PaginatedBody<SafePaymentBody>> {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/payments')
+        .query({ limit: 100, ...query })
+        .set('Cookie', cookie);
+      expect(response.status).toBe(200);
+      return response.body as PaginatedBody<SafePaymentBody>;
+    }
+
+    it('SELLER ve los cobros de SUS ventas (incluido uno registrado por ADMIN) y no los de ventas del ADMIN ni de otro SELLER; total sin ajenos', async () => {
+      const ownSale = await createFixtureSale({ total: '50.00', sellerId });
+      const adminSale = await createFixtureSale({ total: '50.00' });
+      const otherSellerSale = await createFixtureSale({
+        total: '50.00',
+        sellerId: fkCreatorId,
+      });
+      const ownBySeller = await registerPaymentOrThrow(
+        sellerCookie,
+        ownSale.id,
+        {
+          method: 'CASH',
+          amount: '10.00',
+        },
+      );
+      const ownByAdmin = await registerPaymentOrThrow(adminCookie, ownSale.id, {
+        method: 'CASH',
+        amount: '15.00',
+      });
+      const onAdminSale = await registerPaymentOrThrow(
+        adminCookie,
+        adminSale.id,
+        { method: 'CASH', amount: '10.00' },
+      );
+      const onOtherSellerSale = await registerPaymentOrThrow(
+        fkCreatorCookie,
+        otherSellerSale.id,
+        { method: 'CASH', amount: '10.00' },
+      );
+
+      const body = await listPayments(sellerCookie);
+      const ids = body.data.map((row) => row.id);
+      expect(ids).toContain(ownBySeller.payment.id);
+      expect(ids).toContain(ownByAdmin.payment.id);
+      expect(ids).not.toContain(onAdminSale.payment.id);
+      expect(ids).not.toContain(onOtherSellerSale.payment.id);
+      expect(body.total).toBe(
+        await prisma.payment.count({ where: { sale: { sellerId } } }),
+      );
+
+      // createdByUserId sigue identificando al cobrador real.
+      const byAdminRow = body.data.find((r) => r.id === ownByAdmin.payment.id);
+      expect(byAdminRow?.createdBy.id).toBe(adminId);
+    });
+
+    it('filtro createdByUserId combinado con AND: el SELLER ve solo los cobros de SUS ventas registrados por ese usuario', async () => {
+      const ownSale = await createFixtureSale({ total: '40.00', sellerId });
+      const adminSale = await createFixtureSale({ total: '40.00' });
+      const ownByAdmin = await registerPaymentOrThrow(adminCookie, ownSale.id, {
+        method: 'CASH',
+        amount: '5.00',
+      });
+      const onAdminSale = await registerPaymentOrThrow(
+        adminCookie,
+        adminSale.id,
+        { method: 'CASH', amount: '5.00' },
+      );
+
+      const body = await listPayments(sellerCookie, {
+        createdByUserId: adminId,
+      });
+      const ids = body.data.map((row) => row.id);
+      expect(ids).toContain(ownByAdmin.payment.id);
+      expect(ids).not.toContain(onAdminSale.payment.id);
+      expect(body.data.every((row) => row.createdBy.id === adminId)).toBe(true);
+    });
+
+    it('cobro histórico registrado por el SELLER sobre una venta ajena: no se le expone (alcance por la venta, no por el cobrador)', async () => {
+      const adminSale = await createFixtureSale({ total: '30.00' });
+      // Dato histórico previo a P4 (hoy la API ya no permite crearlo).
+      const historical = await insertPayment({
+        saleId: adminSale.id,
+        amount: '5.00',
+        createdByUserId: sellerId,
+      });
+
+      const body = await listPayments(sellerCookie, {
+        createdByUserId: sellerId,
+      });
+      expect(body.data.map((row) => row.id)).not.toContain(historical.id);
+
+      // ADMIN sí lo ve, con su cobrador real.
+      const adminBody = await listPayments(adminCookie, {
+        createdByUserId: sellerId,
+      });
+      expect(adminBody.data.map((row) => row.id)).toContain(historical.id);
+    });
+
+    it('ADMIN y MANAGEMENT conservan la lectura completa', async () => {
+      const sellerSale = await createFixtureSale({ total: '20.00', sellerId });
+      const adminSale = await createFixtureSale({ total: '20.00' });
+      const onSellerSale = await registerPaymentOrThrow(
+        sellerCookie,
+        sellerSale.id,
+        { method: 'CASH', amount: '5.00' },
+      );
+      const onAdminSale = await registerPaymentOrThrow(
+        adminCookie,
+        adminSale.id,
+        { method: 'CASH', amount: '5.00' },
+      );
+      for (const cookie of [adminCookie, managementCookie]) {
+        const ids = (await listPayments(cookie)).data.map((row) => row.id);
+        expect(ids).toContain(onSellerSale.payment.id);
+        expect(ids).toContain(onAdminSale.payment.id);
+      }
+    });
+
+    it('usuario multirol: como SELLER no ve cobros de ventas ajenas; tras cambiar a ADMIN, sí', async () => {
+      const server = app.getHttpServer();
+      await upsertFixtureUser(prisma, {
+        username: MULTI_ROLE_USERNAME,
+        email: 'e2e_multirole_payments_p5@demosystem.test',
+        password: MULTI_ROLE_PASSWORD,
+        roleName: RoleName.SELLER,
+      });
+      const multiRoleUser = await prisma.user.findUniqueOrThrow({
+        where: { username: MULTI_ROLE_USERNAME },
+      });
+      const adminRole = await prisma.role.findUniqueOrThrow({
+        where: { name: RoleName.ADMIN },
+      });
+      await prisma.userRole.createMany({
+        data: [{ userId: multiRoleUser.id, roleId: adminRole.id }],
+        skipDuplicates: true,
+      });
+
+      try {
+        const adminSale = await createFixtureSale({ total: '20.00' });
+        const onAdminSale = await registerPaymentOrThrow(
+          adminCookie,
+          adminSale.id,
+          { method: 'CASH', amount: '5.00' },
+        );
+        const asSeller = (
+          await login(server, MULTI_ROLE_USERNAME, MULTI_ROLE_PASSWORD)
+        ).cookie;
+        const sellerIds = (await listPayments(asSeller)).data.map(
+          (row) => row.id,
+        );
+        expect(sellerIds).not.toContain(onAdminSale.payment.id);
+
+        const switched = await request(server)
+          .post('/api/v1/auth/switch-role')
+          .set('Cookie', asSeller)
+          .send({ role: RoleName.ADMIN });
+        expect(switched.status).toBe(200);
+        const setCookie = (switched.headers['set-cookie'] ??
+          []) as unknown as string[];
+        const asAdmin = (setCookie[0] ?? '').split(';')[0] ?? '';
+        const adminIds = (await listPayments(asAdmin)).data.map(
+          (row) => row.id,
+        );
+        expect(adminIds).toContain(onAdminSale.payment.id);
+      } finally {
+        // Otras suites exigen que e2e_admin sea el único ADMIN activo.
+        await prisma.userRole.deleteMany({
+          where: { userId: multiRoleUser.id, roleId: adminRole.id },
+        });
+      }
     });
   });
 
@@ -2271,7 +2701,8 @@ describe('Payments (e2e)', () => {
   // ==================================================================
   describe('concurrencia', () => {
     it('70+70 sobre saldo 100: exactamente una 201, la otra 409; final: 1 pago ACTIVE=70, PARTIALLY_PAID 70/30; 1 auditoría', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const [first, second] = await Promise.all([
         registerPayment(adminCookie, sale.id, {
           method: 'CASH',
@@ -2306,7 +2737,8 @@ describe('Payments (e2e)', () => {
     }, 30000);
 
     it('40+60 sobre saldo 100: ambas 201; final: 2 pagos ACTIVE sumando 100.00; PAID', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const [first, second] = await Promise.all([
         registerPayment(adminCookie, sale.id, {
           method: 'CASH',
@@ -2339,7 +2771,8 @@ describe('Payments (e2e)', () => {
     }, 30000);
 
     it('50+50 duplicados concurrentes sobre saldo 100: ambos permitidos (sin idempotencia); 2 pagos ACTIVE; PAID', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const [first, second] = await Promise.all([
         registerPayment(adminCookie, sale.id, {
           method: 'CASH',
@@ -2392,7 +2825,8 @@ describe('Payments (e2e)', () => {
     }, 30000);
 
     it('registro de pago vs. anulación de venta en carrera: al final la venta queda CANCELLED y cero pagos ACTIVE, sin importar quién gane el lock', async () => {
-      const sale = await createFixtureSale({ total: '100.00' });
+      // P4: venta del SELLER cobrador (propiedad coherente; esta prueba no es de autorización).
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
       const [payRes, cancelRes] = await Promise.all([
         registerPayment(sellerCookie, sale.id, {
           method: 'CASH',
@@ -2571,9 +3005,12 @@ describe('Payments (e2e)', () => {
       expect(cancelledIds).not.toContain(active.payment.id);
     });
 
-    it('filtro por createdByUserId: ADMIN y SELLER cada uno ve solo lo suyo con el filtro (sin restricción de propiedad al listar sin filtro)', async () => {
+    it('filtro por createdByUserId (listado de ADMIN): el cobrador real de cada pago se filtra correctamente', async () => {
       const saleAdmin = await createFixtureSale({ total: '10.00' });
-      const saleSeller = await createFixtureSale({ total: '10.00' });
+      const saleSeller = await createFixtureSale({
+        total: '10.00',
+        sellerId,
+      });
       const byAdmin = await registerPaymentOrThrow(adminCookie, saleAdmin.id, {
         method: 'CASH',
         amount: '10.00',
@@ -2877,7 +3314,11 @@ describe('Payments (e2e)', () => {
     });
 
     it('Payment → createdBy User: eliminar al usuario creador mientras existe el Payment → bloqueado (RESTRICT), usando un actor efímero propio', async () => {
-      const sale = await createFixtureSale({ total: '10.00' });
+      // P4: venta del propio actor efímero (dueño comercial = cobrador).
+      const sale = await createFixtureSale({
+        total: '10.00',
+        sellerId: fkCreatorId,
+      });
       const response = await registerPayment(fkCreatorCookie, sale.id, {
         method: 'CASH',
         amount: '10.00',

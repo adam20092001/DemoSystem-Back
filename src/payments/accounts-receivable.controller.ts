@@ -38,7 +38,7 @@ export class AccountsReceivableController {
   @ApiOperation({
     summary: 'Listar cuentas por cobrar (paginado, con filtros)',
     description:
-      'Incluye únicamente ventas ACTIVE con saldo pendiente (balanceDue) positivo; excluye siempre las ventas ANULADAS, incluso si su saldo histórico congelado es mayor que 0. Público general nunca aparece (su saldo pendiente siempre es 0 por invariante de base de datos). No se excluye a un cliente actualmente BLOCKED si la deuda es real. Orden fijo: deuda más antigua primero (confirmedAt ascendente). daysOutstanding son días de calendario desde la fecha de negocio America/Lima de confirmación, no una medida de mora contra una fecha de vencimiento (no existe dueDate en el MVP). Esta consulta no es un libro contable formal.',
+      'Incluye únicamente ventas ACTIVE con saldo pendiente (balanceDue) positivo; excluye siempre las ventas ANULADAS, incluso si su saldo histórico congelado es mayor que 0. Público general nunca aparece (su saldo pendiente siempre es 0 por invariante de base de datos). No se excluye a un cliente actualmente BLOCKED si la deuda es real. Orden fijo: deuda más antigua primero (confirmedAt ascendente). daysOutstanding son días de calendario desde la fecha de negocio America/Lima de confirmación, no una medida de mora contra una fecha de vencimiento (no existe dueDate en el MVP). Esta consulta no es un libro contable formal. P5: SELLER ve solo las cuentas por cobrar de sus propias ventas (Sale.sellerId); ADMIN/MANAGEMENT conservan la lectura global.',
   })
   @ApiOkResponse({ type: PaginatedReceivablesResponseDto })
   @ApiBadRequestResponse({ description: 'Filtros o rango de fechas inválido.' })
@@ -48,6 +48,9 @@ export class AccountsReceivableController {
     @Query() query: ListReceivablesQueryDto,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<ReceivableItem>> {
-    return this.accountsReceivableService.list(query, user.role);
+    return this.accountsReceivableService.list(query, {
+      id: user.id,
+      role: user.role,
+    });
   }
 }
