@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { ConfigurationModule } from '../configuration/configuration.module';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { QuoteDocumentRenderer } from './printing/quote-document.renderer';
@@ -20,7 +21,7 @@ import { QuotesService } from './quotes.service';
 @Module({
   imports: [DocumentSequencesModule, ConfigurationModule],
   controllers: [QuotesController],
-  providers: [QuotesService, QuoteDocumentRenderer],
+  providers: [QuotesService, QuoteDocumentRenderer, ExcelExportService],
   exports: [QuotesService],
 })
 export class QuotesModule {}

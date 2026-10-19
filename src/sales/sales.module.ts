@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { ConfigurationModule } from '../configuration/configuration.module';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { InventoryModule } from '../inventory/inventory.module';
@@ -54,7 +55,7 @@ import { SalesService } from './sales.service';
     ConfigurationModule,
   ],
   controllers: [SalesController],
-  providers: [SalesService, SaleDocumentRenderer],
+  providers: [SalesService, SaleDocumentRenderer, ExcelExportService],
   exports: [SalesService],
 })
 export class SalesModule {}

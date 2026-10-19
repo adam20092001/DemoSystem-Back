@@ -88,7 +88,7 @@ describe('AccountsReceivableController', () => {
   });
 
   describe('superficie exacta de rutas', () => {
-    it('expone exactamente 1 operación de solo lectura, sin mutaciones', () => {
+    it('expone exactamente 2 operaciones de solo lectura, sin mutaciones', () => {
       const methodNames = Object.getOwnPropertyNames(
         AccountsReceivableController.prototype,
       ).filter((name) => name !== 'constructor');
@@ -110,8 +110,13 @@ describe('AccountsReceivableController', () => {
             route !== null,
         );
 
-      expect(routes).toHaveLength(1);
-      expect(routes[0]).toEqual({ method: RequestMethod.GET, path: '/' });
+      expect(routes).toHaveLength(2);
+      expect(routes).toEqual(
+        expect.arrayContaining([
+          { method: RequestMethod.GET, path: '/' },
+          { method: RequestMethod.GET, path: 'export.xlsx' },
+        ]),
+      );
       expect(routes.some((route) => route.method !== RequestMethod.GET)).toBe(
         false,
       );

@@ -11,6 +11,7 @@ import {
   Post,
   Query,
   Req,
+  StreamableFile,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -32,6 +33,10 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
+import {
+  excelFileResponse,
+  XLSX_CONTENT_TYPE,
+} from '../common/excel/excel-file-response';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { ListQuotesQueryDto } from './dto/list-quotes-query.dto';
@@ -84,6 +89,33 @@ export class QuotesController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeQuoteListItem>> {
     return this.quotesService.list(query, { id: user.id, role: user.role });
+  }
+
+  @ApiOperation({
+    summary: 'Exportar cotizaciones a Excel (.xlsx)',
+    description:
+      'NR-06: mismos filtros y alcance por vendedor que GET /quotes (page/limit se ignoran — exporta el resultado completo, hasta 20 000 filas). Reutiliza los montos ya calculados (incluido el snapshot NR-03); nunca recalcula descuentos/IGV.',
+  })
+  @ApiProduces(XLSX_CONTENT_TYPE)
+  @ApiOkResponse({
+    description: 'Archivo .xlsx con las cotizaciones filtradas.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Filtros o rango de fechas inválido, o el resultado supera las 20 000 filas.',
+  })
+  @Roles(...READ_ROLES)
+  @Get('export.xlsx')
+  @Header('Content-Type', XLSX_CONTENT_TYPE)
+  async exportXlsx(
+    @Query() query: ListQuotesQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const buffer = await this.quotesService.exportQuotesXlsx(query, {
+      id: user.id,
+      role: user.role,
+    });
+    return excelFileResponse(buffer, 'cotizaciones');
   }
 
   @ApiOperation({ summary: 'Obtener el detalle de una cotización' })

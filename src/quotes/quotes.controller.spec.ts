@@ -330,7 +330,7 @@ describe('QuotesController', () => {
   });
 
   describe('superficie exacta de rutas', () => {
-    it('expone exactamente 7 operaciones en 5 paths únicos, sin DELETE/PUT/conversión', () => {
+    it('expone exactamente 8 operaciones en 6 paths únicos, sin DELETE/PUT/conversión', () => {
       const methodNames = Object.getOwnPropertyNames(
         QuotesController.prototype,
       ).filter((name) => name !== 'constructor');
@@ -352,11 +352,12 @@ describe('QuotesController', () => {
             route !== null,
         );
 
-      expect(routes).toHaveLength(7);
+      expect(routes).toHaveLength(8);
       expect(routes).toEqual(
         expect.arrayContaining([
           { method: RequestMethod.POST, path: '/' },
           { method: RequestMethod.GET, path: '/' },
+          { method: RequestMethod.GET, path: 'export.xlsx' },
           { method: RequestMethod.GET, path: ':id' },
           { method: RequestMethod.PATCH, path: ':id' },
           { method: RequestMethod.POST, path: ':id/accept' },
@@ -366,7 +367,7 @@ describe('QuotesController', () => {
       );
 
       const uniquePaths = new Set(routes.map((route) => route.path));
-      expect(uniquePaths.size).toBe(5);
+      expect(uniquePaths.size).toBe(6);
 
       expect(
         routes.some((route) => route.method === RequestMethod.DELETE),

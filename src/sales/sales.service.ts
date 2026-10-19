@@ -32,6 +32,9 @@ import {
   isValidDateOnly,
   startOfBusinessDayUtc,
 } from '../common/date/business-date';
+import { ExcelColumn } from '../common/excel/excel-column';
+import { EXPORT_PAGE_SIZE } from '../common/excel/excel-export.constants';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
@@ -213,6 +216,7 @@ export class SalesService {
     private readonly paymentEngine: PaymentEngine,
     private readonly accountingEngine: AccountingEngine,
     private readonly settingsReader: SettingsReader,
+    private readonly excelExportService: ExcelExportService,
   ) {}
 
   // ==================================================================
@@ -1043,6 +1047,138 @@ export class SalesService {
       total,
       totalPages: total === 0 ? 0 : Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * NR-06: exportación .xlsx de GET /sales. Reutiliza `list()` TAL CUAL —
+   * mismo `where`/alcance por vendedor/orden/mapper seguro — en lotes de
+   * EXPORT_PAGE_SIZE, nunca una consulta ni una policy nueva. La página 1
+   * ya trae el `total` real (mismo `where`): se valida el máximo de NR-06
+   * ANTES de pedir cualquier página adicional o construir ningún workbook,
+   * así que un resultado demasiado grande nunca produce un archivo parcial.
+   * Los montos ya vienen redondeados a 2 decimales por toSafeSaleListItem
+   * (Prisma.Decimal.toFixed(2)): aquí solo se convierten a number para la
+   * celda de Excel, nunca se recalculan.
+   */
+  async exportSalesXlsx(
+    query: ListSalesQuery,
+    requester: SaleAccessRequester,
+  ): Promise<Buffer> {
+    const firstPage = await this.list(
+      { ...query, page: 1, limit: EXPORT_PAGE_SIZE },
+      requester,
+    );
+    this.excelExportService.assertWithinExportLimit(firstPage.total, 'ventas');
+
+    const rows: SafeSaleListItem[] = [...firstPage.data];
+    for (let page = 2; page <= firstPage.totalPages; page++) {
+      const next = await this.list(
+        { ...query, page, limit: EXPORT_PAGE_SIZE },
+        requester,
+      );
+      rows.push(...next.data);
+    }
+
+    const columns: ExcelColumn<SafeSaleListItem>[] = [
+      {
+        key: 'number',
+        header: 'Número',
+        type: 'identifier',
+        value: (r) => r.number,
+      },
+      {
+        key: 'status',
+        header: 'Estado',
+        type: 'string',
+        value: (r) => r.status,
+      },
+      {
+        key: 'paymentStatus',
+        header: 'Estado de pago',
+        type: 'string',
+        value: (r) => r.paymentStatus,
+      },
+      {
+        key: 'deliveryStatus',
+        header: 'Estado de entrega',
+        type: 'string',
+        value: (r) => r.deliveryStatus,
+      },
+      {
+        key: 'customerName',
+        header: 'Cliente',
+        type: 'string',
+        value: (r) => r.customerName,
+      },
+      {
+        key: 'customerDocumentNumber',
+        header: 'Documento del cliente',
+        type: 'identifier',
+        value: (r) => r.customerDocumentNumber,
+      },
+      {
+        key: 'seller',
+        header: 'Vendedor',
+        type: 'string',
+        value: (r) => `${r.seller.firstName} ${r.seller.lastName}`,
+      },
+      {
+        key: 'subtotal',
+        header: 'Subtotal',
+        type: 'number',
+        value: (r) => Number(r.subtotal),
+      },
+      {
+        key: 'discountAmount',
+        header: 'Descuento del documento',
+        type: 'number',
+        value: (r) => Number(r.discountAmount),
+      },
+      {
+        key: 'taxAmount',
+        header: 'IGV',
+        type: 'number',
+        value: (r) => Number(r.taxAmount),
+      },
+      {
+        key: 'total',
+        header: 'Total',
+        type: 'number',
+        value: (r) => Number(r.total),
+      },
+      {
+        key: 'currencyCode',
+        header: 'Moneda',
+        type: 'string',
+        value: (r) => r.currencyCode,
+      },
+      {
+        key: 'paidAmount',
+        header: 'Pagado',
+        type: 'number',
+        value: (r) => Number(r.paidAmount),
+      },
+      {
+        key: 'balanceDue',
+        header: 'Saldo pendiente',
+        type: 'number',
+        value: (r) => Number(r.balanceDue),
+      },
+      {
+        key: 'itemCount',
+        header: 'Cantidad de ítems',
+        type: 'number',
+        value: (r) => r.itemCount,
+      },
+      {
+        key: 'confirmedAt',
+        header: 'Fecha de confirmación',
+        type: 'date',
+        value: (r) => r.confirmedAt,
+      },
+    ];
+
+    return this.excelExportService.buildWorkbook('Ventas', columns, rows);
   }
 
   /**

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaymentMethodsModule } from '../payment-methods/payment-methods.module';
 import { AccountsReceivableController } from './accounts-receivable.controller';
 import { AccountsReceivableService } from './accounts-receivable.service';
@@ -41,7 +42,12 @@ import { PaymentsService } from './payments.service';
 @Module({
   imports: [AccountingModule, PaymentMethodsModule],
   controllers: [PaymentsController, AccountsReceivableController],
-  providers: [PaymentEngine, PaymentsService, AccountsReceivableService],
+  providers: [
+    PaymentEngine,
+    PaymentsService,
+    AccountsReceivableService,
+    ExcelExportService,
+  ],
   exports: [PaymentEngine],
 })
 export class PaymentsModule {}

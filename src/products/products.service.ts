@@ -14,6 +14,9 @@ import {
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { ExcelColumn } from '../common/excel/excel-column';
+import { EXPORT_PAGE_SIZE } from '../common/excel/excel-export.constants';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import {
@@ -45,6 +48,7 @@ export class ProductsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly excelExportService: ExcelExportService,
   ) {}
 
   async createProduct(input: CreateProductInput): Promise<SafeProductDetail> {
@@ -213,6 +217,99 @@ export class ProductsService {
       total,
       totalPages: total === 0 ? 0 : Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * NR-06: exportación .xlsx de GET /products. Reutiliza `listProducts()`
+   * TAL CUAL en lotes de EXPORT_PAGE_SIZE — mismas reglas de visibilidad
+   * (SELLER forzado a status=ACTIVE, lowStockOnly vía la misma rama
+   * existente, internalNotes nunca visible para SELLER) — nunca una
+   * consulta nueva. internalNotes y primaryImage NUNCA se exportan (no
+   * aplican a una hoja de cálculo); stockCurrent/stockMinimum se exportan
+   * tal cual están persistidos, incluidos los '0.000' reales de un
+   * servicio no inventariable (nunca un valor fabricado).
+   */
+  async exportProductsXlsx(
+    query: ListProductsQuery,
+    requesterRole: RoleName,
+  ): Promise<Buffer> {
+    const firstPage = await this.listProducts(
+      { ...query, page: 1, limit: EXPORT_PAGE_SIZE },
+      requesterRole,
+    );
+    this.excelExportService.assertWithinExportLimit(
+      firstPage.total,
+      'productos',
+    );
+
+    const rows: SafeProductListItem[] = [...firstPage.data];
+    for (let page = 2; page <= firstPage.totalPages; page++) {
+      const next = await this.listProducts(
+        { ...query, page, limit: EXPORT_PAGE_SIZE },
+        requesterRole,
+      );
+      rows.push(...next.data);
+    }
+
+    const columns: ExcelColumn<SafeProductListItem>[] = [
+      { key: 'sku', header: 'SKU', type: 'identifier', value: (r) => r.sku },
+      {
+        key: 'name',
+        header: 'Nombre del producto',
+        type: 'string',
+        value: (r) => r.name,
+      },
+      {
+        key: 'brand',
+        header: 'Marca',
+        type: 'string',
+        value: (r) => r.brand,
+      },
+      {
+        key: 'productType',
+        header: 'Tipo de producto',
+        type: 'string',
+        value: (r) => r.productType,
+      },
+      {
+        key: 'category',
+        header: 'Categoría',
+        type: 'string',
+        value: (r) => r.category.name,
+      },
+      {
+        key: 'unit',
+        header: 'Unidad',
+        type: 'string',
+        value: (r) => r.unit.name,
+      },
+      {
+        key: 'salePrice',
+        header: 'Precio de venta',
+        type: 'number',
+        value: (r) => Number(r.salePrice),
+      },
+      {
+        key: 'stockCurrent',
+        header: 'Stock actual',
+        type: 'number',
+        value: (r) => Number(r.stockCurrent),
+      },
+      {
+        key: 'stockMinimum',
+        header: 'Stock mínimo',
+        type: 'number',
+        value: (r) => Number(r.stockMinimum),
+      },
+      {
+        key: 'status',
+        header: 'Estado',
+        type: 'string',
+        value: (r) => r.status,
+      },
+    ];
+
+    return this.excelExportService.buildWorkbook('Productos', columns, rows);
   }
 
   /**

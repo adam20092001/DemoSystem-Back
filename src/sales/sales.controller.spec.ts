@@ -501,7 +501,7 @@ describe('SalesController', () => {
   });
 
   describe('superficie exacta de rutas', () => {
-    it('expone exactamente 8 operaciones en 7 paths únicos, sin DELETE/PUT/PATCH/Payment', () => {
+    it('expone exactamente 9 operaciones en 8 paths únicos, sin DELETE/PUT/PATCH/Payment', () => {
       const methodNames = Object.getOwnPropertyNames(
         SalesController.prototype,
       ).filter((name) => name !== 'constructor');
@@ -523,12 +523,13 @@ describe('SalesController', () => {
             route !== null,
         );
 
-      expect(routes).toHaveLength(8);
+      expect(routes).toHaveLength(9);
       expect(routes).toEqual(
         expect.arrayContaining([
           { method: RequestMethod.POST, path: '/' },
           { method: RequestMethod.POST, path: 'from-quote/:quoteId' },
           { method: RequestMethod.GET, path: '/' },
+          { method: RequestMethod.GET, path: 'export.xlsx' },
           { method: RequestMethod.GET, path: ':id' },
           { method: RequestMethod.POST, path: ':id/cancel' },
           { method: RequestMethod.POST, path: ':id/mark-delivered' },
@@ -538,7 +539,7 @@ describe('SalesController', () => {
       );
 
       const uniquePaths = new Set(routes.map((route) => route.path));
-      expect(uniquePaths.size).toBe(7);
+      expect(uniquePaths.size).toBe(8);
 
       expect(
         routes.some((route) => route.method === RequestMethod.DELETE),

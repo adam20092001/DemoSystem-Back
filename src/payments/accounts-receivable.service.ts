@@ -6,6 +6,9 @@ import {
   isValidDateOnly,
   startOfBusinessDayUtc,
 } from '../common/date/business-date';
+import { ExcelColumn } from '../common/excel/excel-column';
+import { EXPORT_PAGE_SIZE } from '../common/excel/excel-export.constants';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import {
@@ -66,7 +69,10 @@ function toReceivableItem(row: ReceivableRow, today: string): ReceivableItem {
  */
 @Injectable()
 export class AccountsReceivableService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly excelExportService: ExcelExportService,
+  ) {}
 
   /**
    * Permisos por vendedor (P5): cada cuenta por cobrar es una venta, así que
@@ -154,6 +160,107 @@ export class AccountsReceivableService {
       total,
       totalPages: total === 0 ? 0 : Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * NR-06: exportación .xlsx de GET /accounts-receivable. Reutiliza
+   * `list()` TAL CUAL en lotes de EXPORT_PAGE_SIZE (mismo `where`/alcance
+   * por vendedor/orden/cálculo de daysOutstanding) — nunca una consulta ni
+   * una regla de deuda nueva. No existe `dueDate` en el MVP: la columna
+   * "Días de mora" nunca se presenta como un indicador de vencimiento,
+   * solo como los días de calendario ya calculados por
+   * calculateDaysOutstanding().
+   */
+  async exportReceivablesXlsx(
+    query: ListReceivablesQuery,
+    requester: SaleAccessRequester,
+  ): Promise<Buffer> {
+    const firstPage = await this.list(
+      { ...query, page: 1, limit: EXPORT_PAGE_SIZE },
+      requester,
+    );
+    this.excelExportService.assertWithinExportLimit(
+      firstPage.total,
+      'cuentas por cobrar',
+    );
+
+    const rows: ReceivableItem[] = [...firstPage.data];
+    for (let page = 2; page <= firstPage.totalPages; page++) {
+      const next = await this.list(
+        { ...query, page, limit: EXPORT_PAGE_SIZE },
+        requester,
+      );
+      rows.push(...next.data);
+    }
+
+    const columns: ExcelColumn<ReceivableItem>[] = [
+      {
+        key: 'saleNumber',
+        header: 'Número de venta',
+        type: 'identifier',
+        value: (r) => r.saleNumber,
+      },
+      {
+        key: 'customerName',
+        header: 'Cliente',
+        type: 'string',
+        value: (r) => r.customerName,
+      },
+      {
+        key: 'customerDocumentNumber',
+        header: 'Documento del cliente',
+        type: 'identifier',
+        value: (r) => r.customerDocumentNumber,
+      },
+      {
+        key: 'sellerId',
+        header: 'Vendedor',
+        type: 'identifier',
+        value: (r) => r.sellerId,
+      },
+      {
+        key: 'confirmedAt',
+        header: 'Fecha de confirmación',
+        type: 'date',
+        value: (r) => r.confirmedAt,
+      },
+      {
+        key: 'total',
+        header: 'Total',
+        type: 'number',
+        value: (r) => Number(r.total),
+      },
+      {
+        key: 'paidAmount',
+        header: 'Pagado',
+        type: 'number',
+        value: (r) => Number(r.paidAmount),
+      },
+      {
+        key: 'balanceDue',
+        header: 'Saldo pendiente',
+        type: 'number',
+        value: (r) => Number(r.balanceDue),
+      },
+      {
+        key: 'paymentStatus',
+        header: 'Estado de pago',
+        type: 'string',
+        value: (r) => r.paymentStatus,
+      },
+      {
+        key: 'daysOutstanding',
+        header: 'Días transcurridos desde la confirmación',
+        type: 'number',
+        value: (r) => r.daysOutstanding,
+      },
+    ];
+
+    return this.excelExportService.buildWorkbook(
+      'Cuentas por cobrar',
+      columns,
+      rows,
+    );
   }
 
   private assertValidDateRangeQuery(query: ListReceivablesQuery): void {

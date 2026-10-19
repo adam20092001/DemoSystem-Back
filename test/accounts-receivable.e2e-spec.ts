@@ -10,7 +10,9 @@ import {
   SalePaymentStatus,
   SaleStatus,
 } from '@prisma/client';
+import ExcelJS from 'exceljs';
 import request from 'supertest';
+import { binaryParser } from './helpers/excel-download';
 import { App } from 'supertest/types';
 import { businessToday } from '../src/common/date/business-date';
 import { deriveSalePaymentSummary } from '../src/sales/sale-calculator';
@@ -767,6 +769,147 @@ describe('Accounts Receivable (e2e)', () => {
   describe('coherencia con businessToday()', () => {
     it('businessToday() no lanza y produce YYYY-MM-DD', () => {
       expect(businessToday()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+  });
+
+  // ==================================================================
+  // NR-06 — GET /accounts-receivable/export.xlsx
+  // ==================================================================
+  describe('export.xlsx', () => {
+    async function readWorkbook(buffer: Buffer): Promise<ExcelJS.Worksheet> {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      if (!sheet) {
+        throw new Error('El .xlsx descargado no tiene ninguna hoja');
+      }
+      return sheet;
+    }
+
+    it('ADMIN: 200, .xlsx real parseable, con la cuenta por cobrar creada', async () => {
+      const sale = await createFixtureSale({ total: '100.00' });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      expect(response.headers['content-disposition']).toContain('attachment');
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(sale.number);
+    });
+
+    it('SELLER: exporta solo sus propias cuentas por cobrar, nunca las de otro vendedor', async () => {
+      const ownSale = await createFixtureSale({
+        total: '100.00',
+        sellerId,
+      });
+      const otherSale = await createFixtureSale({
+        total: '100.00',
+        sellerId: adminId,
+      });
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .set('Cookie', sellerCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(ownSale.number);
+      expect(numbers).not.toContain(otherSale.number);
+    });
+
+    it('MANAGEMENT: alcance global, igual que ADMIN', async () => {
+      const sale = await createFixtureSale({ total: '100.00', sellerId });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .set('Cookie', managementCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(sale.number);
+    });
+
+    it('WAREHOUSE: 403', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .set('Cookie', warehouseCookie);
+      expect(response.status).toBe(403);
+    });
+
+    it('sin cookie: 401', async () => {
+      const response = await request(app.getHttpServer()).get(
+        '/api/v1/accounts-receivable/export.xlsx',
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it('mismos filtros que GET /accounts-receivable: customerId acota el resultado exportado', async () => {
+      const sale = await createFixtureSale({ total: '100.00' });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .query({ customerId: personActive.id })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(sale.number);
+    });
+
+    it('inyección de fórmula en el nombre del cliente se neutraliza en la celda exportada', async () => {
+      const sale = await createFixtureSale({
+        total: '100.00',
+        customerName: '=cmd|/C calc!A1',
+      });
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      let targetRow: ExcelJS.Row | undefined;
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1 && row.getCell(1).value === sale.number) {
+          targetRow = row;
+        }
+      });
+      expect(targetRow?.getCell(2).value as string).toBe("'=cmd|/C calc!A1");
+    });
+
+    it('resultado vacío: .xlsx válido con solo encabezado', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/accounts-receivable/export.xlsx')
+        .query({ customerId: '00000000-0000-4000-8000-000000000000' })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBe(1);
     });
   });
 });
