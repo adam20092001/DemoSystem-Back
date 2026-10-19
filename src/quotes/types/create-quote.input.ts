@@ -1,7 +1,12 @@
+import { LineDiscountType } from '@prisma/client';
+
 export interface CreateQuoteItemInput {
   productId: string;
   /** Decimal como texto, nunca number de JavaScript. */
   quantity: string;
+  /** NR-03: ambos presentes o ambos ausentes (ver parseLineDiscount()). */
+  discountType?: LineDiscountType;
+  discountValue?: string;
 }
 
 /**

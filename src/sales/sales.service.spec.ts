@@ -9,6 +9,7 @@ import {
   CustomerStatus,
   CustomerType,
   DocumentType,
+  LineDiscountType,
   Prisma,
   ProductStatus,
   QuoteStatus,
@@ -142,6 +143,10 @@ function makeQuoteItemRow(overrides: Partial<Record<string, unknown>> = {}) {
     quantity: new Prisma.Decimal('1.000'),
     unitPrice: new Prisma.Decimal('10.00'),
     lineTotal: new Prisma.Decimal('10.00'),
+    // NR-03: sin descuento de línea por defecto en este fixture.
+    discountType: null,
+    discountValue: null,
+    discountAmount: new Prisma.Decimal('0'),
     ...overrides,
   };
 }
@@ -174,6 +179,10 @@ function makeSaleItemRow(overrides: Partial<Record<string, unknown>> = {}) {
     quantity: new Prisma.Decimal('1.000'),
     unitPrice: new Prisma.Decimal('10.00'),
     lineTotal: new Prisma.Decimal('10.00'),
+    // NR-03: sin descuento de línea por defecto en este fixture.
+    discountType: null,
+    discountValue: null,
+    discountAmount: new Prisma.Decimal('0'),
     ...overrides,
   };
 }
@@ -2203,6 +2212,26 @@ describe('SalesService', () => {
         });
       });
     });
+
+    it('NR-03: la venta directa nunca admite descuento de línea; el ítem creado siempre persiste discountType/discountValue/discountAmount en null/null/0.00', async () => {
+      await service.createDirect(validDirectInput);
+      const created = prisma.tx.sale.create.mock.calls[0][0] as {
+        data: {
+          items: {
+            create: {
+              discountType: unknown;
+              discountValue: unknown;
+              discountAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(created.data.items.create[0].discountType).toBeNull();
+      expect(created.data.items.create[0].discountValue).toBeNull();
+      expect(created.data.items.create[0].discountAmount.toFixed(2)).toBe(
+        '0.00',
+      );
+    });
   });
 
   // ====================================================================
@@ -2605,6 +2634,104 @@ describe('SalesService', () => {
           expect(created.data.subtotal.toFixed(2)).toBe('55.50');
           expect(created.data.discountAmount.toFixed(2)).toBe('5.50');
           expect(created.data.total.toFixed(2)).toBe('50.00');
+          return Promise.resolve(makeSaleDetailRow());
+        });
+        await service.createFromQuote(validConvertInput);
+      });
+
+      it('NR-03: discountType/discountValue/discountAmount/lineTotal del QuoteItem se copian EXACTOS al SaleItem (FIXED), nunca recalculados', async () => {
+        prisma.tx.quoteItem.findMany.mockResolvedValue([
+          makeQuoteItemRow({
+            discountType: LineDiscountType.FIXED,
+            discountValue: new Prisma.Decimal('3.00'),
+            discountAmount: new Prisma.Decimal('3.00'),
+            lineTotal: new Prisma.Decimal('7.00'),
+          }),
+        ]);
+        prisma.tx.sale.create.mockImplementation((args: unknown) => {
+          const created = args as {
+            data: {
+              items: {
+                create: {
+                  discountType: LineDiscountType;
+                  discountValue: Prisma.Decimal;
+                  discountAmount: Prisma.Decimal;
+                  lineTotal: Prisma.Decimal;
+                }[];
+              };
+            };
+          };
+          const createdItem = created.data.items.create[0];
+          expect(createdItem.discountType).toBe(LineDiscountType.FIXED);
+          expect(createdItem.discountValue.toFixed(2)).toBe('3.00');
+          expect(createdItem.discountAmount.toFixed(2)).toBe('3.00');
+          expect(createdItem.lineTotal.toFixed(2)).toBe('7.00');
+          return Promise.resolve(makeSaleDetailRow());
+        });
+        await service.createFromQuote(validConvertInput);
+      });
+
+      it('NR-03: descuento de línea PERCENT también se copia EXACTO al SaleItem, incluso si maxDiscountPercent vigente ya no lo permitiría', async () => {
+        // maxDiscountPercent vigente al 0%: si la conversión recalculara el
+        // descuento de línea (en vez de copiarlo), esta línea sería
+        // rechazada. La conversión nunca llama a calculateLineDiscount(), así
+        // que el valor histórico se preserva igual.
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('0.00'),
+          }),
+        );
+        prisma.tx.quoteItem.findMany.mockResolvedValue([
+          makeQuoteItemRow({
+            discountType: LineDiscountType.PERCENT,
+            discountValue: new Prisma.Decimal('20.00'),
+            discountAmount: new Prisma.Decimal('2.00'),
+            lineTotal: new Prisma.Decimal('8.00'),
+          }),
+        ]);
+        prisma.tx.sale.create.mockImplementation((args: unknown) => {
+          const created = args as {
+            data: {
+              items: {
+                create: {
+                  discountType: LineDiscountType;
+                  discountValue: Prisma.Decimal;
+                  discountAmount: Prisma.Decimal;
+                  lineTotal: Prisma.Decimal;
+                }[];
+              };
+            };
+          };
+          const createdItem = created.data.items.create[0];
+          expect(createdItem.discountType).toBe(LineDiscountType.PERCENT);
+          expect(createdItem.discountValue.toFixed(2)).toBe('20.00');
+          expect(createdItem.discountAmount.toFixed(2)).toBe('2.00');
+          expect(createdItem.lineTotal.toFixed(2)).toBe('8.00');
+          return Promise.resolve(makeSaleDetailRow());
+        });
+        await expect(
+          service.createFromQuote(validConvertInput),
+        ).resolves.toBeDefined();
+      });
+
+      it('NR-03: sin descuento de línea en el QuoteItem de origen: el SaleItem también persiste null/null/0.00', async () => {
+        prisma.tx.quoteItem.findMany.mockResolvedValue([makeQuoteItemRow()]);
+        prisma.tx.sale.create.mockImplementation((args: unknown) => {
+          const created = args as {
+            data: {
+              items: {
+                create: {
+                  discountType: unknown;
+                  discountValue: unknown;
+                  discountAmount: Prisma.Decimal;
+                }[];
+              };
+            };
+          };
+          const createdItem = created.data.items.create[0];
+          expect(createdItem.discountType).toBeNull();
+          expect(createdItem.discountValue).toBeNull();
+          expect(createdItem.discountAmount.toFixed(2)).toBe('0.00');
           return Promise.resolve(makeSaleDetailRow());
         });
         await service.createFromQuote(validConvertInput);

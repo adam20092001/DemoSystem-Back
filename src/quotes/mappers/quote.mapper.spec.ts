@@ -15,6 +15,10 @@ function item(lineTotal: string) {
     quantity: new Prisma.Decimal('1'),
     unitPrice: new Prisma.Decimal(lineTotal),
     lineTotal: new Prisma.Decimal(lineTotal),
+    // NR-03: sin descuento de línea por defecto en este fixture.
+    discountType: null,
+    discountValue: null,
+    discountAmount: new Prisma.Decimal('0'),
     product: {
       stockCurrent: new Prisma.Decimal('10.000'),
       isInventoryTracked: false,

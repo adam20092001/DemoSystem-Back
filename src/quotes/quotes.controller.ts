@@ -134,6 +134,8 @@ export class QuotesController {
       items: dto.items.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
+        discountType: item.discountType,
+        discountValue: item.discountValue,
       })),
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
@@ -175,6 +177,8 @@ export class QuotesController {
       items: dto.items?.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
+        discountType: item.discountType,
+        discountValue: item.discountValue,
       })),
       actorUserId: actor.id,
       actorRole: actor.role,

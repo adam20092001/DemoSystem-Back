@@ -4,6 +4,7 @@ import {
   CustomerType,
   InventoryMovementOrigin,
   InventoryMovementType,
+  LineDiscountType,
   SaleDeliveryStatus,
   SalePaymentStatus,
   SaleStatus,
@@ -80,6 +81,30 @@ export class SaleItemResponseDto {
     example: '499.75',
   })
   lineTotal!: string;
+
+  @ApiProperty({
+    enum: LineDiscountType,
+    nullable: true,
+    description:
+      'NR-03: null cuando esta línea no tiene descuento individual. En una venta directa siempre es null (reservado a cotizaciones); en una venta desde cotización, copiado EXACTAMENTE del QuoteItem de origen.',
+  })
+  discountType!: LineDiscountType | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Decimal con 2 decimales fijos, como string. Soles si discountType=FIXED; porcentaje si PERCENT; null si no hay descuento de línea.',
+  })
+  discountValue!: string | null;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Decimal con 2 decimales fijos, como string. Siempre presente; "0.00" cuando la línea no tiene descuento.',
+    example: '0.00',
+  })
+  discountAmount!: string;
 }
 
 /**

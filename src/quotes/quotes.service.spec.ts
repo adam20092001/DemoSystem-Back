@@ -8,6 +8,7 @@ import {
   CustomerStatus,
   CustomerType,
   DocumentType,
+  LineDiscountType,
   Prisma,
   ProductStatus,
   QuoteStatus,
@@ -109,6 +110,10 @@ function makeQuoteDetailRow(overrides: Partial<Record<string, unknown>> = {}) {
         quantity: new Prisma.Decimal('1'),
         unitPrice: new Prisma.Decimal('10.00'),
         lineTotal: new Prisma.Decimal('10.00'),
+        // NR-03: sin descuento de línea por defecto en este fixture.
+        discountType: null,
+        discountValue: null,
+        discountAmount: new Prisma.Decimal('0'),
         product: {
           stockCurrent: new Prisma.Decimal('50.000'),
           isInventoryTracked: true,
@@ -910,6 +915,285 @@ describe('QuotesService', () => {
             expirationDate: '2026-12-25',
           }),
         ).resolves.toBeDefined();
+      });
+    });
+
+    describe('NR-03 — descuentos por línea en la creación', () => {
+      it('sin descuento de línea: persiste discountType/discountValue/discountAmount en null/null/0', async () => {
+        await service.create(validCreateInput);
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            items: {
+              create: {
+                discountType: unknown;
+                discountValue: unknown;
+                discountAmount: Prisma.Decimal;
+              }[];
+            };
+          };
+        };
+        expect(createArgs.data.items.create[0].discountType).toBeNull();
+        expect(createArgs.data.items.create[0].discountValue).toBeNull();
+        expect(createArgs.data.items.create[0].discountAmount.toFixed(2)).toBe(
+          '0.00',
+        );
+      });
+
+      it('FIXED en soles: descuento 3.00 sobre línea de 10.00 -> lineTotal 7.00, persistido tal cual', async () => {
+        await service.create({
+          ...validCreateInput,
+          items: [
+            {
+              productId: PRODUCT_ID,
+              quantity: '1',
+              discountType: LineDiscountType.FIXED,
+              discountValue: '3.00',
+            },
+          ],
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            total: Prisma.Decimal;
+            items: {
+              create: {
+                discountType: LineDiscountType;
+                discountValue: Prisma.Decimal;
+                discountAmount: Prisma.Decimal;
+                lineTotal: Prisma.Decimal;
+              }[];
+            };
+          };
+        };
+        const createdItem = createArgs.data.items.create[0];
+        expect(createdItem.discountType).toBe(LineDiscountType.FIXED);
+        expect(createdItem.discountValue.toFixed(2)).toBe('3.00');
+        expect(createdItem.discountAmount.toFixed(2)).toBe('3.00');
+        expect(createdItem.lineTotal.toFixed(2)).toBe('7.00');
+        expect(createArgs.data.total.toFixed(2)).toBe('7.00');
+      });
+
+      it('PERCENT: 20% sobre línea de 10.00 -> descuento 2.00, lineTotal 8.00', async () => {
+        await service.create({
+          ...validCreateInput,
+          items: [
+            {
+              productId: PRODUCT_ID,
+              quantity: '1',
+              discountType: LineDiscountType.PERCENT,
+              discountValue: '20',
+            },
+          ],
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            total: Prisma.Decimal;
+            items: {
+              create: {
+                discountAmount: Prisma.Decimal;
+                lineTotal: Prisma.Decimal;
+              }[];
+            };
+          };
+        };
+        expect(createArgs.data.items.create[0].discountAmount.toFixed(2)).toBe(
+          '2.00',
+        );
+        expect(createArgs.data.items.create[0].lineTotal.toFixed(2)).toBe(
+          '8.00',
+        );
+        expect(createArgs.data.total.toFixed(2)).toBe('8.00');
+      });
+
+      it('discountType sin discountValue: 400 (deben proveerse juntos)', async () => {
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('FIXED mayor que el bruto de la línea: 400', async () => {
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+                discountValue: '10.01',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('PERCENT > 100: 400', async () => {
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.PERCENT,
+                discountValue: '100.01',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('FIXED equivalente a más del maxDiscountPercent configurado: 400 (el límite aplica aunque se exprese en soles)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+                discountValue: '2.00',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('FIXED exactamente en el maxDiscountPercent configurado: permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+                discountValue: '1.00',
+              },
+            ],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('PERCENT por encima del maxDiscountPercent configurado: 400', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.PERCENT,
+                discountValue: '20',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('límite combinado: descuento de línea (5%) + descuento de documento (10% sobre el subtotal ya descontado) exceden en conjunto el 10% configurado -> 400 (evita el bypass repartiendo el descuento)', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        // Línea: 10.00 con 5% -> descuento 0.50, lineTotal 9.50 (dentro de su
+        // propio límite individual del 10%). Documento: 0.95 sobre 9.50 (10%
+        // exacto, también dentro de su propio límite individual). Combinado
+        // contra el bruto original (10.00): 1.45 / 10.00 = 14.5% > 10%.
+        await expect(
+          service.create({
+            ...validCreateInput,
+            discountAmount: '0.95',
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.PERCENT,
+                discountValue: '5',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('límite combinado: mismo reparto de descuento pero dentro del 10% configurado -> permitido', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        // Línea: 10.00 con 5% -> descuento 0.50, lineTotal 9.50. Sin
+        // descuento de documento: combinado = 0.50 / 10.00 = 5% <= 10%.
+        await expect(
+          service.create({
+            ...validCreateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.PERCENT,
+                discountValue: '5',
+              },
+            ],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('con IGV activo: el descuento de línea se descuenta ANTES de desglosar el IGV', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            taxEnabled: true,
+            taxRate: new Prisma.Decimal('18.00'),
+          }),
+        );
+        await service.create({
+          ...validCreateInput,
+          items: [
+            {
+              productId: PRODUCT_ID,
+              quantity: '1',
+              discountType: LineDiscountType.FIXED,
+              discountValue: '2.00',
+            },
+          ],
+        });
+        const createArgs = prisma.tx.quote.create.mock.calls[0][0] as {
+          data: {
+            subtotal: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            total: Prisma.Decimal;
+          };
+        };
+        // lineTotal tras el descuento de línea: 10.00 - 2.00 = 8.00 (total
+        // del documento, sin descuento adicional); base = ROUND(8.00/1.18) =
+        // 6.78; IGV = 1.22.
+        expect(createArgs.data.total.toFixed(2)).toBe('8.00');
+        expect(createArgs.data.subtotal.toFixed(2)).toBe('6.78');
+        expect(createArgs.data.taxAmount.toFixed(2)).toBe('1.22');
       });
     });
 
@@ -1834,6 +2118,190 @@ describe('QuotesService', () => {
           data: { taxAmount?: Prisma.Decimal };
         };
         expect(updateArgs.data.taxAmount).toBeUndefined();
+      });
+    });
+
+    describe('NR-03 — descuentos por línea en la actualización', () => {
+      it('reemplazo de ítems sin descuento de línea: persiste null/null/0', async () => {
+        await service.update({
+          ...baseUpdateInput,
+          items: [{ productId: PRODUCT_ID, quantity: '1' }],
+        });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: {
+            items: {
+              create: {
+                discountType: unknown;
+                discountValue: unknown;
+                discountAmount: Prisma.Decimal;
+              }[];
+            };
+          };
+        };
+        expect(updateArgs.data.items.create[0].discountType).toBeNull();
+        expect(updateArgs.data.items.create[0].discountValue).toBeNull();
+        expect(updateArgs.data.items.create[0].discountAmount.toFixed(2)).toBe(
+          '0.00',
+        );
+      });
+
+      it('FIXED en el reemplazo: 2 × 10.00 con descuento 5.00 -> lineTotal 15.00, total 15.00', async () => {
+        await service.update({
+          ...baseUpdateInput,
+          items: [
+            {
+              productId: PRODUCT_ID,
+              quantity: '2',
+              discountType: LineDiscountType.FIXED,
+              discountValue: '5.00',
+            },
+          ],
+        });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: {
+            total: Prisma.Decimal;
+            items: {
+              create: {
+                discountAmount: Prisma.Decimal;
+                lineTotal: Prisma.Decimal;
+              }[];
+            };
+          };
+        };
+        expect(updateArgs.data.items.create[0].discountAmount.toFixed(2)).toBe(
+          '5.00',
+        );
+        expect(updateArgs.data.items.create[0].lineTotal.toFixed(2)).toBe(
+          '15.00',
+        );
+        expect(updateArgs.data.total.toFixed(2)).toBe('15.00');
+      });
+
+      it('PERCENT en el reemplazo: 30% sobre 10.00 -> descuento 3.00, lineTotal 7.00', async () => {
+        await service.update({
+          ...baseUpdateInput,
+          items: [
+            {
+              productId: PRODUCT_ID,
+              quantity: '1',
+              discountType: LineDiscountType.PERCENT,
+              discountValue: '30',
+            },
+          ],
+        });
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: {
+            items: { create: { lineTotal: Prisma.Decimal }[] };
+          };
+        };
+        expect(updateArgs.data.items.create[0].lineTotal.toFixed(2)).toBe(
+          '7.00',
+        );
+      });
+
+      it('FIXED equivalente a más del maxDiscountPercent configurado en el reemplazo: 400', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({
+            ...baseUpdateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+                discountValue: '2.00',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('límite combinado en el reemplazo: línea al 5% + descuento de documento que en conjunto exceden el 10% configurado -> 400', async () => {
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        await expect(
+          service.update({
+            ...baseUpdateInput,
+            discountAmount: '0.95',
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.PERCENT,
+                discountValue: '5',
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('sin reemplazo de ítems: un cambio de solo descuento de documento usa el lineTotal YA persistido (post-descuento de línea) como bruto, nunca el bruto original del catálogo', async () => {
+        // Cotización existente: una línea con descuento de línea ya
+        // aplicado en su creación (bruto 10.00, descuento de línea 3.00,
+        // lineTotal persistido 7.00) y sin descuento de documento (total =
+        // 7.00). Esta edición solo cambia el descuento de documento, sin
+        // tocar items: NR-03 decisión #7 (los descuentos de línea solo se
+        // modifican reemplazando items) exige que el "bruto" para el límite
+        // combinado sea el lineTotal ya persistido (7.00), no el bruto
+        // original de catálogo (10.00).
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeLockedQuoteRow({ total: new Prisma.Decimal('7.00') }),
+        ]);
+        prisma.tx.quoteItem.findMany.mockResolvedValue([
+          { lineTotal: new Prisma.Decimal('7.00') },
+        ]);
+        settingsReader.getCurrent.mockResolvedValue(
+          makeSettingsSnapshot({
+            maxDiscountPercent: new Prisma.Decimal('10.00'),
+          }),
+        );
+        // 0.70 es exactamente 10% de 7.00: permitido contra el bruto
+        // persistido (7.00). Sería rechazado si se comparara, por error,
+        // contra un bruto de 10.00 recalculado desde el catálogo (7%).
+        await expect(
+          service.update({ ...baseUpdateInput, discountAmount: '0.70' }),
+        ).resolves.toBeDefined();
+        const updateArgs = prisma.tx.quote.update.mock.calls[0][0] as {
+          data: { total: Prisma.Decimal };
+        };
+        expect(updateArgs.data.total.toFixed(2)).toBe('6.30');
+      });
+
+      it('cotización HISTÓRICA: un reemplazo de ítems que incluye un descuento de línea sigue respondiendo 409, sin leer configuración ni escribir', async () => {
+        prisma.tx.$queryRaw.mockResolvedValue([
+          makeHistoricalLockedQuoteRow({
+            taxAmount: new Prisma.Decimal('1.80'),
+            total: new Prisma.Decimal('11.80'),
+          }),
+        ]);
+        await expect(
+          service.update({
+            ...baseUpdateInput,
+            items: [
+              {
+                productId: PRODUCT_ID,
+                quantity: '1',
+                discountType: LineDiscountType.FIXED,
+                discountValue: '1.00',
+              },
+            ],
+          }),
+        ).rejects.toThrow(
+          new ConflictException(
+            'La cotización fue calculada con el modelo de precios anterior y sus montos no pueden modificarse; cree una nueva cotización',
+          ),
+        );
+        expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+        expect(prisma.tx.quoteItem.deleteMany).not.toHaveBeenCalled();
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
       });
     });
   });

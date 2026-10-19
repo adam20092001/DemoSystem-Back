@@ -50,6 +50,9 @@ function makeQuote(overrides: Partial<SafeQuote> = {}): SafeQuote {
         quantity: '1.000',
         unitPrice: '10.00',
         lineTotal: '10.00',
+        discountType: null,
+        discountValue: null,
+        discountAmount: '0.00',
         stockInfo: {
           currentStock: '50.000',
           requestedQuantity: '1.000',

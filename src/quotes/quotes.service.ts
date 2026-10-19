@@ -40,11 +40,14 @@ import {
   assertQuantityAllowedForUnit,
   assertRejectable,
   buildEffectiveQuoteStatusCondition,
+  calculateLineDiscount,
   calculateLineTotal,
   calculateSubtotal,
   calculateTaxInclusiveTotals,
   effectiveStatus,
+  LineDiscountInput,
   parseDiscountAmount,
+  parseLineDiscount,
   parseQuantity,
 } from './quote-calculator';
 import {
@@ -153,6 +156,18 @@ export class QuotesService {
       productId: item.productId,
       quantity: parseQuantity(item.quantity),
     }));
+    // NR-03: descuento de línea, parseado en el MISMO orden que
+    // parsedItems/input.items (índice compartido) — puro, fuera de la
+    // transacción, igual que el resto del parseo de este método.
+    const parsedLineDiscounts: LineDiscountInput[] = input.items.map(
+      (item) => ({
+        discountType: item.discountType,
+        discountValue: item.discountValue,
+      }),
+    );
+    const validatedLineDiscounts = parsedLineDiscounts.map((discount) =>
+      parseLineDiscount(discount),
+    );
 
     const businessDate = businessToday();
     if (
@@ -183,16 +198,33 @@ export class QuotesService {
       const lines = await this.loadAndValidateItems(tx, parsedItems);
 
       // R2-B3: Product.salePrice es el precio FINAL al cliente (incluye IGV
-      // cuando aplica). lineTotal = ROUND(cantidad × precio final, 2), mismo
-      // criterio de siempre; el IGV se DESGLOSA a nivel de documento, nunca
-      // se suma encima. `discountAmount` recibido es el descuento sobre el
-      // importe final; se persiste su equivalente antes de impuesto.
-      const lineTotals = lines.map((line) =>
+      // cuando aplica). rawLineTotal = ROUND(cantidad × precio final, 2),
+      // mismo criterio de siempre; el IGV se DESGLOSA a nivel de documento,
+      // nunca se suma encima. `discountAmount` recibido es el descuento de
+      // DOCUMENTO sobre el importe final; se persiste su equivalente antes
+      // de impuesto.
+      // NR-03: cada línea aplica PRIMERO su propio descuento (si tiene) —
+      // calculateLineDiscount() ya valida maxDiscountPercent por línea.
+      // lineTotals (post-descuento de línea) es lo que ve
+      // calculateTaxInclusiveTotals() como "la línea"; grossLineTotals
+      // (pre-descuento de línea) es lo que usa para impedir que el
+      // descuento de documento, sumado encima, bypasee el límite
+      // configurado en conjunto.
+      const rawLineTotals = lines.map((line) =>
         calculateLineTotal(line.quantity, line.salePrice),
       );
+      const lineDiscounts = lines.map((line, index) =>
+        calculateLineDiscount(
+          rawLineTotals[index],
+          validatedLineDiscounts[index],
+          settings.maxDiscountPercent,
+        ),
+      );
+      const lineTotals = lineDiscounts.map((discount) => discount.lineTotal);
       const { subtotal, discountAmount, taxAmount, total } =
         calculateTaxInclusiveTotals({
           lineTotals,
+          grossLineTotals: rawLineTotals,
           customerDiscount,
           taxEnabled: settings.taxEnabled,
           taxRate: settings.taxRate,
@@ -242,6 +274,9 @@ export class QuotesService {
               quantity: line.quantity,
               unitPrice: line.salePrice,
               lineTotal: lineTotals[index],
+              discountType: lineDiscounts[index].discountType,
+              discountValue: lineDiscounts[index].discountValue,
+              discountAmount: lineDiscounts[index].discountAmount,
             })),
           },
         },
@@ -291,6 +326,9 @@ export class QuotesService {
 
     let parsedItems:
       { productId: string; quantity: Prisma.Decimal }[] | undefined;
+    // NR-03: parseado en el MISMO orden que parsedItems/input.items —
+    // undefined cuando no se reemplazan ítems (igual que parsedItems).
+    let parsedLineDiscounts: ReturnType<typeof parseLineDiscount>[] | undefined;
     if (input.items !== undefined) {
       if (input.items.length === 0) {
         throw new BadRequestException(
@@ -304,6 +342,12 @@ export class QuotesService {
         productId: item.productId,
         quantity: parseQuantity(item.quantity),
       }));
+      parsedLineDiscounts = input.items.map((item) =>
+        parseLineDiscount({
+          discountType: item.discountType,
+          discountValue: item.discountValue,
+        }),
+      );
     }
 
     if (
@@ -365,6 +409,7 @@ export class QuotesService {
             input.quoteId,
             existing,
             parsedItems,
+            parsedLineDiscounts,
             discountAmount,
             data,
             updatedFields,
@@ -621,6 +666,7 @@ export class QuotesService {
     quoteId: string,
     existing: LockedQuoteRow,
     parsedItems: { productId: string; quantity: Prisma.Decimal }[] | undefined,
+    parsedLineDiscounts: ReturnType<typeof parseLineDiscount>[] | undefined,
     requestedCustomerDiscount: Prisma.Decimal | undefined,
     data: Prisma.QuoteUpdateInput,
     updatedFields: string[],
@@ -642,14 +688,39 @@ export class QuotesService {
       return storedItems.length;
     }
 
+    // Mismo criterio que la Fase 10 (§20) y la Fase 11B: un cambio comercial
+    // recalcula con la configuración VIGENTE, una sola lectura para todo
+    // (también para validar el descuento de línea de cada ítem nuevo, si
+    // los ítems se reemplazan).
+    const settings = await this.settingsReader.getCurrent(tx);
+
     let lineTotals = storedLineTotals;
+    // NR-03: bruto PRE-descuento de línea de cada ítem vigente — ausente si
+    // los ítems no se reemplazan (los ítems existentes ya persisten su
+    // propio lineTotal post-descuento, así que grossLineTotals coincide
+    // con lineTotals cuando no hay reemplazo: ningún descuento de línea
+    // NUEVO se introduce en esa rama, mismo criterio de "ausente = sin
+    // descuento de línea" que calculateTaxInclusiveTotals() ya documenta).
+    let grossLineTotals = storedLineTotals;
     let itemCount = storedItems.length;
     if (parsedItems !== undefined) {
       const lines = await this.loadAndValidateItems(tx, parsedItems);
-      lineTotals = lines.map((line) =>
+      itemCount = lines.length;
+
+      const rawLineTotals = lines.map((line) =>
         calculateLineTotal(line.quantity, line.salePrice),
       );
-      itemCount = lines.length;
+      const discounts =
+        parsedLineDiscounts ?? lines.map(() => parseLineDiscount({}));
+      const lineDiscounts = lines.map((line, index) =>
+        calculateLineDiscount(
+          rawLineTotals[index],
+          discounts[index],
+          settings.maxDiscountPercent,
+        ),
+      );
+      lineTotals = lineDiscounts.map((discount) => discount.lineTotal);
+      grossLineTotals = rawLineTotals;
 
       await tx.quoteItem.deleteMany({ where: { quoteId } });
       data.items = {
@@ -663,16 +734,17 @@ export class QuotesService {
           quantity: line.quantity,
           unitPrice: line.salePrice,
           lineTotal: lineTotals[index],
+          discountType: lineDiscounts[index].discountType,
+          discountValue: lineDiscounts[index].discountValue,
+          discountAmount: lineDiscounts[index].discountAmount,
         })),
       };
       updatedFields.push('items');
     }
 
-    // Mismo criterio que la Fase 10 (§20) y la Fase 11B: un cambio comercial
-    // recalcula con la configuración VIGENTE, una sola lectura para todo.
-    const settings = await this.settingsReader.getCurrent(tx);
     const totals = calculateTaxInclusiveTotals({
       lineTotals,
+      grossLineTotals,
       customerDiscount: requestedCustomerDiscount ?? currentCustomerDiscount,
       taxEnabled: settings.taxEnabled,
       taxRate: settings.taxRate,

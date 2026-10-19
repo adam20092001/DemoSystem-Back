@@ -439,6 +439,11 @@ export class ElectronicDocumentsService {
             quantity: item.quantity,
             unitPrice: item.unitPrice,
             lineTotal: item.lineTotal,
+            // NR-03: copiado EXACTAMENTE del SaleItem de origen, nunca
+            // recalculado (mismo criterio que el resto del snapshot).
+            discountType: item.discountType,
+            discountValue: item.discountValue,
+            discountAmount: item.discountAmount,
           })),
         },
       },
@@ -506,6 +511,9 @@ export class ElectronicDocumentsService {
             quantity: true,
             unitPrice: true,
             lineTotal: true,
+            discountType: true,
+            discountValue: true,
+            discountAmount: true,
           },
           orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         },

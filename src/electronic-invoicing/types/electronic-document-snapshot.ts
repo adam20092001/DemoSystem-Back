@@ -2,6 +2,7 @@ import {
   CustomerDocumentType,
   ElectronicDocumentStatus,
   FiscalDocumentType,
+  LineDiscountType,
 } from '@prisma/client';
 
 /** Forma interna de una línea ya persistida, expuesta por el servicio (sin DTO/Swagger todavía). */
@@ -16,6 +17,10 @@ export interface ElectronicDocumentItemSnapshot {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  // NR-03: copiado EXACTAMENTE del SaleItem de origen al emitir.
+  discountType: LineDiscountType | null;
+  discountValue: string | null;
+  discountAmount: string;
 }
 
 /**

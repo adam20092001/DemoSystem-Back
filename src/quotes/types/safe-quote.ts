@@ -1,6 +1,7 @@
 import {
   CustomerDocumentType,
   CustomerType,
+  LineDiscountType,
   QuoteStatus,
 } from '@prisma/client';
 
@@ -21,6 +22,11 @@ export interface SafeQuoteItem {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  /** NR-03: null cuando la línea no tiene descuento individual. */
+  discountType: LineDiscountType | null;
+  discountValue: string | null;
+  /** NR-03: siempre presente; "0.00" cuando la línea no tiene descuento. */
+  discountAmount: string;
   /** null cuando el producto no es inventariable (SERVICE o isInventoryTracked=false). */
   stockInfo: SafeQuoteStockInfo | null;
 }

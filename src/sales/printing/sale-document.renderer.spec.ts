@@ -55,6 +55,9 @@ function makeSale(overrides: Partial<SafeSale> = {}): SafeSale {
         quantity: '1.000',
         unitPrice: '10.00',
         lineTotal: '10.00',
+        discountType: null,
+        discountValue: null,
+        discountAmount: '0.00',
       },
     ],
     inventoryMovements: [

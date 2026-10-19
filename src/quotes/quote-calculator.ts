@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { Prisma, QuoteStatus } from '@prisma/client';
+import { LineDiscountType, Prisma, QuoteStatus } from '@prisma/client';
 import { isExpired } from '../common/date/business-date';
 
 /** Máximo representable en Decimal(14,3): 11 enteros + 3 decimales. */
@@ -92,6 +92,147 @@ export function calculateLineTotal(
   return lineTotal;
 }
 
+/**
+ * NR-03: descuento individual de línea (independiente del descuento de
+ * documento, que se sigue aplicando ADICIONALMENTE sobre Σ lineTotal —
+ * ver assertCombinedDiscountWithinConfiguredLimit()). PURA: solo
+ * Prisma.Decimal, sin acceso a base de datos.
+ */
+export interface LineDiscountInput {
+  discountType?: LineDiscountType;
+  /** Texto crudo del DTO: soles si FIXED, 0-100 si PERCENT. */
+  discountValue?: string;
+}
+
+export interface ParsedLineDiscount {
+  discountType: LineDiscountType | null;
+  discountValue: Prisma.Decimal | null;
+}
+
+/**
+ * Valida presencia conjunta (ambos u ninguno — nunca uno solo) y la forma
+ * del valor. Nunca decide si el valor es válido para su tipo (0-100 para
+ * PERCENT, ≤ bruto de línea para FIXED): eso depende del lineTotal de esa
+ * línea, que este parser todavía no conoce — lo hace
+ * calculateLineDiscount(), ya con el bruto calculado.
+ */
+export function parseLineDiscount(
+  input: LineDiscountInput,
+): ParsedLineDiscount {
+  const hasType = input.discountType !== undefined;
+  const hasValue = input.discountValue !== undefined;
+  if (hasType !== hasValue) {
+    throw new BadRequestException(
+      'discountType y discountValue deben proveerse juntos: ambos presentes o ambos ausentes',
+    );
+  }
+  if (!hasType) {
+    return { discountType: null, discountValue: null };
+  }
+  if (
+    typeof input.discountValue !== 'string' ||
+    !DISCOUNT_PATTERN.test(input.discountValue)
+  ) {
+    throw new BadRequestException(
+      'discountValue debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+    );
+  }
+  const discountValue = new Prisma.Decimal(input.discountValue);
+  if (discountValue.greaterThan(MAX_MONEY)) {
+    throw new BadRequestException('discountValue excede el máximo permitido');
+  }
+  return {
+    discountType: input.discountType as LineDiscountType,
+    discountValue,
+  };
+}
+
+/** rawLineTotal de una línea, ANTES de su propio descuento: ROUND(quantity*unitPrice,2). */
+export function calculateRawLineTotal(
+  quantity: Prisma.Decimal,
+  unitPrice: Prisma.Decimal,
+): Prisma.Decimal {
+  return calculateLineTotal(quantity, unitPrice);
+}
+
+export interface LineDiscountResult {
+  discountType: LineDiscountType | null;
+  discountValue: Prisma.Decimal | null;
+  /** Siempre en soles, ya calculado; 0 cuando discountType es null. */
+  discountAmount: Prisma.Decimal;
+  /** rawLineTotal - discountAmount. Idéntico a rawLineTotal sin descuento. */
+  lineTotal: Prisma.Decimal;
+}
+
+/**
+ * Aplica el descuento de línea ya parseado (parseLineDiscount()) sobre el
+ * bruto de ESA línea. maxDiscountPercent (CompanySettings, Fase 10, Bloque
+ * B) limita el descuento EFECTIVO de la línea sin importar si se expresó
+ * en soles o porcentaje — un FIXED que equivalga a más del porcentaje
+ * configurado se rechaza igual que un PERCENT explícito fuera de rango,
+ * con el mismo criterio de comparación cruzada por multiplicación que
+ * assertDiscountWithinConfiguredLimit() (nunca dividir ni redondear un
+ * "máximo permitido" intermedio).
+ */
+export function calculateLineDiscount(
+  rawLineTotal: Prisma.Decimal,
+  parsed: ParsedLineDiscount,
+  maxDiscountPercent: Prisma.Decimal,
+): LineDiscountResult {
+  if (parsed.discountType === null || parsed.discountValue === null) {
+    return {
+      discountType: null,
+      discountValue: null,
+      discountAmount: new Prisma.Decimal(0),
+      lineTotal: rawLineTotal,
+    };
+  }
+
+  let discountAmount: Prisma.Decimal;
+  if (parsed.discountType === LineDiscountType.FIXED) {
+    if (
+      parsed.discountValue.lessThan(0) ||
+      parsed.discountValue.greaterThan(rawLineTotal)
+    ) {
+      throw new BadRequestException(
+        'El descuento fijo de línea no puede ser negativo ni superar el importe bruto de la línea',
+      );
+    }
+    discountAmount = parsed.discountValue;
+  } else {
+    if (
+      parsed.discountValue.lessThan(0) ||
+      parsed.discountValue.greaterThan(100)
+    ) {
+      throw new BadRequestException(
+        'El descuento porcentual de línea debe estar entre 0 y 100',
+      );
+    }
+    discountAmount = rawLineTotal
+      .mul(parsed.discountValue)
+      .dividedBy(100)
+      .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  }
+
+  if (
+    discountAmount.mul(100).greaterThan(rawLineTotal.mul(maxDiscountPercent))
+  ) {
+    throw new BadRequestException(
+      'El descuento de línea supera el porcentaje máximo permitido por la configuración de la empresa',
+    );
+  }
+
+  const lineTotal = rawLineTotal.minus(discountAmount);
+  assertMoneyWithinRange(lineTotal, 'total de línea');
+
+  return {
+    discountType: parsed.discountType,
+    discountValue: parsed.discountValue,
+    discountAmount,
+    lineTotal,
+  };
+}
+
 /** Suma de lineTotal YA redondeados (no se redondea de nuevo al sumar). */
 export function calculateSubtotal(
   lineTotals: Prisma.Decimal[],
@@ -141,6 +282,37 @@ export function assertDiscountWithinConfiguredLimit(
   if (discountAmount.mul(100).greaterThan(subtotal.mul(maxDiscountPercent))) {
     throw new BadRequestException(
       'El descuento supera el porcentaje máximo permitido por la configuración de la empresa',
+    );
+  }
+}
+
+/**
+ * NR-03: límite configurado aplicado al descuento EFECTIVO COMBINADO
+ * (línea + documento), contra el bruto ORIGINAL del documento (Σ
+ * rawLineTotal, antes de cualquier descuento de línea) — nunca contra el
+ * subtotal ya descontado por línea. Complementa, no sustituye, a
+ * assertDiscountWithinConfiguredLimit() (que sigue acotando el descuento
+ * de DOCUMENTO por sí solo contra itemsTotal, el subtotal ya descontado
+ * por línea): si cada línea ya respeta su propio límite individual
+ * (calculateLineDiscount()), la suma de descuentos de línea respeta
+ * trivialmente este mismo límite por sí sola (la desigualdad se preserva
+ * al sumar); esta función es la que impide que el descuento de documento,
+ * sumado ENCIMA de los de línea, termine superando en conjunto el
+ * porcentaje máximo real de la empresa — el bypass que un descuento
+ * repartido entre líneas y documento podría lograr si solo se validara
+ * cada pieza por separado contra su propia base relativa.
+ */
+export function assertCombinedDiscountWithinConfiguredLimit(
+  grossTotal: Prisma.Decimal,
+  total: Prisma.Decimal,
+  maxDiscountPercent: Prisma.Decimal,
+): void {
+  const effectiveDiscount = grossTotal.minus(total);
+  if (
+    effectiveDiscount.mul(100).greaterThan(grossTotal.mul(maxDiscountPercent))
+  ) {
+    throw new BadRequestException(
+      'El descuento combinado (por línea y general) supera el porcentaje máximo permitido por la configuración de la empresa',
     );
   }
 }
@@ -217,8 +389,23 @@ export interface TaxInclusiveTotals {
 }
 
 export interface TaxInclusiveTotalsInput {
-  /** lineTotal de cada ítem, ya calculados con calculateLineTotal() sobre el precio final. */
+  /**
+   * lineTotal de cada ítem YA con su propio descuento de línea aplicado
+   * (calculateLineDiscount(), o el lineTotal bruto si la línea no tiene
+   * descuento) — nunca el bruto sin descontar.
+   */
   lineTotals: readonly Prisma.Decimal[];
+  /**
+   * NR-03: lineTotal BRUTO de cada ítem (antes de su descuento de línea),
+   * en el MISMO orden que `lineTotals`. Ausente -> se asume idéntico a
+   * `lineTotals` (ningún ítem tiene descuento de línea, el caso de
+   * siempre): assertCombinedDiscountWithinConfiguredLimit() se reduce
+   * entonces exactamente a lo que ya validaba
+   * assertDiscountWithinConfiguredLimit(), sin cambiar ningún resultado
+   * para un llamador que no usa descuentos de línea (p. ej. SalesService
+   * createDirect, que nunca los tiene).
+   */
+  grossLineTotals?: readonly Prisma.Decimal[];
   /** Descuento de documento sobre el importe FINAL (lo que ve el cliente). */
   customerDiscount: Prisma.Decimal;
   taxEnabled: boolean;
@@ -294,8 +481,10 @@ function assertMoneyShape(value: Prisma.Decimal, label: string): void {
  * itemsTotal) y assertDiscountWithinConfiguredLimit() (porcentaje máximo
  * configurado) — mismas funciones y mensajes, sin reglas nuevas.
  *
- * R2-B2: preparación únicamente. Ningún servicio de producción la invoca
- * todavía (QuotesService/SalesService siguen con la semántica histórica).
+ * Invocada por QuotesService (creación y edición) y SalesService (venta
+ * directa). NR-03: `grossLineTotals`, si se provee, habilita además
+ * assertCombinedDiscountWithinConfiguredLimit() (descuento de línea +
+ * documento, contra el bruto original) — ver su docblock.
  */
 export function calculateTaxInclusiveTotals(
   input: TaxInclusiveTotalsInput,
@@ -335,6 +524,16 @@ export function calculateTaxInclusiveTotals(
   );
 
   const total = itemsTotal.minus(customerDiscount);
+
+  const grossTotal = input.grossLineTotals
+    ? calculateSubtotal([...input.grossLineTotals])
+    : itemsTotal;
+  assertCombinedDiscountWithinConfiguredLimit(
+    grossTotal,
+    total,
+    maxDiscountPercent,
+  );
+
   const divisor = taxEnabled
     ? new Prisma.Decimal(1).plus(taxRate.dividedBy(100))
     : new Prisma.Decimal(1);
