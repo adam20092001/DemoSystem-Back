@@ -241,7 +241,8 @@ export class InventoryController {
 
   @ApiOperation({
     summary: 'Listar productos con stock bajo (paginado)',
-    description: 'stockCurrent <= stockMinimum, con categoría y unidad ACTIVE.',
+    description:
+      'stockCurrent <= stockMinimum, con categoría y unidad ACTIVE. NR-04: cada elemento incluye stockStatus (LOW_STOCK u OUT_OF_STOCK).',
   })
   @ApiOkResponse({ type: PaginatedLowStockResponseDto })
   @Roles(...READ_ROLES)

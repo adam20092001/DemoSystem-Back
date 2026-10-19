@@ -693,6 +693,80 @@ describe('InventoryService', () => {
     });
 
     // ================================================================
+    // NR-04 — stockStatus
+    // ================================================================
+    describe('stockStatus (NR-04)', () => {
+      it('stockCurrent < stockMinimum: LOW_STOCK', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              stockCurrent: new Prisma.Decimal('1.000'),
+              stockMinimum: new Prisma.Decimal('5.000'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].stockStatus).toBe('LOW_STOCK');
+      });
+
+      it('stockCurrent = stockMinimum (frontera): LOW_STOCK', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              stockCurrent: new Prisma.Decimal('3.000'),
+              stockMinimum: new Prisma.Decimal('3.000'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].stockStatus).toBe('LOW_STOCK');
+      });
+
+      it('stockCurrent = 0: OUT_OF_STOCK, sin importar stockMinimum', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              stockCurrent: new Prisma.Decimal('0.000'),
+              stockMinimum: new Prisma.Decimal('5.000'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 1 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].stockStatus).toBe('OUT_OF_STOCK');
+      });
+
+      it('se calcula por fila, independiente de difference y del resto de campos', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([
+            makeLowStockRow({
+              id: 'product-low',
+              stockCurrent: new Prisma.Decimal('2.000'),
+              stockMinimum: new Prisma.Decimal('4.000'),
+            }),
+            makeLowStockRow({
+              id: 'product-out',
+              stockCurrent: new Prisma.Decimal('0.000'),
+              stockMinimum: new Prisma.Decimal('4.000'),
+            }),
+          ])
+          .mockResolvedValueOnce([{ total: 2 }]);
+
+        const result = await service.listLowStock({});
+
+        expect(result.data[0].stockStatus).toBe('LOW_STOCK');
+        expect(result.data[0].difference).toBe('2.000');
+        expect(result.data[1].stockStatus).toBe('OUT_OF_STOCK');
+        expect(result.data[1].difference).toBe('4.000');
+      });
+    });
+
+    // ================================================================
     // Fase 9, Bloque A (R5) — status/brand/difference
     // ================================================================
     describe('status (Fase 9, R5)', () => {

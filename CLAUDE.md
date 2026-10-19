@@ -74,7 +74,7 @@ Reglas de capas:
 4. **Categorías** — clasificación de productos.
 5. **Unidades** — unidades de medida.
 6. **Productos** — bienes inventariables y servicios no inventariables.
-7. **Inventario** — movimientos de stock (entradas, salidas, ajustes) y saldo actual.
+7. **Inventario** — movimientos de stock (entradas, salidas, ajustes) y saldo actual. Cada producto inventariable tiene su propio umbral configurable (`stockMinimum`, por defecto 3 unidades en productos nuevos desde NR-04); `GET /inventory/low-stock` expone los productos en o por debajo de su umbral con una clasificación derivada `stockStatus` (`NORMAL`/`LOW_STOCK`/`OUT_OF_STOCK`, nunca persistida). No genera correos ni notificaciones automáticas, ni bloquea ninguna venta.
 8. **Clientes** — incluye el cliente especial **Público general**.
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
@@ -390,11 +390,25 @@ de pagos ya registrados queda intacto). Pendiente: ejecución E2E completa
 (no realizada en la sesión de implementación, que fue sin acceso a base de
 datos) y autorización para commit/push/PR.
 
+**NR-04 — alertas de stock bajo** (rama `feat/low-stock-alerts`, base `main`
+en `1a86ae5`, **en curso, sin PR ni merge todavía**): corrige una nota
+desactualizada de este documento — el umbral de stock bajo configurable por
+producto (`Product.stockMinimum`, `GET /inventory/low-stock`) ya existía
+desde la Fase 9, Bloque A (R5/R6), bien probado y documentado en código,
+pero esta sección seguía listándolo como pendiente. NR-04 reutiliza esa
+arquitectura por completo (sin umbral global ni tabla nueva) y añade
+únicamente una clasificación derivada `stockStatus` (`NORMAL`/`LOW_STOCK`/
+`OUT_OF_STOCK`, nunca persistida, calculada en `src/inventory/stock-status.ts`)
+expuesta en `GET /inventory/low-stock`, y un default de 3 unidades para
+`stockMinimum` cuando `POST /products` lo omite en un producto inventariable
+nuevo (los productos SERVICE/no inventariables siguen naciendo en 0; ningún
+producto ya existente se ve afectado). Pendiente: ejecución E2E (preparada,
+no ejecutada) y autorización para commit/push/PR.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
-descuentos en soles o porcentaje; umbral mínimo de stock configurable por
-producto (alertas); exportaciones a Excel; Libro Diario y Libro Mayor como
+descuentos en soles o porcentaje; exportaciones a Excel; Libro Diario y Libro Mayor como
 reportes contables terminados (hoy solo existen los asientos básicos de
 Contabilidad básica, §4 punto 12); reportes contables adicionales; módulo de
 importaciones y proveedores; cualquier cambio futuro que amplíe los permisos

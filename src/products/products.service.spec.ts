@@ -289,6 +289,44 @@ describe('ProductsService', () => {
       await expect(service.createProduct(validInput)).resolves.toBeDefined();
     });
 
+    describe('NR-04 — default de stockMinimum cuando se omite', () => {
+      it('PRODUCT inventariable sin stockMinimum: nace en 3 (nuevo default)', async () => {
+        await service.createProduct({
+          ...validInput,
+          stockMinimum: undefined,
+        });
+
+        const createArgs = prisma.tx.product.create.mock.calls[0][0];
+        const stockMinimum = createArgs.data.stockMinimum as Prisma.Decimal;
+        expect(stockMinimum.equals(3)).toBe(true);
+      });
+
+      it('stockMinimum explícito sigue ganando sobre el default, incluido "0"', async () => {
+        await service.createProduct({ ...validInput, stockMinimum: '0' });
+
+        const createArgs = prisma.tx.product.create.mock.calls[0][0];
+        const stockMinimum = createArgs.data.stockMinimum as Prisma.Decimal;
+        expect(stockMinimum.equals(0)).toBe(true);
+      });
+
+      it('SERVICE/no inventariable sin stockMinimum: sigue naciendo en 0 (nunca 3, para no violar la regla SERVICE=0)', async () => {
+        prisma.tx.product.create.mockResolvedValue(
+          makeProductRow({ productType: ProductType.SERVICE }),
+        );
+
+        await service.createProduct({
+          ...validInput,
+          productType: ProductType.SERVICE,
+          isInventoryTracked: false,
+          stockMinimum: undefined,
+        });
+
+        const createArgs = prisma.tx.product.create.mock.calls[0][0];
+        const stockMinimum = createArgs.data.stockMinimum as Prisma.Decimal;
+        expect(stockMinimum.equals(0)).toBe(true);
+      });
+    });
+
     it('registra PRODUCT_CREATED con metadata exacta dentro de la transacción', async () => {
       await service.createProduct(validInput);
 
