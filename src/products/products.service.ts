@@ -56,7 +56,17 @@ export class ProductsService {
     );
     const internalNotes = normalizeOptional(input.internalNotes);
     const salePrice = new Prisma.Decimal(input.salePrice);
-    const stockMinimum = new Prisma.Decimal(input.stockMinimum ?? '0');
+    // NR-04: un producto NUEVO inventariable que omite stockMinimum nace con
+    // el umbral por defecto de 3 unidades (nunca un valor global fijo: sigue
+    // siendo editable por producto vía stockMinimum explícito o PATCH
+    // posterior). Un SERVICE/no inventariable que lo omite sigue naciendo en
+    // 0, exactamente como antes — de lo contrario, el default de 3 violaría
+    // la regla ya existente de que SERVICE exige stockMinimum=0
+    // (assertServiceRules). Ningún producto ya existente se ve afectado:
+    // esto solo decide el valor de una fila que todavía no existe.
+    const stockMinimum = new Prisma.Decimal(
+      input.stockMinimum ?? (input.isInventoryTracked ? '3' : '0'),
+    );
 
     this.assertServiceRules({
       productType: input.productType,

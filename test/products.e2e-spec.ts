@@ -204,6 +204,38 @@ describe('Products & Specifications (e2e)', () => {
       expect(body.stockMinimum).toBe('5.000');
     });
 
+    it('NR-04: PRODUCT inventariable sin stockMinimum en el body nace con el default de 3 unidades', async () => {
+      const suffix = Date.now();
+      const payload = baseProductPayload(suffix);
+      delete payload.stockMinimum;
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send(payload);
+
+      expect(response.status).toBe(201);
+      const body = response.body as SafeProductBody;
+      expect(body.stockMinimum).toBe('3.000');
+    });
+
+    it('NR-04: SERVICE/no inventariable sin stockMinimum en el body sigue naciendo en 0 (nunca el default de 3)', async () => {
+      const suffix = Date.now();
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({
+          ...baseProductPayload(suffix),
+          productType: ProductType.SERVICE,
+          isInventoryTracked: false,
+          stockMinimum: undefined,
+        });
+
+      expect(response.status).toBe(201);
+      const body = response.body as SafeProductBody;
+      expect(body.stockMinimum).toBe('0.000');
+    });
+
     it('SKU duplicado responde 409', async () => {
       const suffix = Date.now();
       const payload = baseProductPayload(suffix);

@@ -20,6 +20,7 @@ import {
   toSafeInventoryMovement,
 } from './mappers/inventory-movement.mapper';
 import { StockMovementEngine } from './stock-movement.engine';
+import { deriveStockStatus } from './stock-status';
 import { ListLowStockQuery } from './types/list-low-stock.query';
 import { ListMovementsQuery } from './types/list-movements.query';
 import { RegisterMovementInput } from './types/register-movement.input';
@@ -290,6 +291,9 @@ export class InventoryService {
         // revés). Prisma.Decimal exclusivamente; el WHERE ya garantiza
         // stockCurrent <= stockMinimum, así que el resultado es siempre >= 0.
         difference: row.stockMinimum.minus(row.stockCurrent).toFixed(3),
+        // NR-04: solo puede ser LOW_STOCK u OUT_OF_STOCK aquí (el WHERE ya
+        // excluye NORMAL de este listado).
+        stockStatus: deriveStockStatus(row.stockCurrent, row.stockMinimum),
         category: { id: row.categoryId, name: row.categoryName },
         unit: { id: row.unitId, abbreviation: row.unitAbbreviation },
       })),

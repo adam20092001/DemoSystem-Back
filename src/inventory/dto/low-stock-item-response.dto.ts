@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import type { StockStatus } from '../stock-status';
 
 export class LowStockCategorySummaryResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -47,6 +48,13 @@ export class LowStockItemResponseDto {
     example: '2.500',
   })
   difference!: string;
+
+  @ApiProperty({
+    enum: ['LOW_STOCK', 'OUT_OF_STOCK'],
+    description:
+      'NR-04: clasificación derivada (nunca persistida) de stockCurrent frente a stockMinimum. Este endpoint solo devuelve LOW_STOCK u OUT_OF_STOCK (NORMAL ya queda excluido por el filtro).',
+  })
+  stockStatus!: StockStatus;
 
   @ApiProperty({ type: LowStockCategorySummaryResponseDto })
   category!: LowStockCategorySummaryResponseDto;

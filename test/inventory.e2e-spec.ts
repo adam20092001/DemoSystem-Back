@@ -57,6 +57,7 @@ interface SafeProductBody {
   name: string;
   status: ProductStatus;
   stockCurrent: string;
+  stockMinimum: string;
 }
 
 interface SafeProductStockBody {
@@ -1950,6 +1951,97 @@ describe('Inventory (e2e)', () => {
           (row) => row.id === inactiveEligible.id,
         ),
       ).toBe(true);
+    });
+
+    // ================================================================
+    // NR-04 — stockStatus
+    // ================================================================
+    it('NR-04: cada elemento incluye stockStatus (LOW_STOCK u OUT_OF_STOCK, nunca NORMAL en este listado)', async () => {
+      const belowThreshold = await createLowStockCandidate('10.000', '5.000');
+      const atThreshold = await createLowStockCandidate('5.000', '5.000');
+      const outOfStock = await createLowStockCandidate('5.000', null);
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      expect(response.status).toBe(200);
+      const body = response.body as PaginatedBody<{
+        id: string;
+        stockStatus: string;
+      }>;
+
+      expect(
+        body.data.find((r) => r.id === belowThreshold.id)?.stockStatus,
+      ).toBe('LOW_STOCK');
+      expect(body.data.find((r) => r.id === atThreshold.id)?.stockStatus).toBe(
+        'LOW_STOCK',
+      );
+      expect(body.data.find((r) => r.id === outOfStock.id)?.stockStatus).toBe(
+        'OUT_OF_STOCK',
+      );
+      expect(body.data.every((row) => row.stockStatus !== 'NORMAL')).toBe(true);
+    });
+
+    it('NR-04: un movimiento de inventario posterior cambia stockStatus en la siguiente consulta (dato en vivo, nunca cacheado)', async () => {
+      // stockMinimum=5, saldo inicial 5 -> LOW_STOCK (justo en la frontera).
+      const product = await createLowStockCandidate('5.000', '5.000');
+      const firstResponse = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      expect(
+        (
+          firstResponse.body as PaginatedBody<{
+            id: string;
+            stockStatus: string;
+          }>
+        ).data.find((r) => r.id === product.id)?.stockStatus,
+      ).toBe('LOW_STOCK');
+
+      // Una salida que agota el stock -> debe pasar a OUT_OF_STOCK sin
+      // ninguna acción adicional (misma consulta, dato recalculado en vivo).
+      const exit = await request(app.getHttpServer())
+        .post('/api/v1/inventory/exits')
+        .set('Cookie', adminCookie)
+        .send({
+          productId: product.id,
+          quantity: '5.000',
+          reason: 'NR-04 e2e: agotar stock',
+        });
+      expect(exit.status).toBe(201);
+
+      const secondResponse = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      expect(
+        (
+          secondResponse.body as PaginatedBody<{
+            id: string;
+            stockStatus: string;
+          }>
+        ).data.find((r) => r.id === product.id)?.stockStatus,
+      ).toBe('OUT_OF_STOCK');
+    });
+
+    it('NR-04: un producto NUEVO sin stockMinimum explícito nace con el default de 3 y aparece aquí si su stock queda en 0-3', async () => {
+      const defaultThresholdProduct = await createProduct({
+        categoryId: lowStockCategoryId,
+        unitId: lowStockUnitId,
+      });
+      expect(defaultThresholdProduct.stockMinimum).toBe('3.000');
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/inventory/low-stock')
+        .query({ categoryId: lowStockCategoryId, limit: 100 })
+        .set('Cookie', adminCookie);
+      const row = (
+        response.body as PaginatedBody<{ id: string; stockStatus: string }>
+      ).data.find((r) => r.id === defaultThresholdProduct.id);
+      // Stock recién creado = 0 -> OUT_OF_STOCK, por debajo del nuevo
+      // default de 3 (nunca requiere stockMinimum enviado explícitamente).
+      expect(row?.stockStatus).toBe('OUT_OF_STOCK');
     });
   });
 

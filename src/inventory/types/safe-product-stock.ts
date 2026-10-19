@@ -9,6 +9,8 @@ export interface SafeProductStock {
   allowDecimal: boolean;
 }
 
+import { StockStatus } from '../stock-status';
+
 /** Resumen mínimo dentro de un elemento de stock bajo. */
 export interface LowStockCategorySummary {
   id: string;
@@ -31,6 +33,8 @@ export interface SafeLowStockItem {
   // Como el endpoint solo devuelve filas de stock bajo, siempre es >= 0.
   // Fixed 3 decimales, misma precisión que stockCurrent/stockMinimum.
   difference: string;
+  // NR-04: solo LOW_STOCK u OUT_OF_STOCK en este endpoint (ver stock-status.ts).
+  stockStatus: StockStatus;
   category: LowStockCategorySummary;
   unit: LowStockUnitSummary;
 }
