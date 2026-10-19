@@ -13,6 +13,8 @@ import {
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import ExcelJS from 'exceljs';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PrismaService } from '../database/prisma.service';
 import { ProductsService } from './products.service';
 
@@ -127,6 +129,7 @@ describe('ProductsService', () => {
     service = new ProductsService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
+      new ExcelExportService(),
     );
 
     prisma.tx.category.findUnique.mockResolvedValue({
@@ -1026,6 +1029,145 @@ describe('ProductsService', () => {
         expect(result.data).toEqual([]);
         expect(prisma.product.findMany).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  // ====================================================================
+  // NR-06 — exportProductsXlsx
+  // ====================================================================
+  describe('exportProductsXlsx', () => {
+    async function readWorkbook(buffer: Buffer) {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      return workbook.worksheets[0];
+    }
+
+    it('genera un .xlsx con los encabezados exactos, en orden', async () => {
+      prisma.product.findMany.mockResolvedValue([makeProductRow()]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      const headers: unknown[] = [];
+      sheet.getRow(1).eachCell((cell) => headers.push(cell.value));
+      expect(headers).toEqual([
+        'SKU',
+        'Nombre del producto',
+        'Marca',
+        'Tipo de producto',
+        'Categoría',
+        'Unidad',
+        'Precio de venta',
+        'Stock actual',
+        'Stock mínimo',
+        'Estado',
+      ]);
+    });
+
+    it('usa los valores de stock YA persistidos como celdas numéricas', async () => {
+      prisma.product.findMany.mockResolvedValue([
+        makeProductRow({
+          salePrice: new Prisma.Decimal('19.90'),
+          stockCurrent: new Prisma.Decimal('12.500'),
+          stockMinimum: new Prisma.Decimal('3.000'),
+        }),
+      ]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      const row = sheet.getRow(2);
+      expect(row.getCell(7).value).toBe(19.9);
+      expect(row.getCell(8).value).toBe(12.5);
+      expect(row.getCell(9).value).toBe(3);
+    });
+
+    it('un servicio no inventariable exporta su stock real (0), nunca un valor fabricado', async () => {
+      prisma.product.findMany.mockResolvedValue([
+        makeProductRow({
+          productType: ProductType.SERVICE,
+          isInventoryTracked: false,
+          stockCurrent: new Prisma.Decimal(0),
+          stockMinimum: new Prisma.Decimal(0),
+        }),
+      ]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      const row = sheet.getRow(2);
+      expect(row.getCell(8).value).toBe(0);
+      expect(row.getCell(9).value).toBe(0);
+    });
+
+    it('nunca incluye internalNotes ni imágenes (solo 10 columnas, sin importar el rol)', async () => {
+      prisma.product.findMany.mockResolvedValue([
+        makeProductRow({ internalNotes: 'nota interna sensible' }),
+      ]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.getRow(1).cellCount).toBe(10);
+      const serialized = JSON.stringify(sheet.getRow(2).values);
+      expect(serialized).not.toContain('nota interna sensible');
+    });
+
+    it('SELLER: reutiliza listProducts() tal cual (forzado a status=ACTIVE)', async () => {
+      prisma.product.findMany.mockResolvedValue([]);
+      prisma.product.count.mockResolvedValue(0);
+
+      await service.exportProductsXlsx({}, RoleName.SELLER);
+      const args = prisma.product.findMany.mock.calls[0][0] as {
+        where: { status?: ProductStatus };
+      };
+      expect(args.where.status).toBe(ProductStatus.ACTIVE);
+    });
+
+    it('lowStockOnly=true: reutiliza la misma rama existente (consulta raw)', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([{ id: 'product-1' }])
+        .mockResolvedValueOnce([{ total: 1 }]);
+      prisma.product.findMany.mockResolvedValue([makeProductRow()]);
+
+      const buffer = await service.exportProductsXlsx(
+        { lowStockOnly: true },
+        RoleName.ADMIN,
+      );
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.rowCount).toBe(2);
+      expect(prisma.$queryRaw).toHaveBeenCalled();
+    });
+
+    it('resultado por encima del máximo de 20 000: 400, sin pedir más páginas', async () => {
+      prisma.product.findMany.mockResolvedValue([makeProductRow()]);
+      prisma.product.count.mockResolvedValue(20001);
+
+      await expect(
+        service.exportProductsXlsx({}, RoleName.ADMIN),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('nombre de producto con prefijo de fórmula se neutraliza', async () => {
+      prisma.product.findMany.mockResolvedValue([
+        makeProductRow({ name: '=cmd|/C calc' }),
+      ]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.getRow(2).getCell(2).value as string).toBe("'=cmd|/C calc");
+    });
+
+    it('conjunto vacío: workbook válido con solo encabezado', async () => {
+      prisma.product.findMany.mockResolvedValue([]);
+      prisma.product.count.mockResolvedValue(0);
+
+      const buffer = await service.exportProductsXlsx({}, RoleName.ADMIN);
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.rowCount).toBe(1);
     });
   });
 

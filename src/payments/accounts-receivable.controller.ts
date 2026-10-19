@@ -1,10 +1,11 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Header, Query, StreamableFile } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiProduces,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -13,6 +14,10 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
+import {
+  excelFileResponse,
+  XLSX_CONTENT_TYPE,
+} from '../common/excel/excel-file-response';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import { AccountsReceivableService } from './accounts-receivable.service';
 import { PaginatedReceivablesResponseDto } from './dto/accounts-receivable-response.dto';
@@ -52,5 +57,32 @@ export class AccountsReceivableController {
       id: user.id,
       role: user.role,
     });
+  }
+
+  @ApiOperation({
+    summary: 'Exportar cuentas por cobrar a Excel (.xlsx)',
+    description:
+      'NR-06: mismos filtros y alcance por vendedor que GET /accounts-receivable (page/limit se ignoran — exporta el resultado completo, hasta 20 000 filas). No existe dueDate en el MVP: la columna de días es solo el transcurrido desde la confirmación, nunca un indicador de mora contra un vencimiento.',
+  })
+  @ApiProduces(XLSX_CONTENT_TYPE)
+  @ApiOkResponse({
+    description: 'Archivo .xlsx con las cuentas por cobrar filtradas.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Filtros o rango de fechas inválido, o el resultado supera las 20 000 filas.',
+  })
+  @Roles(...READ_ROLES)
+  @Get('export.xlsx')
+  @Header('Content-Type', XLSX_CONTENT_TYPE)
+  async exportXlsx(
+    @Query() query: ListReceivablesQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const buffer = await this.accountsReceivableService.exportReceivablesXlsx(
+      query,
+      { id: user.id, role: user.role },
+    );
+    return excelFileResponse(buffer, 'cuentas-por-cobrar');
   }
 }

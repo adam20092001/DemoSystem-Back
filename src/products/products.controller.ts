@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -31,6 +32,7 @@ import {
   ApiOperation,
   ApiParam,
   ApiPayloadTooLargeResponse,
+  ApiProduces,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -38,6 +40,10 @@ import { RoleName } from '@prisma/client';
 import type { Request } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import {
+  excelFileResponse,
+  XLSX_CONTENT_TYPE,
+} from '../common/excel/excel-file-response';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
@@ -96,6 +102,31 @@ export class ProductsController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeProductListItem>> {
     return this.productsService.listProducts(query, user.role);
+  }
+
+  @ApiTags('Products')
+  @ApiOperation({
+    summary: 'Exportar productos a Excel (.xlsx)',
+    description:
+      'NR-06: mismos filtros y visibilidad que GET /products (page/limit se ignoran — exporta el resultado completo, hasta 20 000 filas); SELLER sigue viendo solo status=ACTIVE. Nunca incluye internalNotes ni imágenes.',
+  })
+  @ApiProduces(XLSX_CONTENT_TYPE)
+  @ApiOkResponse({ description: 'Archivo .xlsx con los productos filtrados.' })
+  @ApiBadRequestResponse({
+    description: 'Filtros inválidos, o el resultado supera las 20 000 filas.',
+  })
+  @Roles(...READ_ROLES)
+  @Get('export.xlsx')
+  @Header('Content-Type', XLSX_CONTENT_TYPE)
+  async exportXlsx(
+    @Query() query: ListProductsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const buffer = await this.productsService.exportProductsXlsx(
+      query,
+      user.role,
+    );
+    return excelFileResponse(buffer, 'productos');
   }
 
   @ApiTags('Products')

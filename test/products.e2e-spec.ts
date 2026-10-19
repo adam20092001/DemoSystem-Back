@@ -7,7 +7,9 @@ import {
   RoleName,
   UnitStatus,
 } from '@prisma/client';
+import ExcelJS from 'exceljs';
 import request from 'supertest';
+import { binaryParser } from './helpers/excel-download';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
 import { assertAuditRowHasNoSecrets } from './helpers/audit-assertions';
@@ -929,6 +931,164 @@ describe('Products & Specifications (e2e)', () => {
         before.stockCurrent.toString(),
       );
       expect(auditAfter).toBe(auditBefore);
+    });
+  });
+
+  // ==================================================================
+  // NR-06 — GET /products/export.xlsx
+  // ==================================================================
+  describe('export.xlsx', () => {
+    async function readWorkbook(buffer: Buffer): Promise<ExcelJS.Worksheet> {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      if (!sheet) {
+        throw new Error('El .xlsx descargado no tiene ninguna hoja');
+      }
+      return sheet;
+    }
+
+    async function createFixtureProduct(
+      overrides: Record<string, unknown> = {},
+    ): Promise<SafeProductBody> {
+      const suffix = Date.now() + Math.floor(Math.random() * 100000);
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', adminCookie)
+        .send({ ...baseProductPayload(suffix), ...overrides });
+      if (response.status !== 201) {
+        throw new Error(
+          `No se pudo crear el producto fixture: ${JSON.stringify(response.body)}`,
+        );
+      }
+      return response.body as SafeProductBody;
+    }
+
+    it('ADMIN: 200, .xlsx real parseable, con el producto creado', async () => {
+      const product = await createFixtureProduct();
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .query({ search: product.sku })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      expect(response.headers['content-disposition']).toContain('attachment');
+      const sheet = await readWorkbook(response.body as Buffer);
+      const skus: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) skus.push(row.getCell(1).value);
+      });
+      expect(skus).toContain(product.sku);
+    });
+
+    it('SELLER: nunca exporta un producto INACTIVE (misma regla que GET /products)', async () => {
+      const inactiveProduct = await createFixtureProduct();
+      await request(app.getHttpServer())
+        .post(`/api/v1/products/${inactiveProduct.id}/deactivate`)
+        .set('Cookie', adminCookie);
+      const activeProduct = await createFixtureProduct();
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .set('Cookie', sellerCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const skus: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) skus.push(row.getCell(1).value);
+      });
+      expect(skus).not.toContain(inactiveProduct.sku);
+      expect(skus).toContain(activeProduct.sku);
+    });
+
+    it('MANAGEMENT y WAREHOUSE: 200 (visibilidad global existente, sin ampliar permisos)', async () => {
+      const product = await createFixtureProduct();
+      for (const cookie of [managementCookie, warehouseCookie]) {
+        const response = await request(app.getHttpServer())
+          .get('/api/v1/products/export.xlsx')
+          .query({ search: product.sku })
+          .set('Cookie', cookie)
+          .buffer(true)
+          .parse(binaryParser);
+        expect(response.status).toBe(200);
+        const sheet = await readWorkbook(response.body as Buffer);
+        const skus: unknown[] = [];
+        sheet.eachRow((row, rowNumber) => {
+          if (rowNumber > 1) skus.push(row.getCell(1).value);
+        });
+        expect(skus).toContain(product.sku);
+      }
+    });
+
+    it('sin cookie: 401', async () => {
+      const response = await request(app.getHttpServer()).get(
+        '/api/v1/products/export.xlsx',
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it('mismos filtros que GET /products: categoryId/search acotan el resultado exportado', async () => {
+      const product = await createFixtureProduct();
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .query({ categoryId, search: product.sku })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBe(2); // encabezado + exactamente 1 coincidencia
+    });
+
+    it('nunca incluye internalNotes (columna sensible) en el archivo exportado', async () => {
+      const product = await createFixtureProduct({
+        internalNotes: 'nota interna sensible de costos',
+      });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .query({ search: product.sku })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.getRow(1).cellCount).toBe(10);
+      const serialized = JSON.stringify(sheet.getRow(2).values);
+      expect(serialized).not.toContain('nota interna sensible de costos');
+    });
+
+    it('nombre de producto con prefijo de fórmula se neutraliza en la celda exportada', async () => {
+      const product = await createFixtureProduct({
+        name: '=cmd|/C calc!A1',
+      });
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .query({ search: product.sku })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.getRow(2).getCell(2).value as string).toBe(
+        "'=cmd|/C calc!A1",
+      );
+    });
+
+    it('resultado vacío: .xlsx válido con solo encabezado', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products/export.xlsx')
+        .query({ search: `sin-coincidencias-${Date.now()}` })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBe(1);
     });
   });
 });

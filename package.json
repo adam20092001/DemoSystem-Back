@@ -5,6 +5,19 @@
   "author": "",
   "private": true,
   "license": "UNLICENSED",
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1",
+      "fast-csv": {
+        "@fast-csv/format": {
+          "@types/node": "$@types/node"
+        },
+        "@fast-csv/parse": {
+          "@types/node": "$@types/node"
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
@@ -52,6 +65,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cookie-parser": "^1.4.7",
+    "exceljs": "^4.4.0",
     "multer": "^2.2.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"

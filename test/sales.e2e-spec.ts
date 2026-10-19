@@ -22,7 +22,9 @@ import {
   SaleStatus,
   UnitStatus,
 } from '@prisma/client';
+import ExcelJS from 'exceljs';
 import request from 'supertest';
+import { binaryParser } from './helpers/excel-download';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
 import {
@@ -5283,7 +5285,7 @@ describe('Sales (e2e)', () => {
   // Regresión de Swagger
   // ==================================================================
   describe('regresión de Swagger', () => {
-    it('8 operaciones Sales en 7 paths únicos; sin DELETE/PUT; print documenta text/html', async () => {
+    it('9 operaciones Sales en 8 paths únicos; sin DELETE/PUT; print documenta text/html', async () => {
       const response = await request(app.getHttpServer()).get('/api/docs-json');
       expect(response.status).toBe(200);
       const doc = response.body as {
@@ -5311,14 +5313,14 @@ describe('Sales (e2e)', () => {
           !path.includes('payments') &&
           !path.includes('electronic-documents'),
       );
-      expect(new Set(salePaths).size).toBe(7);
+      expect(new Set(salePaths).size).toBe(8);
       let totalOps = 0;
       for (const path of salePaths) {
         totalOps += Object.keys(doc.paths[path]).length;
         expect(Object.keys(doc.paths[path])).not.toContain('delete');
         expect(Object.keys(doc.paths[path])).not.toContain('put');
       }
-      expect(totalOps).toBe(8);
+      expect(totalOps).toBe(9);
 
       const printOp = doc.paths['/api/v1/sales/{id}/print']?.get as
         | { responses?: Record<string, { content?: Record<string, unknown> }> }
@@ -6941,6 +6943,145 @@ describe('Sales (e2e)', () => {
       expect(html).not.toMatch(/balanceDue/i);
       expect(html).not.toMatch(/OP-PRINT-1/);
       expect(html).not.toMatch(/PARTIALLY_PAID/);
+    });
+  });
+
+  // ==================================================================
+  // NR-06 — GET /sales/export.xlsx
+  // ==================================================================
+  describe('export.xlsx', () => {
+    async function readWorkbook(buffer: Buffer): Promise<ExcelJS.Worksheet> {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      if (!sheet) {
+        throw new Error('El .xlsx descargado no tiene ninguna hoja');
+      }
+      return sheet;
+    }
+
+    it('ADMIN: 200, .xlsx real parseable, con la venta creada', async () => {
+      const sale = await createDirectSale(adminCookie);
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .query({ search: sale.number })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      expect(response.headers['content-disposition']).toContain('attachment');
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBeGreaterThanOrEqual(2);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(sale.number);
+    });
+
+    it('SELLER: exporta solo sus propias ventas, nunca las de otro vendedor', async () => {
+      const ownSale = await createDirectSale(sellerCookie);
+      const otherSale = await createDirectSale(adminCookie);
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .set('Cookie', sellerCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(ownSale.number);
+      expect(numbers).not.toContain(otherSale.number);
+    });
+
+    it('MANAGEMENT: alcance global, igual que ADMIN', async () => {
+      const sale = await createDirectSale(sellerCookie);
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .query({ search: sale.number })
+        .set('Cookie', managementCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const numbers: unknown[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) numbers.push(row.getCell(1).value);
+      });
+      expect(numbers).toContain(sale.number);
+    });
+
+    it('WAREHOUSE: 403', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .set('Cookie', warehouseCookie);
+      expect(response.status).toBe(403);
+    });
+
+    it('sin cookie: 401', async () => {
+      const response = await request(app.getHttpServer()).get(
+        '/api/v1/sales/export.xlsx',
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it('mismos filtros que GET /sales: search acota el resultado exportado', async () => {
+      const sale = await createDirectSale(adminCookie);
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .query({ search: sale.number })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBe(2); // encabezado + exactamente 1 coincidencia
+    });
+
+    it('inyección de fórmula en el nombre del cliente se neutraliza en la celda exportada', async () => {
+      const maliciousCustomer = await prisma.customer.create({
+        data: {
+          customerStage: CustomerStage.CUSTOMER,
+          status: CustomerStatus.ACTIVE,
+          customerType: CustomerType.PERSON,
+          name: '=cmd|/C calc!A1',
+          creditEnabled: true,
+        },
+      });
+      createdCustomerIds.push(maliciousCustomer.id);
+      const sale = await createDirectSale(adminCookie, {
+        customerId: maliciousCustomer.id,
+      });
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .query({ search: sale.number })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      const sheet = await readWorkbook(response.body as Buffer);
+      const row = sheet.getRow(2);
+      expect(row.getCell(5).value).toBe("'=cmd|/C calc!A1");
+    });
+
+    it('resultado vacío: .xlsx válido con solo encabezado', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/sales/export.xlsx')
+        .query({ search: `sin-coincidencias-${Date.now()}` })
+        .set('Cookie', adminCookie)
+        .buffer(true)
+        .parse(binaryParser);
+      expect(response.status).toBe(200);
+      const sheet = await readWorkbook(response.body as Buffer);
+      expect(sheet.rowCount).toBe(1);
     });
   });
 });

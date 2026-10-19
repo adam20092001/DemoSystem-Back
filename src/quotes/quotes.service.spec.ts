@@ -18,6 +18,8 @@ import {
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
+import ExcelJS from 'exceljs';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { CompanySettingsSnapshot } from '../configuration/types/company-settings-snapshot';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
@@ -241,6 +243,7 @@ describe('QuotesService', () => {
       auditService as unknown as AuditService,
       sequenceService,
       settingsReader as unknown as SettingsReader,
+      new ExcelExportService(),
     );
 
     prisma.tx.customer.findUnique.mockResolvedValue(makeCustomerRow());
@@ -2767,6 +2770,113 @@ describe('QuotesService', () => {
           });
         }
       });
+    });
+  });
+
+  // ====================================================================
+  // NR-06 — exportQuotesXlsx
+  // ====================================================================
+  describe('exportQuotesXlsx', () => {
+    function makeExportRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: QUOTE_ID,
+        number: 'COT-000001',
+        status: QuoteStatus.PENDING,
+        customerId: CUSTOMER_ID,
+        customerName: 'Cliente Uno',
+        customerDocumentNumber: '20123456789',
+        sellerId: ACTOR_ID,
+        issueDate: new Date('2026-03-15T00:00:00.000Z'),
+        expirationDate: new Date('2026-03-20T00:00:00.000Z'),
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('10.00'),
+        taxAmount: new Prisma.Decimal('16.20'),
+        total: new Prisma.Decimal('106.20'),
+        currencyCode: 'PEN',
+        taxEnabled: true,
+        taxRate: new Prisma.Decimal('18.00'),
+        createdAt: new Date('2026-03-15T00:00:00.000Z'),
+        updatedAt: new Date('2026-03-15T00:00:00.000Z'),
+        _count: { items: 2 },
+        ...overrides,
+      };
+    }
+
+    async function readWorkbook(buffer: Buffer) {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      return workbook.worksheets[0];
+    }
+
+    beforeEach(() => {
+      prisma.quote.findMany.mockResolvedValue([makeExportRow()]);
+      prisma.quote.count.mockResolvedValue(1);
+    });
+
+    it('genera un .xlsx con los encabezados exactos, en orden', async () => {
+      const buffer = await service.exportQuotesXlsx({}, asRole(RoleName.ADMIN));
+      const sheet = await readWorkbook(buffer);
+      const headers: unknown[] = [];
+      sheet.getRow(1).eachCell((cell) => headers.push(cell.value));
+      expect(headers).toEqual([
+        'Número',
+        'Estado efectivo',
+        'Cliente',
+        'Vendedor',
+        'Fecha de emisión',
+        'Fecha de vencimiento',
+        'Subtotal',
+        'Descuento del documento',
+        'IGV',
+        'Total',
+        'Moneda',
+        'Cantidad de ítems',
+      ]);
+    });
+
+    it('usa los montos YA calculados (snapshot NR-03) como celdas numéricas, sin recalcular', async () => {
+      const buffer = await service.exportQuotesXlsx({}, asRole(RoleName.ADMIN));
+      const sheet = await readWorkbook(buffer);
+      const row = sheet.getRow(2);
+      expect(row.getCell(7).value).toBe(100);
+      expect(row.getCell(8).value).toBe(10);
+      expect(row.getCell(9).value).toBe(16.2);
+      expect(row.getCell(10).value).toBe(106.2);
+      expect(row.getCell(12).value).toBe(2);
+    });
+
+    it('reutiliza el alcance de list(): SELLER exporta solo sus propias cotizaciones', async () => {
+      await service.exportQuotesXlsx({}, asRole(RoleName.SELLER));
+      const args = prisma.quote.findMany.mock.calls[0][0] as {
+        where: unknown;
+      };
+      expect(args.where).toEqual({ AND: [{ sellerId: ACTOR_ID }, {}] });
+    });
+
+    it('resultado por encima del máximo de 20 000: 400, sin pedir más páginas', async () => {
+      prisma.quote.count.mockResolvedValue(20001);
+      await expect(
+        service.exportQuotesXlsx({}, asRole(RoleName.ADMIN)),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.quote.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('fecha de emisión con prefijo de fórmula en el número de documento: se neutraliza (columna identificador)', async () => {
+      prisma.quote.findMany.mockResolvedValue([
+        makeExportRow({ customerName: '=cmd|/C calc' }),
+      ]);
+      const buffer = await service.exportQuotesXlsx({}, asRole(RoleName.ADMIN));
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.getRow(2).getCell(3).value as string).toBe("'=cmd|/C calc");
+    });
+
+    it('conjunto vacío: workbook válido con solo encabezado', async () => {
+      prisma.quote.findMany.mockResolvedValue([]);
+      prisma.quote.count.mockResolvedValue(0);
+      const buffer = await service.exportQuotesXlsx({}, asRole(RoleName.ADMIN));
+      const sheet = await readWorkbook(buffer);
+      expect(sheet.rowCount).toBe(1);
     });
   });
 

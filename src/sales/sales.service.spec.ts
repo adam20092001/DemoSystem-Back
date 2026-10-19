@@ -25,6 +25,8 @@ import { AuditService } from '../audit/audit.service';
 import * as businessDateModule from '../common/date/business-date';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { CompanySettingsSnapshot } from '../configuration/types/company-settings-snapshot';
+import ExcelJS from 'exceljs';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
 import { PaymentEngine } from '../payments/payment.engine';
@@ -469,6 +471,7 @@ describe('SalesService', () => {
       paymentEngine as unknown as PaymentEngine,
       accountingEngine as unknown as AccountingEngine,
       settingsReader as unknown as SettingsReader,
+      new ExcelExportService(),
     );
 
     prisma.tx.$queryRaw.mockImplementation(
@@ -4397,6 +4400,193 @@ describe('SalesService', () => {
       expect(result.data[0]).not.toHaveProperty('items');
       expect(result.data[0]).not.toHaveProperty('inventoryMovements');
       expect(result.data[0].itemCount).toBe(1);
+    });
+  });
+
+  // ====================================================================
+  // NR-06 — exportSalesXlsx
+  // ====================================================================
+  describe('exportSalesXlsx', () => {
+    function makeExportRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return {
+        id: SALE_ID,
+        number: 'NV-000001',
+        status: SaleStatus.ACTIVE,
+        paymentStatus: SalePaymentStatus.UNPAID,
+        deliveryStatus: SaleDeliveryStatus.PENDING,
+        customerId: CUSTOMER_ID,
+        customerName: 'Cliente Uno',
+        customerDocumentNumber: '20123456789',
+        sellerId: ACTOR_ID,
+        seller: {
+          id: ACTOR_ID,
+          username: 'admin',
+          firstName: 'Ana',
+          lastName: 'Admin',
+        },
+        subtotal: new Prisma.Decimal('100.00'),
+        discountAmount: new Prisma.Decimal('10.00'),
+        taxAmount: new Prisma.Decimal('16.20'),
+        total: new Prisma.Decimal('106.20'),
+        currencyCode: 'PEN',
+        taxEnabled: true,
+        taxRate: new Prisma.Decimal('18.00'),
+        paidAmount: new Prisma.Decimal('50.00'),
+        balanceDue: new Prisma.Decimal('56.20'),
+        confirmedAt: new Date('2026-03-15T12:00:00.000Z'),
+        createdAt: new Date('2026-03-15T12:00:00.000Z'),
+        updatedAt: new Date('2026-03-15T12:00:00.000Z'),
+        _count: { items: 3 },
+        ...overrides,
+      };
+    }
+
+    async function readFirstDataRow(buffer: Buffer) {
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      return { sheet, dataRow: sheet.getRow(2), headerRow: sheet.getRow(1) };
+    }
+
+    it('genera un .xlsx real con los encabezados exactos, en orden', async () => {
+      prisma.sale.findMany.mockResolvedValue([makeExportRow()]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      const { headerRow } = await readFirstDataRow(buffer);
+      const headers: unknown[] = [];
+      headerRow.eachCell((cell) => headers.push(cell.value));
+      expect(headers).toEqual([
+        'Número',
+        'Estado',
+        'Estado de pago',
+        'Estado de entrega',
+        'Cliente',
+        'Documento del cliente',
+        'Vendedor',
+        'Subtotal',
+        'Descuento del documento',
+        'IGV',
+        'Total',
+        'Moneda',
+        'Pagado',
+        'Saldo pendiente',
+        'Cantidad de ítems',
+        'Fecha de confirmación',
+      ]);
+    });
+
+    it('usa los montos YA persistidos como celdas numéricas, sin recalcular nada', async () => {
+      prisma.sale.findMany.mockResolvedValue([makeExportRow()]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      const { dataRow } = await readFirstDataRow(buffer);
+      expect(dataRow.getCell(8).value).toBe(100); // Subtotal
+      expect(dataRow.getCell(9).value).toBe(10); // Descuento
+      expect(dataRow.getCell(10).value).toBe(16.2); // IGV
+      expect(dataRow.getCell(11).value).toBe(106.2); // Total
+      expect(dataRow.getCell(13).value).toBe(50); // Pagado
+      expect(dataRow.getCell(14).value).toBe(56.2); // Saldo pendiente
+      expect(dataRow.getCell(15).value).toBe(3); // Cantidad de ítems
+    });
+
+    it('reutiliza el alcance de list(): SELLER exporta solo sus propias ventas', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+      prisma.sale.count.mockResolvedValue(0);
+
+      await service.exportSalesXlsx({}, asRole(RoleName.SELLER));
+      const args = prisma.sale.findMany.mock.calls[0][0] as {
+        where: unknown;
+      };
+      expect(args.where).toEqual({ AND: [{ sellerId: ACTOR_ID }, {}] });
+    });
+
+    it('resultado por encima del máximo (20 000): 400, sin construir ningún workbook ni pedir más páginas', async () => {
+      prisma.sale.findMany.mockResolvedValue([makeExportRow()]);
+      prisma.sale.count.mockResolvedValue(20001);
+
+      await expect(
+        service.exportSalesXlsx({}, asRole(RoleName.ADMIN)),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // Solo la primera página (para conocer el total) — nunca una segunda.
+      expect(prisma.sale.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('resultado exactamente en el máximo (20 000): permitido', async () => {
+      prisma.sale.findMany.mockResolvedValue([makeExportRow()]);
+      prisma.sale.count.mockResolvedValue(20000);
+
+      await expect(
+        service.exportSalesXlsx({}, asRole(RoleName.ADMIN)),
+      ).resolves.toBeInstanceOf(Buffer);
+    });
+
+    it('más de una página de resultados: recorre todas en lotes, sin duplicar ni omitir', async () => {
+      prisma.sale.findMany
+        .mockResolvedValueOnce([
+          makeExportRow({ id: 'sale-a', number: 'NV-A' }),
+        ])
+        .mockResolvedValueOnce([
+          makeExportRow({ id: 'sale-b', number: 'NV-B' }),
+        ]);
+      prisma.sale.count.mockResolvedValue(101);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      expect(prisma.sale.findMany).toHaveBeenCalledTimes(2);
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      expect(sheet.rowCount).toBe(3); // encabezado + 2 filas
+      expect(sheet.getRow(2).getCell(1).value).toBe('NV-A');
+      expect(sheet.getRow(3).getCell(1).value).toBe('NV-B');
+    });
+
+    it('conjunto vacío: workbook válido con solo encabezado, sin lanzar', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+      prisma.sale.count.mockResolvedValue(0);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      expect(workbook.worksheets[0].rowCount).toBe(1);
+    });
+
+    it('WAREHOUSE (sin alcance de lectura de ventas): workbook vacío, sin tocar Prisma', async () => {
+      const buffer = await service.exportSalesXlsx(
+        {},
+        asRole(RoleName.WAREHOUSE),
+      );
+      expect(prisma.sale.findMany).not.toHaveBeenCalled();
+      const workbook = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument -- desajuste conocido entre Buffer<ArrayBufferLike> (@types/node reciente) y el Buffer no genérico de los tipos de exceljs; verificado en runtime, solo de tipos.
+      await workbook.xlsx.load(buffer as any);
+      expect(workbook.worksheets[0].rowCount).toBe(1);
+    });
+
+    it('documento del cliente con ceros a la izquierda se conserva como texto', async () => {
+      prisma.sale.findMany.mockResolvedValue([
+        makeExportRow({ customerDocumentNumber: '00123456' }),
+      ]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      const { dataRow } = await readFirstDataRow(buffer);
+      expect(dataRow.getCell(6).value).toBe('00123456');
+    });
+
+    it('nombre de cliente con prefijo de fórmula se neutraliza en la celda', async () => {
+      prisma.sale.findMany.mockResolvedValue([
+        makeExportRow({ customerName: '=cmd|/C calc' }),
+      ]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      const buffer = await service.exportSalesXlsx({}, asRole(RoleName.ADMIN));
+      const { dataRow } = await readFirstDataRow(buffer);
+      expect(dataRow.getCell(5).value as string).toBe("'=cmd|/C calc");
     });
   });
 

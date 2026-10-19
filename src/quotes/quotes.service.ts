@@ -24,6 +24,9 @@ import {
   isValidDateOnly,
   toPrismaDate,
 } from '../common/date/business-date';
+import { ExcelColumn } from '../common/excel/excel-column';
+import { EXPORT_PAGE_SIZE } from '../common/excel/excel-export.constants';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
@@ -130,6 +133,7 @@ export class QuotesService {
     private readonly auditService: AuditService,
     private readonly documentSequenceService: DocumentSequenceService,
     private readonly settingsReader: SettingsReader,
+    private readonly excelExportService: ExcelExportService,
   ) {}
 
   async create(input: CreateQuoteInput): Promise<SafeQuote> {
@@ -569,6 +573,114 @@ export class QuotesService {
       total,
       totalPages: total === 0 ? 0 : Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * NR-06: exportación .xlsx de GET /quotes. Reutiliza `list()` TAL CUAL
+   * en lotes de EXPORT_PAGE_SIZE — mismo `where`/alcance por vendedor/
+   * estado EFECTIVO/orden/mapper seguro — nunca una consulta ni un cálculo
+   * nuevo. Los montos (subtotal/descuento/IGV/total) ya vienen exactos de
+   * `toSafeQuoteListItem` (snapshot NR-03 incluido): aquí solo se
+   * convierten a number para la celda, nunca se recalculan.
+   */
+  async exportQuotesXlsx(
+    query: ListQuotesQuery,
+    requester: QuoteAccessRequester,
+  ): Promise<Buffer> {
+    const firstPage = await this.list(
+      { ...query, page: 1, limit: EXPORT_PAGE_SIZE },
+      requester,
+    );
+    this.excelExportService.assertWithinExportLimit(
+      firstPage.total,
+      'cotizaciones',
+    );
+
+    const rows: SafeQuoteListItem[] = [...firstPage.data];
+    for (let page = 2; page <= firstPage.totalPages; page++) {
+      const next = await this.list(
+        { ...query, page, limit: EXPORT_PAGE_SIZE },
+        requester,
+      );
+      rows.push(...next.data);
+    }
+
+    const columns: ExcelColumn<SafeQuoteListItem>[] = [
+      {
+        key: 'number',
+        header: 'Número',
+        type: 'identifier',
+        value: (r) => r.number,
+      },
+      {
+        key: 'status',
+        header: 'Estado efectivo',
+        type: 'string',
+        value: (r) => r.status,
+      },
+      {
+        key: 'customerName',
+        header: 'Cliente',
+        type: 'string',
+        value: (r) => r.customerName,
+      },
+      {
+        key: 'sellerId',
+        header: 'Vendedor',
+        type: 'identifier',
+        value: (r) => r.sellerId,
+      },
+      {
+        key: 'issueDate',
+        header: 'Fecha de emisión',
+        type: 'date',
+        value: (r) => new Date(r.issueDate),
+      },
+      {
+        key: 'expirationDate',
+        header: 'Fecha de vencimiento',
+        type: 'date',
+        value: (r) => new Date(r.expirationDate),
+      },
+      {
+        key: 'subtotal',
+        header: 'Subtotal',
+        type: 'number',
+        value: (r) => Number(r.subtotal),
+      },
+      {
+        key: 'discountAmount',
+        header: 'Descuento del documento',
+        type: 'number',
+        value: (r) => Number(r.discountAmount),
+      },
+      {
+        key: 'taxAmount',
+        header: 'IGV',
+        type: 'number',
+        value: (r) => Number(r.taxAmount),
+      },
+      {
+        key: 'total',
+        header: 'Total',
+        type: 'number',
+        value: (r) => Number(r.total),
+      },
+      {
+        key: 'currencyCode',
+        header: 'Moneda',
+        type: 'string',
+        value: (r) => r.currencyCode,
+      },
+      {
+        key: 'itemCount',
+        header: 'Cantidad de ítems',
+        type: 'number',
+        value: (r) => r.itemCount,
+      },
+    ];
+
+    return this.excelExportService.buildWorkbook('Cotizaciones', columns, rows);
   }
 
   /**

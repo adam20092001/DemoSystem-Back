@@ -10,6 +10,7 @@ import {
   Post,
   Query,
   Req,
+  StreamableFile,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -31,6 +32,10 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PaginatedResult } from '../common/types/paginated-result';
+import {
+  excelFileResponse,
+  XLSX_CONTENT_TYPE,
+} from '../common/excel/excel-file-response';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import { CancelSaleDto } from './dto/cancel-sale.dto';
 import { ConvertQuoteToSaleDto } from './dto/convert-quote-to-sale.dto';
@@ -183,6 +188,31 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<PaginatedResult<SafeSaleListItem>> {
     return this.salesService.list(query, { id: user.id, role: user.role });
+  }
+
+  @ApiOperation({
+    summary: 'Exportar ventas a Excel (.xlsx)',
+    description:
+      'NR-06: mismos filtros y alcance por vendedor que GET /sales (page/limit se ignoran — exporta el resultado completo, hasta 20 000 filas). Reutiliza los montos ya persistidos; nunca recalcula totales/IGV/descuentos.',
+  })
+  @ApiProduces(XLSX_CONTENT_TYPE)
+  @ApiOkResponse({ description: 'Archivo .xlsx con las ventas filtradas.' })
+  @ApiBadRequestResponse({
+    description:
+      'Filtros o rango de fechas inválido, o el resultado supera las 20 000 filas.',
+  })
+  @Roles(...READ_ROLES)
+  @Get('export.xlsx')
+  @Header('Content-Type', XLSX_CONTENT_TYPE)
+  async exportXlsx(
+    @Query() query: ListSalesQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const buffer = await this.salesService.exportSalesXlsx(query, {
+      id: user.id,
+      role: user.role,
+    });
+    return excelFileResponse(buffer, 'ventas');
   }
 
   @ApiOperation({ summary: 'Obtener el detalle de una venta' })

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { EnvironmentVariables } from '../config/env.validation';
 import { ProductImagesService } from './product-images.service';
 import { ProductSpecificationsService } from './product-specifications.service';
@@ -35,6 +36,7 @@ import { IMAGE_STORAGE } from './storage/image-storage.token';
     ProductsService,
     ProductSpecificationsService,
     ProductImagesService,
+    ExcelExportService,
     { provide: IMAGE_STORAGE, useClass: LocalDiskImageStorageService },
   ],
   exports: [
