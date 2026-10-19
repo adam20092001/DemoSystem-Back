@@ -70,6 +70,10 @@ function makeSaleItemRow(overrides: Partial<Record<string, unknown>> = {}) {
     quantity: new Prisma.Decimal('2.000'),
     unitPrice: new Prisma.Decimal('50.00'),
     lineTotal: new Prisma.Decimal('100.00'),
+    // NR-03: sin descuento de línea por defecto en este fixture.
+    discountType: null,
+    discountValue: null,
+    discountAmount: new Prisma.Decimal('0'),
     ...overrides,
   };
 }
@@ -147,6 +151,9 @@ function makeElectronicDocumentSafeRow(
         quantity: new Prisma.Decimal('2.000'),
         unitPrice: new Prisma.Decimal('50.00'),
         lineTotal: new Prisma.Decimal('100.00'),
+        discountType: null,
+        discountValue: null,
+        discountAmount: new Prisma.Decimal('0'),
       },
     ],
     ...overrides,
@@ -947,6 +954,48 @@ describe('ElectronicDocumentsService', () => {
         { id: 'asc' },
       ]);
     });
+
+    it('NR-03: copia discountType/discountValue/discountAmount EXACTOS del SaleItem (FIXED), sin recalcular', async () => {
+      tx.sale.findUnique.mockResolvedValue(
+        makeSaleRow({
+          items: [
+            makeSaleItemRow({
+              discountType: 'FIXED',
+              discountValue: new Prisma.Decimal('15.00'),
+              discountAmount: new Prisma.Decimal('15.00'),
+              lineTotal: new Prisma.Decimal('85.00'),
+            }),
+          ],
+        }),
+      );
+
+      await service.issue(makeCommand());
+
+      const call = tx.electronicDocument.create.mock.calls[0][0] as {
+        data: { items: { create: Record<string, unknown>[] } };
+      };
+      expect(call.data.items.create[0]).toMatchObject({
+        discountType: 'FIXED',
+        lineTotal: new Prisma.Decimal('85.00'),
+        discountAmount: new Prisma.Decimal('15.00'),
+      });
+      expect(
+        (call.data.items.create[0].discountValue as Prisma.Decimal).toFixed(2),
+      ).toBe('15.00');
+    });
+
+    it('NR-03: sin descuento de línea en el SaleItem de origen: el ítem fiscal también persiste null/null/0', async () => {
+      await service.issue(makeCommand());
+
+      const call = tx.electronicDocument.create.mock.calls[0][0] as {
+        data: { items: { create: Record<string, unknown>[] } };
+      };
+      expect(call.data.items.create[0].discountType).toBeNull();
+      expect(call.data.items.create[0].discountValue).toBeNull();
+      expect(
+        (call.data.items.create[0].discountAmount as Prisma.Decimal).toFixed(2),
+      ).toBe('0.00');
+    });
   });
 
   // ====================================================================
@@ -1442,6 +1491,9 @@ describe('ElectronicDocumentsService', () => {
             quantity: new Prisma.Decimal('2.000'),
             unitPrice: new Prisma.Decimal('50.00'),
             lineTotal: new Prisma.Decimal('100.00'),
+            discountType: null,
+            discountValue: null,
+            discountAmount: new Prisma.Decimal('0'),
           },
         ],
         ...overrides,
@@ -1547,6 +1599,9 @@ describe('ElectronicDocumentsService', () => {
               quantity: new Prisma.Decimal('1.000'),
               unitPrice: new Prisma.Decimal('118.00'),
               lineTotal: new Prisma.Decimal('118.00'),
+              discountType: null,
+              discountValue: null,
+              discountAmount: new Prisma.Decimal('0'),
             },
           ],
         }),
@@ -1621,6 +1676,9 @@ describe('ElectronicDocumentsService', () => {
             quantity: new Prisma.Decimal('2.000'),
             unitPrice: new Prisma.Decimal('50.00'),
             lineTotal: new Prisma.Decimal('100.00'),
+            discountType: null,
+            discountValue: null,
+            discountAmount: new Prisma.Decimal('0'),
           },
         ],
         ...overrides,

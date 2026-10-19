@@ -135,6 +135,10 @@ const SAFE_SALE_ITEM_KEYS = [
   'quantity',
   'unitPrice',
   'lineTotal',
+  // NR-03: descuento individual de línea.
+  'discountType',
+  'discountValue',
+  'discountAmount',
 ].sort();
 
 const SAFE_SALE_MOVEMENT_KEYS = [
@@ -173,6 +177,10 @@ interface SafeSaleItemBody {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  // NR-03: descuento individual de línea.
+  discountType: 'FIXED' | 'PERCENT' | null;
+  discountValue: string | null;
+  discountAmount: string;
 }
 
 interface SafeSaleMovementBody {
@@ -1066,6 +1074,10 @@ describe('Sales (e2e)', () => {
     unitAbbreviation: string;
     quantity: string;
     unitPrice: string;
+    // NR-03: descuento individual de línea, ausente -> sin descuento.
+    discountType?: 'FIXED' | 'PERCENT';
+    discountValue?: string;
+    discountAmount?: string;
   }
 
   async function createDirectQuote(overrides: {
@@ -1092,10 +1104,12 @@ describe('Sales (e2e)', () => {
     );
 
     const itemsWithTotals = overrides.items.map((item) => {
-      const lineTotal = new Prisma.Decimal(item.quantity)
+      const grossLineTotal = new Prisma.Decimal(item.quantity)
         .mul(new Prisma.Decimal(item.unitPrice))
         .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
-      return { ...item, lineTotal };
+      const itemDiscountAmount = new Prisma.Decimal(item.discountAmount ?? '0');
+      const lineTotal = grossLineTotal.minus(itemDiscountAmount);
+      return { ...item, lineTotal, itemDiscountAmount };
     });
     const subtotal = itemsWithTotals.reduce(
       (acc, item) => acc.plus(item.lineTotal),
@@ -1135,6 +1149,11 @@ describe('Sales (e2e)', () => {
             quantity: new Prisma.Decimal(item.quantity),
             unitPrice: new Prisma.Decimal(item.unitPrice),
             lineTotal: item.lineTotal,
+            discountType: item.discountType ?? null,
+            discountValue: item.discountValue
+              ? new Prisma.Decimal(item.discountValue)
+              : null,
+            discountAmount: item.itemDiscountAmount,
           })),
         },
       },
@@ -6139,6 +6158,34 @@ describe('Sales (e2e)', () => {
       createdSaleIds.push(sale.id);
       expect(sale.paymentStatus).toBe(SalePaymentStatus.PAID);
       expect(sale.payments).toHaveLength(1);
+    });
+
+    it('NR-03: una cotización con descuento de línea FIXED convierte con discountType/discountValue/discountAmount/lineTotal copiados EXACTOS en el SaleItem', async () => {
+      const quote = await createDirectQuote({
+        customerId: personActive.id,
+        customerType: CustomerType.PERSON,
+        customerName: personActive.name,
+        items: [
+          {
+            ...quoteItemFor(productQD, '1.000'),
+            discountType: 'FIXED',
+            discountValue: '15.00',
+            discountAmount: '15.00',
+          },
+        ],
+      });
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/from-quote/${quote.id}`)
+        .set('Cookie', adminCookie)
+        .send({});
+      expect(response.status).toBe(201);
+      const sale = response.body as SafeSaleBody;
+      createdSaleIds.push(sale.id);
+      const saleItem = sale.items[0];
+      expect(saleItem.discountType).toBe('FIXED');
+      expect(saleItem.discountValue).toBe('15.00');
+      expect(saleItem.discountAmount).toBe('15.00');
+      expect(saleItem.lineTotal).toBe('85.00');
     });
 
     it('pago inicial válido pero conversión falla por stock insuficiente vigente: 409, rollback total — sin Sale/Payment/mutación de stock; Quote sin cambios; NV sin consumir', async () => {

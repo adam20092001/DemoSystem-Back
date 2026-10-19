@@ -2,6 +2,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import {
   CustomerDocumentType,
   CustomerType,
+  LineDiscountType,
   QuoteStatus,
 } from '@prisma/client';
 
@@ -82,6 +83,29 @@ export class QuoteItemResponseDto {
     example: '499.75',
   })
   lineTotal!: string;
+
+  @ApiProperty({
+    enum: LineDiscountType,
+    nullable: true,
+    description: 'NR-03: null cuando esta línea no tiene descuento individual.',
+  })
+  discountType!: LineDiscountType | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Decimal con 2 decimales fijos, como string. Soles si discountType=FIXED; porcentaje si PERCENT; null si no hay descuento de línea.',
+  })
+  discountValue!: string | null;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Decimal con 2 decimales fijos, como string. Siempre presente; "0.00" cuando la línea no tiene descuento.',
+    example: '0.00',
+  })
+  discountAmount!: string;
 
   @ApiProperty({
     type: QuoteStockInfoResponseDto,

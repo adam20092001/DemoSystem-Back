@@ -34,7 +34,10 @@ export {
   calculateTaxAmount,
   calculateTotal,
   // R2-B2: misma única fuente de verdad para documentos con precios
-  // finales (IGV incluido); ningún servicio la invoca todavía.
+  // finales (IGV incluido); invocada por SalesService.createDirect()
+  // (venta directa, nunca con descuento de línea: NR-03 los reserva a
+  // Quotes — ver quote-calculator.ts para los descuentos de línea, que
+  // esta venta directa nunca necesita reexportar aquí).
   calculateTaxInclusiveTotals,
 } from '../quotes/quote-calculator';
 export type {

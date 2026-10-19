@@ -107,6 +107,10 @@ const SAFE_QUOTE_ITEM_KEYS = [
   'quantity',
   'unitPrice',
   'lineTotal',
+  // NR-03: descuento individual de línea.
+  'discountType',
+  'discountValue',
+  'discountAmount',
   'stockInfo',
 ].sort();
 
@@ -139,6 +143,10 @@ interface SafeQuoteItemBody {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  // NR-03: descuento individual de línea.
+  discountType: 'FIXED' | 'PERCENT' | null;
+  discountValue: string | null;
+  discountAmount: string;
   stockInfo: SafeQuoteStockInfoBody | null;
 }
 
@@ -805,16 +813,27 @@ describe('Quotes (e2e)', () => {
     quantity: string;
     unitPrice: string;
     lineTotal: string;
+    // NR-03: ausentes -> NULL/NULL/'0' (mismo significado que "sin
+    // descuento de línea" en el resto del dominio).
+    discountType?: 'FIXED' | 'PERCENT' | null;
+    discountValue?: string | null;
+    discountAmount?: string;
   }): Promise<void> {
+    const discountType = overrides.discountType ?? null;
+    const discountValue = overrides.discountValue ?? null;
+    const discountAmount = overrides.discountAmount ?? '0';
     await prisma.$executeRaw`
       INSERT INTO quote_items
         (id, quote_id, product_id, product_sku, product_name, unit_code,
-         unit_name, unit_abbreviation, quantity, unit_price, line_total, created_at)
+         unit_name, unit_abbreviation, quantity, unit_price, line_total,
+         discount_type, discount_value, discount_amount, created_at)
       VALUES
         (gen_random_uuid(), ${overrides.quoteId}::uuid, ${overrides.productId}::uuid,
          'SKU-CHK', 'Producto Check', 'UND', 'Unidad', 'und',
          ${overrides.quantity}::numeric, ${overrides.unitPrice}::numeric,
-         ${overrides.lineTotal}::numeric, now())
+         ${overrides.lineTotal}::numeric,
+         ${discountType}::"LineDiscountType", ${discountValue}::numeric,
+         ${discountAmount}::numeric, now())
     `;
   }
 
@@ -1799,6 +1818,254 @@ describe('Quotes (e2e)', () => {
       assertNoLeakage(response);
       const after = await currentSequenceNumber();
       expect(after).toBe(before);
+    });
+  });
+
+  // ==================================================================
+  // NR-03 — Descuentos por línea
+  // ==================================================================
+  describe('NR-03 — descuentos por línea', () => {
+    it('FIXED en soles: 19.99 con descuento 5.00 -> lineTotal 14.99, total 14.99', async () => {
+      const body = await createQuote(adminCookie, {
+        items: [
+          {
+            productId: productA.id,
+            quantity: '1.000',
+            discountType: 'FIXED',
+            discountValue: '5.00',
+          },
+        ],
+      });
+      expect(body.items[0].discountType).toBe('FIXED');
+      expect(body.items[0].discountValue).toBe('5.00');
+      expect(body.items[0].discountAmount).toBe('5.00');
+      expect(body.items[0].lineTotal).toBe('14.99');
+      expect(body.total).toBe('14.99');
+    });
+
+    it('PERCENT: 50% sobre 19.99 -> descuento 10.00 (HALF_UP), lineTotal 9.99', async () => {
+      const body = await createQuote(adminCookie, {
+        items: [
+          {
+            productId: productA.id,
+            quantity: '1.000',
+            discountType: 'PERCENT',
+            discountValue: '50',
+          },
+        ],
+      });
+      expect(body.items[0].discountAmount).toBe('10.00');
+      expect(body.items[0].lineTotal).toBe('9.99');
+    });
+
+    it('sin descuento de línea: discountType/discountValue null, discountAmount "0.00"', async () => {
+      const body = await createQuote(adminCookie, {
+        items: [{ productId: productA.id, quantity: '1.000' }],
+      });
+      expect(body.items[0].discountType).toBeNull();
+      expect(body.items[0].discountValue).toBeNull();
+      expect(body.items[0].discountAmount).toBe('0.00');
+    });
+
+    it('discountType sin discountValue -> 400', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/quotes')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateBody({
+            items: [
+              {
+                productId: productA.id,
+                quantity: '1.000',
+                discountType: 'FIXED',
+              },
+            ],
+          }),
+        );
+      expect(response.status).toBe(400);
+    });
+
+    it('FIXED mayor que el bruto de la línea -> 400', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/quotes')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateBody({
+            items: [
+              {
+                productId: productA.id,
+                quantity: '1.000',
+                discountType: 'FIXED',
+                discountValue: '999.00',
+              },
+            ],
+          }),
+        );
+      expect(response.status).toBe(400);
+    });
+
+    it('PERCENT > 100 -> 400', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/quotes')
+        .set('Cookie', adminCookie)
+        .send(
+          validCreateBody({
+            items: [
+              {
+                productId: productA.id,
+                quantity: '1.000',
+                discountType: 'PERCENT',
+                discountValue: '101',
+              },
+            ],
+          }),
+        );
+      expect(response.status).toBe(400);
+    });
+
+    it('límite combinado (línea + documento): un reparto que supera en conjunto el maxDiscountPercent configurado -> 400', async () => {
+      // CompanySettings de prueba nace con maxDiscountPercent = 100.00 (sin
+      // tope real); este caso demuestra el comportamiento con el máximo por
+      // defecto ajustado a un valor bajo mediante PATCH /configuration.
+      const settingsResponse = await request(app.getHttpServer())
+        .patch('/api/v1/configuration')
+        .set('Cookie', adminCookie)
+        .send({ maxDiscountPercent: '10.00' });
+      expect(settingsResponse.status).toBe(200);
+      try {
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/quotes')
+          .set('Cookie', adminCookie)
+          .send(
+            validCreateBody({
+              // Línea: 19.99 con 5% -> descuento ~1.00, lineTotal ~18.99
+              // (dentro de su propio límite individual). Documento: un
+              // descuento adicional que, sumado al de línea, supera el 10%
+              // combinado contra el bruto original (19.99).
+              discountAmount: '1.00',
+              items: [
+                {
+                  productId: productA.id,
+                  quantity: '1.000',
+                  discountType: 'PERCENT',
+                  discountValue: '5',
+                },
+              ],
+            }),
+          );
+        expect(response.status).toBe(400);
+      } finally {
+        await request(app.getHttpServer())
+          .patch('/api/v1/configuration')
+          .set('Cookie', adminCookie)
+          .send({ maxDiscountPercent: '100.00' });
+      }
+    });
+
+    it('edición SIN reemplazo de ítems (solo discountAmount de documento): el límite combinado usa el lineTotal YA persistido (neto) como "bruto", nunca el bruto original del catálogo', async () => {
+      // Línea: 19.99 con descuento FIXED de 9.99 -> lineTotal (neto, ya
+      // persistido) = 10.00. Esto se crea bajo maxDiscountPercent=100.00
+      // (default de prueba), así que el descuento de línea en sí nunca está
+      // en duda aquí.
+      const quote = await createQuote(adminCookie, {
+        items: [
+          {
+            productId: productA.id,
+            quantity: '1.000',
+            discountType: 'FIXED',
+            discountValue: '9.99',
+          },
+        ],
+      });
+      expect(quote.items[0].lineTotal).toBe('10.00');
+      expect(quote.total).toBe('10.00');
+
+      const settingsResponse = await request(app.getHttpServer())
+        .patch('/api/v1/configuration')
+        .set('Cookie', adminCookie)
+        .send({ maxDiscountPercent: '10.00' });
+      expect(settingsResponse.status).toBe(200);
+      try {
+        // Edición SIN reemplazo de ítems: solo cambia el descuento de
+        // documento. 1.00 es exactamente 10% del lineTotal YA persistido
+        // (10.00) -> debe permitirse. Si el sistema, por error, usara el
+        // bruto ORIGINAL del catálogo (19.99) sumado al descuento de línea
+        // ya aprobado (9.99) como si fuera un descuento "nuevo", el
+        // descuento combinado aparente sería (9.99 + 1.00) = 10.99 sobre
+        // 19.99 (55%), muy por encima del 10% configurado, y esta edición
+        // -que no toca ningún ítem- sería rechazada incorrectamente.
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/quotes/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({ discountAmount: '1.00' });
+        expect(response.status).toBe(200);
+        const body = response.body as SafeQuoteBody;
+        expect(body.total).toBe('9.00');
+        // El descuento de línea, nunca tocado por esta edición, se conserva igual.
+        expect(body.items[0].discountType).toBe('FIXED');
+        expect(body.items[0].discountAmount).toBe('9.99');
+        expect(body.items[0].lineTotal).toBe('10.00');
+      } finally {
+        await request(app.getHttpServer())
+          .patch('/api/v1/configuration')
+          .set('Cookie', adminCookie)
+          .send({ maxDiscountPercent: '100.00' });
+      }
+    });
+
+    describe('reemplazo de ítems (PATCH): modificar el descuento de línea de una cotización PENDING', () => {
+      it('agrega un descuento de línea que no existía al crear', async () => {
+        const quote = await createQuote(adminCookie, {
+          items: [{ productId: productA.id, quantity: '1.000' }],
+        });
+        expect(quote.items[0].discountType).toBeNull();
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/quotes/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({
+            items: [
+              {
+                productId: productA.id,
+                quantity: '1.000',
+                discountType: 'FIXED',
+                discountValue: '4.00',
+              },
+            ],
+          });
+        expect(response.status).toBe(200);
+        const body = response.body as SafeQuoteBody;
+        expect(body.items[0].discountType).toBe('FIXED');
+        expect(body.items[0].discountAmount).toBe('4.00');
+        expect(body.items[0].lineTotal).toBe('15.99');
+        expect(body.total).toBe('15.99');
+      });
+
+      it('quita un descuento de línea existente al reemplazar sin discountType/discountValue', async () => {
+        const quote = await createQuote(adminCookie, {
+          items: [
+            {
+              productId: productA.id,
+              quantity: '1.000',
+              discountType: 'FIXED',
+              discountValue: '4.00',
+            },
+          ],
+        });
+        expect(quote.items[0].discountAmount).toBe('4.00');
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/quotes/${quote.id}`)
+          .set('Cookie', adminCookie)
+          .send({
+            items: [{ productId: productA.id, quantity: '1.000' }],
+          });
+        expect(response.status).toBe(200);
+        const body = response.body as SafeQuoteBody;
+        expect(body.items[0].discountType).toBeNull();
+        expect(body.items[0].discountAmount).toBe('0.00');
+        expect(body.total).toBe(productA.salePrice);
+      });
     });
   });
 
@@ -3293,7 +3560,7 @@ describe('Quotes (e2e)', () => {
   // ==================================================================
   // §55 Restricciones directas de PostgreSQL — 16 CHECK
   // ==================================================================
-  describe('restricciones directas de PostgreSQL — 16 CHECK constraints', () => {
+  describe('restricciones directas de PostgreSQL — 21 CHECK constraints (16 base + 5 NR-03)', () => {
     let checkQuoteId: string;
 
     beforeAll(async () => {
@@ -3502,7 +3769,92 @@ describe('Quotes (e2e)', () => {
       );
     });
 
-    it('ninguna de las 4 pruebas anteriores dejó QuoteItem persistido', async () => {
+    it('17. quote_items_discount_amount_non_negative (NR-03)', async () => {
+      await expectPgRejection(
+        () =>
+          rawInsertQuoteItem({
+            quoteId: checkQuoteId,
+            productId: productA.id,
+            quantity: '2',
+            unitPrice: '5.00',
+            lineTotal: '11.00',
+            discountType: 'FIXED',
+            discountValue: '-1',
+            discountAmount: '-1',
+          }),
+        '23514',
+      );
+    });
+
+    it('18. quote_items_discount_amount_within_gross (NR-03)', async () => {
+      await expectPgRejection(
+        () =>
+          rawInsertQuoteItem({
+            quoteId: checkQuoteId,
+            productId: productA.id,
+            quantity: '2',
+            unitPrice: '5.00',
+            lineTotal: '-5.00',
+            discountType: 'FIXED',
+            discountValue: '15.00',
+            discountAmount: '15.00',
+          }),
+        '23514',
+      );
+    });
+
+    it('19. quote_items_discount_consistency (NR-03): descuento a medias (solo discountType, sin discountValue)', async () => {
+      await expectPgRejection(
+        () =>
+          rawInsertQuoteItem({
+            quoteId: checkQuoteId,
+            productId: productA.id,
+            quantity: '1',
+            unitPrice: '10.00',
+            lineTotal: '10.00',
+            discountType: 'FIXED',
+            discountValue: null,
+            discountAmount: '0',
+          }),
+        '23514',
+      );
+    });
+
+    it('20. quote_items_discount_percent_range (NR-03): PERCENT fuera de 0-100', async () => {
+      await expectPgRejection(
+        () =>
+          rawInsertQuoteItem({
+            quoteId: checkQuoteId,
+            productId: productA.id,
+            quantity: '1',
+            unitPrice: '10.00',
+            lineTotal: '9.00',
+            discountType: 'PERCENT',
+            discountValue: '150',
+            discountAmount: '1.00',
+          }),
+        '23514',
+      );
+    });
+
+    it('21. quote_items_discount_fixed_matches_amount (NR-03): FIXED con discountValue distinto de discountAmount', async () => {
+      await expectPgRejection(
+        () =>
+          rawInsertQuoteItem({
+            quoteId: checkQuoteId,
+            productId: productA.id,
+            quantity: '1',
+            unitPrice: '10.00',
+            lineTotal: '7.00',
+            discountType: 'FIXED',
+            discountValue: '5.00',
+            discountAmount: '3.00',
+          }),
+        '23514',
+      );
+    });
+
+    it('ninguna de las 9 pruebas anteriores de ítem dejó QuoteItem persistido', async () => {
       const count = await prisma.quoteItem.count({
         where: { quoteId: checkQuoteId },
       });
@@ -3557,7 +3909,7 @@ describe('Quotes (e2e)', () => {
       ).toBe(0);
     });
 
-    it('la conexión sigue siendo utilizable tras los 16 rechazos anteriores', async () => {
+    it('la conexión sigue siendo utilizable tras los 21 rechazos anteriores', async () => {
       const result = await prisma.$queryRaw<{ ok: number }[]>`SELECT 1 AS ok`;
       expect(result[0].ok).toBe(1);
     });

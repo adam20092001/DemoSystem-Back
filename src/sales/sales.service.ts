@@ -14,6 +14,7 @@ import {
   DocumentType,
   InventoryMovementOrigin,
   InventoryMovementType,
+  LineDiscountType,
   Prisma,
   ProductStatus,
   QuoteStatus,
@@ -176,6 +177,10 @@ interface QuoteItemRow {
   quantity: Prisma.Decimal;
   unitPrice: Prisma.Decimal;
   lineTotal: Prisma.Decimal;
+  // NR-03: copiados EXACTAMENTE al SaleItem de destino, nunca recalculados.
+  discountType: LineDiscountType | null;
+  discountValue: Prisma.Decimal | null;
+  discountAmount: Prisma.Decimal;
 }
 
 /** Línea validada/lista para persistir. `isInventoryTracked` siempre viene del Product VIGENTE (nunca del snapshot). */
@@ -189,6 +194,12 @@ interface SaleItemLine {
   quantity: Prisma.Decimal;
   unitPrice: Prisma.Decimal;
   lineTotal: Prisma.Decimal;
+  // NR-03: null/null/0 en toda venta DIRECTA (CreateSaleItemDto no acepta
+  // descuento de línea); copiados del QuoteItem de origen en una
+  // conversión.
+  discountType: LineDiscountType | null;
+  discountValue: Prisma.Decimal | null;
+  discountAmount: Prisma.Decimal;
   isInventoryTracked: boolean;
 }
 
@@ -260,6 +271,11 @@ export class SalesService {
           quantity: item.quantity,
           unitPrice: locked.salePrice,
           lineTotal: calculateLineTotal(item.quantity, locked.salePrice),
+          // NR-03: venta DIRECTA, nunca con descuento de línea (reservado a
+          // Quotes — ver decisión funcional aprobada).
+          discountType: null,
+          discountValue: null,
+          discountAmount: new Prisma.Decimal(0),
           isInventoryTracked: locked.isInventoryTracked,
         };
       });
@@ -337,6 +353,9 @@ export class SalesService {
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               lineTotal: line.lineTotal,
+              discountType: line.discountType,
+              discountValue: line.discountValue,
+              discountAmount: line.discountAmount,
             })),
           },
         },
@@ -474,6 +493,9 @@ export class SalesService {
           quantity: true,
           unitPrice: true,
           lineTotal: true,
+          discountType: true,
+          discountValue: true,
+          discountAmount: true,
         },
         orderBy: { createdAt: 'asc' },
       });
@@ -515,11 +537,15 @@ export class SalesService {
           unitCode: item.unitCode,
           unitName: item.unitName,
           unitAbbreviation: item.unitAbbreviation,
-          // Cantidad/precio/línea copiados EXACTAMENTE del QuoteItem
-          // histórico (D9): nunca se recalculan desde el catálogo vigente.
+          // Cantidad/precio/línea/descuento de línea copiados EXACTAMENTE
+          // del QuoteItem histórico (D9, extendido por NR-03): nunca se
+          // recalculan desde el catálogo ni la configuración vigente.
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           lineTotal: item.lineTotal,
+          discountType: item.discountType,
+          discountValue: item.discountValue,
+          discountAmount: item.discountAmount,
           isInventoryTracked: locked.isInventoryTracked,
         };
       });
@@ -592,6 +618,9 @@ export class SalesService {
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               lineTotal: line.lineTotal,
+              discountType: line.discountType,
+              discountValue: line.discountValue,
+              discountAmount: line.discountAmount,
             })),
           },
         },

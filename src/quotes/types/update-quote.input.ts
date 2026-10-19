@@ -1,6 +1,11 @@
+import { LineDiscountType } from '@prisma/client';
+
 export interface UpdateQuoteItemInput {
   productId: string;
   quantity: string;
+  /** NR-03: ambos presentes o ambos ausentes (ver parseLineDiscount()). */
+  discountType?: LineDiscountType;
+  discountValue?: string;
 }
 
 /**

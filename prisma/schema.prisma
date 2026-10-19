@@ -584,6 +584,16 @@ model Quote {
   @@map("quotes")
 }
 
+// NR-03: descuento individual de línea. FIXED = discountValue es un importe
+// en soles (nunca mayor que el bruto de la línea); PERCENT = discountValue
+// es un porcentaje 0-100. Compartido por QuoteItem/SaleItem/
+// ElectronicDocumentItem (mismo criterio que PaymentMethodAccountingDestination:
+// un solo tipo reutilizado por varias tablas).
+enum LineDiscountType {
+  FIXED
+  PERCENT
+}
+
 model QuoteItem {
   id      String @id @default(uuid()) @db.Uuid
   quoteId String @map("quote_id") @db.Uuid
@@ -605,6 +615,21 @@ model QuoteItem {
   unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
   lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
 
+  // NR-03: descuento individual de línea, independiente del descuento de
+  // documento (Quote.discountAmount), que sigue aplicándose ADICIONALMENTE
+  // sobre Σ lineTotal. null/null/0 (nunca escrito explícitamente por
+  // CustomersService.create()-style default, sino por ausencia de los
+  // campos en el INSERT) es la semántica histórica: ausencia total de
+  // descuento, idéntica línea a línea al cálculo de siempre
+  // (lineTotal = ROUND(quantity*unitPrice,2)). discountValue es el valor
+  // tal cual lo ingresó el usuario (soles si FIXED, 0-100 si PERCENT);
+  // discountAmount es siempre el equivalente ya calculado en soles, única
+  // fuente de verdad para lineTotal. Ver quote-calculator.ts
+  // calculateLineDiscount() y los CHECK de consistencia en migration.sql.
+  discountType   LineDiscountType? @map("discount_type")
+  discountValue  Decimal?          @map("discount_value") @db.Decimal(14, 2)
+  discountAmount Decimal           @default(0) @map("discount_amount") @db.Decimal(14, 2)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   // Sin updatedAt: un QuoteItem inmutable individualmente — la edición de
@@ -614,8 +639,9 @@ model QuoteItem {
   // D13: como máximo un ítem por producto por cotización. quoteId como
   // prefijo izquierdo de este único compuesto ya cubre "cargar ítems de una
   // cotización"; no se agrega un @@index([quoteId]) adicional (redundante).
-  // Los 3 CHECK (quantity > 0, unit_price >= 0, line_total >= 0) y el CHECK
-  // condicional de aritmética exacta se agregan a mano en migration.sql.
+  // Los 3 CHECK (quantity > 0, unit_price >= 0, line_total >= 0), el CHECK
+  // de aritmética (ahora con discount_amount) y los CHECK de consistencia
+  // de descuento se agregan a mano en migration.sql.
   @@unique([quoteId, productId])
   @@index([productId])
   @@map("quote_items")
@@ -782,6 +808,14 @@ model SaleItem {
   unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
   lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
 
+  // NR-03: copiado EXACTAMENTE del QuoteItem de origen al convertir (D9,
+  // mismo criterio que el resto del snapshot) — nunca recalculado. En una
+  // venta DIRECTA (sin cotización) siempre queda null/null/0, igual que
+  // antes de NR-03: CreateSaleItemDto no acepta descuento de línea.
+  discountType   LineDiscountType? @map("discount_type")
+  discountValue  Decimal?          @map("discount_value") @db.Decimal(14, 2)
+  discountAmount Decimal           @default(0) @map("discount_amount") @db.Decimal(14, 2)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   // Sin updatedAt: una venta confirmada no se edita (se anula y se crea
@@ -790,8 +824,9 @@ model SaleItem {
   // Como máximo un ítem por producto por venta (D21). saleId como prefijo
   // izquierdo de este único compuesto ya cubre "cargar ítems de una venta";
   // no se agrega un @@index([saleId]) adicional (redundante). Los 3 CHECK
-  // (quantity > 0, unit_price >= 0, line_total >= 0) y el CHECK de
-  // aritmética exacta se agregan a mano en migration.sql.
+  // (quantity > 0, unit_price >= 0, line_total >= 0), el CHECK de
+  // aritmética (ahora con discount_amount) y los CHECK de consistencia de
+  // descuento se agregan a mano en migration.sql.
   @@unique([saleId, productId])
   @@index([productId])
   @@map("sale_items")
@@ -1429,10 +1464,15 @@ model ElectronicDocument {
  * Snapshot inmutable de linea (Fase 11A #11/#14, decision cerrada: NUNCA
  * una FK a SaleItem/Product). Copiado desde SaleItem en el instante de
  * creacion del documento fiscal; un cambio posterior de Product/SaleItem
- * jamas debe poder alterar un item fiscal ya emitido. Sin campos de
- * impuesto/descuento por linea, sin codigo de catalogo SUNAT, sin campos
- * UBL (Fase 11A #14/#47, decision cerrada de este bloque: requieren una
- * decision regulatoria/de proveedor explicita, fuera de alcance aqui).
+ * jamas debe poder alterar un item fiscal ya emitido. Sin codigo de
+ * catalogo SUNAT ni campos UBL (Fase 11A #14/#47, decision cerrada de ese
+ * bloque: requieren una decision regulatoria/de proveedor explicita, fuera
+ * de alcance aqui; el proveedor MOCK no tiene validez fiscal real, ver
+ * CLAUDE.md §7). NR-03 agrega discountType/discountValue/discountAmount
+ * (copiados EXACTAMENTE del SaleItem de origen, igual que el resto del
+ * snapshot): la decision cerrada previa de "sin descuento por linea" se
+ * refería a que esta tabla no calcula ni valida nada por si misma, no a
+ * que no pueda conservar el snapshot ya calculado en SaleItem.
  */
 model ElectronicDocumentItem {
   id String @id @default(uuid()) @db.Uuid
@@ -1453,6 +1493,13 @@ model ElectronicDocumentItem {
   unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
   lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
 
+  // NR-03: copiado EXACTAMENTE del SaleItem de origen al emitir el
+  // comprobante — nunca recalculado. En un comprobante sobre una venta
+  // directa (sin descuento de línea) queda null/null/0, igual que antes.
+  discountType   LineDiscountType? @map("discount_type")
+  discountValue  Decimal?          @map("discount_value") @db.Decimal(14, 2)
+  discountAmount Decimal           @default(0) @map("discount_amount") @db.Decimal(14, 2)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   // Sin updatedAt: inmutable desde su creacion, mismo criterio que
@@ -1460,8 +1507,9 @@ model ElectronicDocumentItem {
   // electronicDocumentId como prefijo izquierdo de este unico compuesto ya
   // cubre "cargar items de un documento" (mismo criterio que SaleItem: no
   // se agrega un indice adicional, seria redundante). Los 4 CHECK
-  // (lineNumber >= 1, quantity > 0, unitPrice >= 0, lineTotal >= 0) y el
-  // CHECK de aritmetica exacta se agregan a mano en migration.sql.
+  // (lineNumber >= 1, quantity > 0, unitPrice >= 0, lineTotal >= 0), el
+  // CHECK de aritmetica (ahora con discount_amount) y los CHECK de
+  // consistencia de descuento se agregan a mano en migration.sql.
   @@unique([electronicDocumentId, lineNumber])
   @@map("electronic_document_items")
 }

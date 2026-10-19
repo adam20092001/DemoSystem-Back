@@ -2,6 +2,7 @@ import {
   CustomerDocumentType,
   ElectronicDocumentStatus,
   FiscalDocumentType,
+  LineDiscountType,
 } from '@prisma/client';
 
 /** Forma segura de listado (Bloque 11D §14): nunca items, nunca providerExternalId. */
@@ -48,6 +49,10 @@ export interface SafeElectronicDocumentItem {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  // NR-03: copiado EXACTAMENTE del SaleItem de origen al emitir.
+  discountType: LineDiscountType | null;
+  discountValue: string | null;
+  discountAmount: string;
 }
 
 /**

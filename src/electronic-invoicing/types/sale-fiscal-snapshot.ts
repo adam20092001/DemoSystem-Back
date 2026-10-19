@@ -1,4 +1,9 @@
-import { CustomerDocumentType, Prisma, SaleStatus } from '@prisma/client';
+import {
+  CustomerDocumentType,
+  LineDiscountType,
+  Prisma,
+  SaleStatus,
+} from '@prisma/client';
 
 /** Ítem congelado de Sale, tal como lo necesita el snapshot fiscal (Bloque 11C §14). */
 export interface SaleFiscalSnapshotItem {
@@ -10,6 +15,10 @@ export interface SaleFiscalSnapshotItem {
   quantity: Prisma.Decimal;
   unitPrice: Prisma.Decimal;
   lineTotal: Prisma.Decimal;
+  // NR-03: copiado EXACTAMENTE al ElectronicDocumentItem, nunca recalculado.
+  discountType: LineDiscountType | null;
+  discountValue: Prisma.Decimal | null;
+  discountAmount: Prisma.Decimal;
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   CustomerDocumentType,
   ElectronicDocumentStatus,
   FiscalDocumentType,
+  LineDiscountType,
 } from '@prisma/client';
 
 export class ElectronicDocumentItemResponseDto {
@@ -39,6 +40,30 @@ export class ElectronicDocumentItemResponseDto {
 
   @ApiProperty({ type: String, example: '100.00' })
   lineTotal!: string;
+
+  @ApiProperty({
+    enum: LineDiscountType,
+    nullable: true,
+    description:
+      'NR-03: copiado EXACTAMENTE del SaleItem de origen; null cuando esa línea no tiene descuento individual.',
+  })
+  discountType!: LineDiscountType | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Decimal con 2 decimales fijos, como string. Soles si discountType=FIXED; porcentaje si PERCENT; null si no hay descuento de línea.',
+  })
+  discountValue!: string | null;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Decimal con 2 decimales fijos, como string. Siempre presente; "0.00" cuando la línea no tiene descuento.',
+    example: '0.00',
+  })
+  discountAmount!: string;
 }
 
 /** Forma de listado: sin ítems, sin identidad del emisor (ver el detalle). */

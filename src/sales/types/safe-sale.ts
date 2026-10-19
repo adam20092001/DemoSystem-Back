@@ -3,6 +3,7 @@ import {
   CustomerType,
   InventoryMovementOrigin,
   InventoryMovementType,
+  LineDiscountType,
   SaleDeliveryStatus,
   SalePaymentStatus,
   SaleStatus,
@@ -36,6 +37,11 @@ export interface SafeSaleItem {
   quantity: string;
   unitPrice: string;
   lineTotal: string;
+  /** NR-03: null cuando la línea no tiene descuento individual. */
+  discountType: LineDiscountType | null;
+  discountValue: string | null;
+  /** NR-03: siempre presente; "0.00" cuando la línea no tiene descuento. */
+  discountAmount: string;
 }
 
 /**

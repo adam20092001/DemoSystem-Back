@@ -1,13 +1,15 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { Prisma, QuoteStatus } from '@prisma/client';
+import { LineDiscountType, Prisma, QuoteStatus } from '@prisma/client';
 import {
   assertAcceptable,
+  assertCombinedDiscountWithinConfiguredLimit,
   assertDiscountWithinConfiguredLimit,
   assertDiscountWithinSubtotal,
   assertEditable,
   assertQuantityAllowedForUnit,
   assertRejectable,
   buildEffectiveQuoteStatusCondition,
+  calculateLineDiscount,
   calculateLineTotal,
   calculateSubtotal,
   calculateTaxableBase,
@@ -16,6 +18,7 @@ import {
   calculateTotal,
   effectiveStatus,
   parseDiscountAmount,
+  parseLineDiscount,
   parseQuantity,
   TaxInclusiveTotals,
 } from './quote-calculator';
@@ -871,6 +874,267 @@ describe('calculateTaxInclusiveTotals (R2-B2)', () => {
         }
       }
     });
+  });
+});
+
+describe('parseLineDiscount (NR-03)', () => {
+  it('ambos ausentes -> null/null', () => {
+    expect(parseLineDiscount({})).toEqual({
+      discountType: null,
+      discountValue: null,
+    });
+  });
+
+  it('solo discountType -> 400', () => {
+    expect(() =>
+      parseLineDiscount({ discountType: LineDiscountType.FIXED }),
+    ).toThrow(BadRequestException);
+  });
+
+  it('solo discountValue -> 400', () => {
+    expect(() => parseLineDiscount({ discountValue: '10.00' })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('ambos presentes -> parseado correctamente', () => {
+    const result = parseLineDiscount({
+      discountType: LineDiscountType.PERCENT,
+      discountValue: '10.00',
+    });
+    expect(result.discountType).toBe(LineDiscountType.PERCENT);
+    expect(result.discountValue?.toFixed(2)).toBe('10.00');
+  });
+
+  it('discountValue con forma inválida -> 400', () => {
+    expect(() =>
+      parseLineDiscount({
+        discountType: LineDiscountType.FIXED,
+        discountValue: '10.999',
+      }),
+    ).toThrow(BadRequestException);
+  });
+});
+
+describe('calculateLineDiscount (NR-03)', () => {
+  const D = (value: string | number) => new Prisma.Decimal(value);
+  const NO_LIMIT = D('100.00');
+
+  function noDiscount() {
+    return { discountType: null, discountValue: null };
+  }
+
+  it('sin descuento: lineTotal idéntico al bruto, discountAmount 0', () => {
+    const result = calculateLineDiscount(D('100.00'), noDiscount(), NO_LIMIT);
+    expect(result.discountType).toBeNull();
+    expect(result.discountValue).toBeNull();
+    expect(result.discountAmount.toFixed(2)).toBe('0.00');
+    expect(result.lineTotal.toFixed(2)).toBe('100.00');
+  });
+
+  it('FIXED: 100 con descuento fijo 20 -> lineTotal 80', () => {
+    const result = calculateLineDiscount(
+      D('100.00'),
+      { discountType: LineDiscountType.FIXED, discountValue: D('20.00') },
+      NO_LIMIT,
+    );
+    expect(result.discountAmount.toFixed(2)).toBe('20.00');
+    expect(result.lineTotal.toFixed(2)).toBe('80.00');
+  });
+
+  it('PERCENT: 2 × 100 (bruto 200) con 10% -> descuento 20.00, lineTotal 180.00 (ejemplo del enunciado)', () => {
+    const result = calculateLineDiscount(
+      D('200.00'),
+      { discountType: LineDiscountType.PERCENT, discountValue: D('10') },
+      NO_LIMIT,
+    );
+    expect(result.discountAmount.toFixed(2)).toBe('20.00');
+    expect(result.lineTotal.toFixed(2)).toBe('180.00');
+  });
+
+  it('PERCENT 0% -> sin cambio', () => {
+    const result = calculateLineDiscount(
+      D('100.00'),
+      { discountType: LineDiscountType.PERCENT, discountValue: D('0') },
+      NO_LIMIT,
+    );
+    expect(result.discountAmount.toFixed(2)).toBe('0.00');
+    expect(result.lineTotal.toFixed(2)).toBe('100.00');
+  });
+
+  it('PERCENT 100% (sin límite configurado) -> lineTotal 0.00', () => {
+    const result = calculateLineDiscount(
+      D('100.00'),
+      { discountType: LineDiscountType.PERCENT, discountValue: D('100') },
+      NO_LIMIT,
+    );
+    expect(result.discountAmount.toFixed(2)).toBe('100.00');
+    expect(result.lineTotal.toFixed(2)).toBe('0.00');
+  });
+
+  it('FIXED igual al bruto de la línea -> lineTotal 0.00, permitido', () => {
+    const result = calculateLineDiscount(
+      D('100.00'),
+      { discountType: LineDiscountType.FIXED, discountValue: D('100.00') },
+      NO_LIMIT,
+    );
+    expect(result.lineTotal.toFixed(2)).toBe('0.00');
+  });
+
+  it('FIXED superior al bruto -> 400', () => {
+    expect(() =>
+      calculateLineDiscount(
+        D('100.00'),
+        { discountType: LineDiscountType.FIXED, discountValue: D('100.01') },
+        NO_LIMIT,
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('PERCENT superior a 100 -> 400', () => {
+    expect(() =>
+      calculateLineDiscount(
+        D('100.00'),
+        { discountType: LineDiscountType.PERCENT, discountValue: D('100.01') },
+        NO_LIMIT,
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('PERCENT negativo -> 400', () => {
+    expect(() =>
+      calculateLineDiscount(
+        D('100.00'),
+        { discountType: LineDiscountType.PERCENT, discountValue: D('-1') },
+        NO_LIMIT,
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('redondeo HALF_UP: 10 × 1/3 unidades -> depende solo de rawLineTotal ya redondeado, descuento 33.33% de 33.33 = 11.11 (no 11.10)', () => {
+    const rawLineTotal = D('33.33');
+    const result = calculateLineDiscount(
+      rawLineTotal,
+      { discountType: LineDiscountType.PERCENT, discountValue: D('33.33') },
+      NO_LIMIT,
+    );
+    expect(result.discountAmount.toFixed(2)).toBe('11.11');
+  });
+
+  it('maxDiscountPercent configurado limita un PERCENT explícito dentro de rango', () => {
+    expect(() =>
+      calculateLineDiscount(
+        D('100.00'),
+        { discountType: LineDiscountType.PERCENT, discountValue: D('50') },
+        D('30.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('maxDiscountPercent configurado también limita un FIXED por su equivalencia porcentual', () => {
+    // FIXED 40 sobre bruto 100 = 40% efectivo, supera el límite de 30%.
+    expect(() =>
+      calculateLineDiscount(
+        D('100.00'),
+        { discountType: LineDiscountType.FIXED, discountValue: D('40.00') },
+        D('30.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('FIXED dentro del límite configurado: permitido', () => {
+    const result = calculateLineDiscount(
+      D('100.00'),
+      { discountType: LineDiscountType.FIXED, discountValue: D('30.00') },
+      D('30.00'),
+    );
+    expect(result.lineTotal.toFixed(2)).toBe('70.00');
+  });
+});
+
+describe('assertCombinedDiscountWithinConfiguredLimit (NR-03)', () => {
+  const D = (value: string | number) => new Prisma.Decimal(value);
+
+  it('sin descuento de línea (grossTotal = total original): equivalente a assertDiscountWithinConfiguredLimit', () => {
+    expect(() =>
+      assertCombinedDiscountWithinConfiguredLimit(
+        D('100.00'),
+        D('70.00'),
+        D('20.00'),
+      ),
+    ).toThrow(BadRequestException);
+    expect(() =>
+      assertCombinedDiscountWithinConfiguredLimit(
+        D('100.00'),
+        D('85.00'),
+        D('20.00'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('bypass prevenido: líneas ya consumieron el límite completo, el descuento de documento adicional lo excede', () => {
+    // grossTotal 200, líneas ya descontaron 40 (20% del bruto, el máximo
+    // permitido), total final 128 tras un descuento de documento adicional
+    // de 32 -> descuento combinado 72/200 = 36%, por encima del 20%
+    // configurado.
+    expect(() =>
+      assertCombinedDiscountWithinConfiguredLimit(
+        D('200.00'),
+        D('128.00'),
+        D('20.00'),
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('combinado dentro del límite: permitido', () => {
+    expect(() =>
+      assertCombinedDiscountWithinConfiguredLimit(
+        D('200.00'),
+        D('160.00'),
+        D('20.00'),
+      ),
+    ).not.toThrow();
+  });
+});
+
+describe('calculateTaxInclusiveTotals con grossLineTotals (NR-03)', () => {
+  const D = (value: string | number) => new Prisma.Decimal(value);
+  const NO_LIMIT = D('100.00');
+
+  it('grossLineTotals ausente: comportamiento idéntico al existente (regresión)', () => {
+    const withGross = calculateTaxInclusiveTotals({
+      lineTotals: [D('180.00')],
+      customerDiscount: D('0'),
+      taxEnabled: false,
+      taxRate: D('0'),
+      maxDiscountPercent: NO_LIMIT,
+    });
+    expect(withGross.total.toFixed(2)).toBe('180.00');
+  });
+
+  it('con descuento de línea (gross 200, lineTotals ya descontados 180) + descuento de documento adicional dentro del límite', () => {
+    const result = calculateTaxInclusiveTotals({
+      lineTotals: [D('180.00')],
+      grossLineTotals: [D('200.00')],
+      customerDiscount: D('10.00'),
+      taxEnabled: false,
+      taxRate: D('0'),
+      maxDiscountPercent: D('50.00'),
+    });
+    expect(result.total.toFixed(2)).toBe('170.00');
+  });
+
+  it('bypass prevenido a nivel de documento: descuento de línea al máximo + descuento de documento adicional -> 400', () => {
+    expect(() =>
+      calculateTaxInclusiveTotals({
+        lineTotals: [D('160.00')], // 200 bruto, 40 de descuento de línea = 20% (el máximo)
+        grossLineTotals: [D('200.00')],
+        customerDiscount: D('5.00'), // cualquier descuento adicional ya excede el 20% combinado
+        taxEnabled: false,
+        taxRate: D('0'),
+        maxDiscountPercent: D('20.00'),
+      }),
+    ).toThrow(BadRequestException);
   });
 });
 

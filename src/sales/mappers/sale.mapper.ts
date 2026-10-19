@@ -34,6 +34,9 @@ const SALE_ITEM_SELECT = {
   quantity: true,
   unitPrice: true,
   lineTotal: true,
+  discountType: true,
+  discountValue: true,
+  discountAmount: true,
 } satisfies Prisma.SaleItemSelect;
 
 /**
@@ -182,6 +185,9 @@ function toSafeSaleItem(row: SaleItemRow): SafeSaleItem {
     quantity: row.quantity.toFixed(3),
     unitPrice: row.unitPrice.toFixed(2),
     lineTotal: row.lineTotal.toFixed(2),
+    discountType: row.discountType,
+    discountValue: row.discountValue?.toFixed(2) ?? null,
+    discountAmount: row.discountAmount.toFixed(2),
   };
 }
 
