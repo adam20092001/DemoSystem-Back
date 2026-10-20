@@ -79,7 +79,7 @@ Reglas de capas:
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código. Desde NR-01, los 5 métodos activos nacen con `requiresReference=false` en el baseline (`prisma/seed.ts`): la referencia es opcional por defecto en todos ellos, sin dejar de ser editable por ADMIN vía `PATCH /payment-methods/:id` (ver §11).
-12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones, agrupados en **periodos contables mensuales** (`AccountingPeriod`, Fase A2.1) con ciclo de vida OPEN/CLOSED, **fecha contable** propia por asiento (`AccountingEntry.accountingDate`, zona America/Lima, Fase A2.2) y **numeración secuencial** sin huecos dentro de cada periodo (`AccountingEntry.journalNumber`, Fase A2.3) — ver detalle en §11. El cliente aprobó además (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE —cuyo plan de cuentas jerárquico ya existe desde la Fase A1, ver §11—, asientos manuales, libro diario/mayor, balance de comprobación, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía salvo lo ya descrito arriba. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
+12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones, agrupados en **periodos contables mensuales** (`AccountingPeriod`, Fase A2.1) con ciclo de vida OPEN/CLOSED, **fecha contable** propia por asiento (`AccountingEntry.accountingDate`, zona America/Lima, Fase A2.2) y **numeración secuencial** sin huecos dentro de cada periodo (`AccountingEntry.journalNumber`, Fase A2.3). Sobre esa base, tres **reportes contables de solo lectura** (Fase A3, ver §11): Libro Diario, Libro Mayor (por cuenta) y Balance de comprobación, con exportación a Excel — ninguno constituye un libro electrónico con validez fiscal SUNAT. El cliente aprobó además (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE —cuyo plan de cuentas jerárquico ya existe desde la Fase A1, ver §11—, asientos manuales, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía salvo lo ya descrito arriba. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
@@ -645,12 +645,140 @@ SALE/PAYMENT.
   plan de cuentas, configuración/IGV) sin romper ningún comportamiento
   previo; `lint:check` y `build` correctos.
 
+**Fase A3 — Libro Diario, Libro Mayor y Balance de comprobación**
+(rama `feat/accounting-a3-reports`, base `main` en `007174e`,
+**implementada y validada, sin commit/push/PR todavía** — pendiente de
+autorización explícita del cliente). Tres reportes contables de SOLO
+LECTURA, derivados exclusivamente de `AccountingEntry`/
+`AccountingEntryLine` ya persistidos por `AccountingEngine` — nunca un
+segundo motor de posteo ni una fuente de saldo paralela; `AccountingEngine`
+sigue siendo el único escritor. Nuevo servicio `AccountingReportsService`
+(solo lectura, sin transacciones) + `AccountingReportsController`
+(`/api/v1/accounting/reports/*`). Sin migración: reutiliza por completo el
+modelo de A1/A2 (`accountingDate`/`periodId`/`journalNumber`/jerarquía de
+cuentas).
+
+- **A3.1 — Libro Diario** (`GET .../reports/journal` +
+  `.../journal/export.xlsx`). Filtra por rango de `accountingDate`
+  (obligatorio) y opcionalmente por `periodId`. La paginación corta por
+  **asiento completo** (nunca a mitad de uno): cada fila incluye todas sus
+  líneas con cuenta resuelta y `totalDebit`/`totalCredit` calculados
+  sumando las líneas ya persistidas (nunca recalculados desde Venta/
+  Cotización/IGV vigente). Incluye asientos REVERSAL como filas
+  independientes y nunca excluye un asiento porque la venta/pago asociado
+  haya sido anulado o su periodo esté CLOSED — cerrar un periodo nunca
+  hace desaparecer historial de los reportes.
+- **A3.2 — Libro Mayor** (`GET .../reports/ledger` +
+  `.../ledger/export.xlsx`), de UNA cuenta por `accountId` (nunca por
+  `systemKey`: un `AccountingEntryLine` histórico sigue apuntando a la
+  cuenta que tenía en el momento de postearse, inmune a una reasignación
+  de `systemKey` posterior — verificado con una prueba E2E dedicada que
+  reasigna y restaura `DISCOUNTS` en vivo). Saldo de apertura (todo el
+  historial anterior a `accountingDateFrom`, de cualquier periodo, OPEN o
+  CLOSED) + movimientos del rango con saldo acumulado en la dirección
+  NATURAL de la cuenta (`accountNormalBalance()`, A1) + saldo de cierre —
+  el cierre depende solo de la fecha final, nunca de dónde empieza la
+  apertura (invariante verificado explícitamente en los tests). **Decisión
+  funcional PROVISIONAL, pendiente de validación contable (A3.2 lo exige
+  documentar así explícitamente, revisión previa al commit):** nunca
+  consolida saldos de cuentas descendientes — cada fila es exclusivamente
+  el saldo DIRECTO de la cuenta solicitada; para una cuenta padre/
+  agrupadora (`isPostable: false`) el resultado es necesariamente vacío,
+  porque `AccountingEngine` nunca postea contra una cuenta no postable por
+  construcción. Esto es correcto y suficiente mientras el plan de cuentas
+  real no tenga cuentas de agrupación con hijas postables activas con
+  historial — si un contador valida que el negocio necesita una vista
+  consolidada de grupo (p. ej. "todas las cuentas por cobrar, padre e
+  hijas, en un solo saldo"), esa es una capacidad NUEVA a diseñar e
+  implementar explícitamente (sin doble conteo), nunca asumida por este
+  reporte. Una cuenta histórica ya `INACTIVE` sigue siendo consultable con
+  su movimiento intacto.
+- **A3.3 — Balance de comprobación** (`GET .../reports/trial-balance` +
+  `.../trial-balance/export.xlsx`), nunca paginado (la reconciliación de
+  totales exige el conjunto completo). Por cuenta: apertura
+  débito/crédito (neto, repartido por el SIGNO real del saldo —
+  nunca forzado a la naturaleza "esperada" de la cuenta, para no ocultar
+  una cuenta que terminó con signo contrario al habitual), movimiento del
+  periodo (bruto, sin netear débito contra crédito) y cierre
+  débito/crédito. Por defecto omite cuentas sin saldo ni movimiento
+  relevante (`includeZeroBalances` lo desactiva); una cuenta histórica
+  `INACTIVE` con movimiento real sí aparece. Mismo criterio que el Mayor:
+  nunca consolida padre+hijas. `reconciliation` informa si
+  apertura/periodo/cierre cuadran — solo cuando NO se filtró un
+  subconjunto de cuentas (`accountIds`); si se filtró, `applicable:false`
+  y los `*Balanced` quedan en `null`, nunca afirmando que un subconjunto
+  arbitrario deba cuadrar por sí solo.
+- **A3.4 — Autorización.** Mismo alcance que el resto del dominio
+  contable: ADMIN/MANAGEMENT leen, SELLER/WAREHOUSE sin ningún acceso.
+  Ninguna ruta de escritura nueva.
+- **A3.5 — Exportación a Excel.** Reutiliza `ExcelExportService`/
+  `ExcelColumn`/`sanitizeExcelString` ya existentes (NR-06, sin cambios):
+  exporta el resultado FILTRADO COMPLETO en lotes de `EXPORT_PAGE_SIZE`
+  (Diario) o en un único cálculo compartido con el listado (Mayor/Balance,
+  nunca recalculado por página — evita un costo cuadrático), nunca solo
+  la página visible, hasta `MAX_EXPORT_ROWS`. La protección contra
+  inyección de fórmulas (comilla simple ante `=`/`+`/`-`/`@`/tab/CR
+  inicial) se hereda automáticamente de la infraestructura común —
+  verificada con una prueba E2E que exporta una descripción de asiento
+  maliciosa (`=HYPERLINK(...)`) y confirma la celda neutralizada.
+- **A3.6 — Corrección histórica.** `accountingDate`/`periodId`/
+  `journalNumber` ya garantizaban esto desde A2: ningún reporte usa
+  `createdAt` ni la fecha de transacción actual. Verificado explícitamente
+  con datos históricos reales (no solo el caso vacío de desarrollo):
+  múltiples periodos, un periodo CLOSED (sus asientos siguen apareciendo
+  en los reportes), una reversión en un periodo distinto al de su
+  original, dos asientos en la misma fecha contable exacta (desempate
+  estable por `journalNumber`), una cuenta `INACTIVE` con historial, y una
+  reasignación de `systemKey` en vivo.
+- **Decimal/SQL.** `Prisma.Decimal` en todo el cálculo, nunca
+  `number`/`float` intermedio (solo al límite de la celda Excel). Balance
+  de comprobación vía `groupBy`/`_sum` (agregación en base de datos, sin
+  N+1); Mayor vía una única consulta por cuenta (acotado a una cuenta,
+  nunca el historial completo de todas); Diario vía `findMany` paginado
+  con `include` anidado (sin N+1).
+- **Revisión previa al commit — dos correcciones reales aplicadas.**
+  1) *Consistencia de lectura bajo concurrencia*: las consultas internas
+     de cada reporte (apertura/movimientos del Mayor; cuentas/agregados
+     de apertura/agregados del periodo del Balance; `findMany`+`count`
+     del Diario) corrían como transacciones implícitas INDEPENDIENTES
+     bajo READ COMMITTED — un asiento nuevo comprometido a mitad de
+     camino podía quedar reflejado en una mitad del cálculo sin la otra.
+     Corregido envolviendo cada reporte en una única transacción
+     `REPEATABLE READ` (Prisma `$transaction`), incluido el recorrido
+     COMPLETO de páginas de `exportJournalXlsx` (nunca una transacción
+     nueva por página) — así un export grande nunca mezcla snapshots a
+     mitad de su propio recorrido. Solo lectura: sin locks de escritura,
+     sin tocar `AccountingEngine`. Verificado con una prueba E2E real que
+     abre una transacción `REPEATABLE READ`, confirma que NO ve un
+     asiento comprometido por otra conexión mientras permanece abierta, y
+     que una consulta posterior sí lo ve.
+  2) *Límite de exportación por filas reales*: `exportJournalXlsx`
+     verificaba el límite (`MAX_EXPORT_ROWS`) contra el conteo de
+     ASIENTOS, nunca contra las LÍNEAS reales que se escriben en el
+     `.xlsx` (una fila por línea, nunca por asiento) — un resultado con
+     pocos asientos pero muchas líneas cada uno podía superar el máximo
+     real sin ser detectado. Corregido con un chequeo definitivo sobre el
+     conteo real de filas (`exportRows.length`) justo antes de construir
+     el workbook, además del pre-chequeo rápido por asientos (más laxo,
+     pero seguro: nunca puede dar falso negativo, cada asiento tiene
+     mínimo 2 líneas). Mayor y Balance ya contaban correctamente filas
+     reales desde la implementación original.
+- **Validación:** 98 suites / 3259 pruebas unitarias; regresión E2E
+  completa (33 suites, incluida la nueva `test/accounting-reports.e2e-spec.ts`,
+  26 pruebas: RBAC, Diario/Mayor/Balance con historial determinista
+  enero-marzo 2026, reversión en periodo distinto, periodo CLOSED,
+  jerarquía padre/hijo, cuenta inactiva, reasignación de `systemKey`,
+  consistencia `REPEATABLE READ` bajo concurrencia real, exportación a
+  Excel con totales reconciliados contra la API y protección de
+  inyección de fórmulas) sin romper
+  ningún comportamiento previo de A0/A1/A2; `lint:check` y `build`
+  correctos.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
-descuentos en soles o porcentaje; exportaciones a Excel; Libro Diario y Libro Mayor como
-reportes contables terminados (hoy solo existen los asientos básicos de
-Contabilidad básica, §4 punto 12); reportes contables adicionales; módulo de
+descuentos en soles o porcentaje; asientos manuales; reportes contables
+adicionales (flujo de caja, estados financieros); módulo de
 importaciones y proveedores; cualquier cambio futuro que amplíe los permisos
 de facturación/escritura de MANAGEMENT (su alcance actual —lectura global,
 cero escritura— es la decisión vigente, confirmada en el cierre P6-E4);
@@ -658,8 +786,13 @@ cero escritura— es la decisión vigente, confirmada en el cierre P6-E4);
 historial real deberían nacer `CLOSED` en vez de `OPEN` (decisión tomada
 por defecto: `OPEN`, ver §11 A2.5 — requiere validación de un contador
 antes de cambiarse); política formal de cierre periódico recurrente
-(mensual/anual) una vez exista un calendario contable real; rol
-`ACCOUNTANT` dedicado (seguirá diferido hasta Fase A3 o posterior).
+(mensual/anual) una vez exista un calendario contable real; **(Fase A3)**
+si el Libro Mayor/Balance de comprobación deberían ofrecer una vista
+CONSOLIDADA de cuenta padre + hijas además de la vista actual de saldo
+directo (decisión provisional vigente: solo saldo directo, nunca
+consolidado — ver §11 A3.2; cualquier vista consolidada es una capacidad
+nueva a diseñar explícitamente, nunca asumida); rol `ACCOUNTANT` dedicado
+(seguirá diferido hasta una fase posterior).
 
 **Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
 `products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
@@ -667,12 +800,12 @@ conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
 aislamiento global no está completamente resuelto); 11 errores preexistentes
 en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **19** (conteo corregido; esta sección no reflejaba
-todavía la migración 18 de la Fase A1 —plan de cuentas jerárquico PCGE,
-ya en `main`— ni la 19, de la Fase A2 arriba, aplicada hoy EXCLUSIVAMENTE
-en `pos_db_test`, todavía pendiente en `pos_db` y en `main`). Sin cambios
-de esquema por el requerimiento de propiedad por vendedor ni por la Fase
-A0: ambos son exclusivamente de autorización/lógica de servicio.
+Migraciones totales: **19**, las 19 en `main` (A1 vía PR #31, A2 vía PR
+#32) y aplicadas tanto en `pos_db` como en `pos_db_test`. La Fase A3
+(reportes contables) no agrega ninguna migración: reutiliza por completo
+el esquema de A1/A2. Sin cambios de esquema por el requerimiento de
+propiedad por vendedor ni por la Fase A0: ambos son exclusivamente de
+autorización/lógica de servicio.
 
 ---
 
