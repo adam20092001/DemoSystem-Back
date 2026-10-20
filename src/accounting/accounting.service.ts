@@ -66,7 +66,19 @@ export class AccountingService {
       // profundidad; el controller igualmente rechaza esto con 403.
       return [];
     }
+    // A1 (PCGE): systemKey pasó a ser nullable — una cuenta PCGE nueva
+    // (ver ChartOfAccountsService) nace sin mapeo. Este endpoint LEGACY de
+    // la Fase 8 sigue siendo exactamente "el plan de cuentas básico de
+    // sistema" (contrato probado en accounting.e2e-spec.ts §9: 6 filas,
+    // forma exacta {id,code,name,type,systemKey}), nunca el plan de
+    // cuentas PCGE completo — por eso filtra explícitamente por
+    // systemKey no nulo, para seguir devolviendo SOLO las cuentas de
+    // sistema aunque el plan de cuentas crezca con cuentas PCGE sin
+    // mapeo. El plan de cuentas completo (jerárquico, con o sin mapeo) se
+    // consulta vía GET /chart-of-accounts (A1.2), un recurso nuevo y
+    // separado que nunca reemplaza a este.
     const rows = await this.prisma.account.findMany({
+      where: { systemKey: { not: null } },
       select: ACCOUNT_SAFE_SELECT,
       orderBy: [{ code: 'asc' }],
     });

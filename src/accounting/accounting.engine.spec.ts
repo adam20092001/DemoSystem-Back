@@ -267,6 +267,18 @@ describe('AccountingEngine', () => {
       );
     });
 
+    it('A1-review: filtra explícitamente status=ACTIVE e isPostable=true (defensa en profundidad del motor)', async () => {
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand(),
+      );
+      const call = tx.account.findMany.mock.calls[0][0] as {
+        where: { status: string; isPostable: boolean };
+      };
+      expect(call.where.status).toBe('ACTIVE');
+      expect(call.where.isPostable).toBe(true);
+    });
+
     it('falta una cuenta de sistema requerida: InternalServerErrorException, no crea el asiento', async () => {
       tx.account.findMany.mockResolvedValue(
         ALL_ACCOUNTS.filter(

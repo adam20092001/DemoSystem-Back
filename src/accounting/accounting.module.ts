@@ -3,6 +3,8 @@ import { AccountingEngine } from './accounting.engine';
 import { AccountingEntriesController } from './accounting-entries.controller';
 import { AccountingService } from './accounting.service';
 import { AccountsController } from './accounts.controller';
+import { ChartOfAccountsController } from './chart-of-accounts.controller';
+import { ChartOfAccountsService } from './chart-of-accounts.service';
 
 /**
  * PrismaService/AuditService llegan de módulos globales (Database, Audit).
@@ -18,10 +20,20 @@ import { AccountsController } from './accounts.controller';
  * (AccountingService + sus dos controllers). Sigue exportando únicamente
  * AccountingEngine — AccountingService es de uso interno del módulo, no se
  * exporta (ningún otro módulo necesita leer contabilidad).
+ *
+ * Fase A1 (PCGE): agrega ChartOfAccountsController/Service, el recurso
+ * NUEVO y separado de administración del plan de cuentas jerárquico.
+ * Nunca se exporta: ningún otro módulo necesita administrar cuentas, y
+ * AccountingEngine sigue siendo el único lector de Account.systemKey para
+ * resolver asientos — sin cambios en esta fase.
  */
 @Module({
-  controllers: [AccountsController, AccountingEntriesController],
-  providers: [AccountingEngine, AccountingService],
+  controllers: [
+    AccountsController,
+    AccountingEntriesController,
+    ChartOfAccountsController,
+  ],
+  providers: [AccountingEngine, AccountingService, ChartOfAccountsService],
   exports: [AccountingEngine],
 })
 export class AccountingModule {}
