@@ -409,6 +409,34 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'previousDifferenceAmount',
     'previousClosingObservation',
   ],
+  // ACCOUNT_ (Fase A1 — PCGE): ChartOfAccountsService es su único emisor.
+  // Mismo criterio exacto que PAYMENT_METHOD_* (changedFields/oldValues/
+  // newValues en UPDATED/ACTIVATED/DEACTIVATED, `code` como campo plano
+  // adicional para identificar la cuenta sin depender de entityId).
+  [AuditAction.ACCOUNT_CREATED]: [
+    'code',
+    'name',
+    'type',
+    'parentId',
+    'level',
+    'isPostable',
+  ],
+  [AuditAction.ACCOUNT_UPDATED]: [
+    'code',
+    'changedFields',
+    'oldValues',
+    'newValues',
+  ],
+  [AuditAction.ACCOUNT_ACTIVATED]: ['code'],
+  [AuditAction.ACCOUNT_DEACTIVATED]: ['code'],
+  // Nunca el id de la cuenta de origen/destino (ya identificable por
+  // entityId/code): solo los `code` legibles, para una auditoría
+  // entendible sin un segundo lookup.
+  [AuditAction.ACCOUNT_SYSTEM_KEY_REASSIGNED]: [
+    'systemKey',
+    'fromAccountCode',
+    'toAccountCode',
+  ],
 };
 
 function isPlainObject(

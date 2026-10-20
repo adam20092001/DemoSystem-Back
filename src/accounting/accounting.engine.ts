@@ -8,6 +8,7 @@ import {
   AccountingEventType,
   AccountingSourceType,
   AccountingSystemKey,
+  AccountStatus,
   Prisma,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -318,12 +319,37 @@ export class AccountingEngine {
     systemKeys: AccountingSystemKey[],
   ): Promise<Map<AccountingSystemKey, Account>> {
     const uniqueKeys = Array.from(new Set(systemKeys));
+    // A1-review: filtro explícito por status ACTIVE e isPostable=true —
+    // defensa en profundidad del motor, nunca confiando únicamente en que
+    // la capa de administración (ChartOfAccountsService) ya lo garantizó.
+    // Mismo criterio que el resto del dominio (CHECK de base de datos como
+    // última línea de defensa aunque el servicio ya valide): si una cuenta
+    // de sistema terminara inactiva o no postable por cualquier vía — un
+    // bug futuro, un acceso directo a la base, una migración manual — este
+    // filtro la excluye de la resolución en vez de postear silenciosamente
+    // contra una cuenta inválida; el `for` de abajo la trata entonces como
+    // "falta la cuenta requerida" (500 explícito, mismo mensaje y camino
+    // que una cuenta de sistema ausente por completo).
     const rows = await tx.account.findMany({
-      where: { systemKey: { in: uniqueKeys } },
+      where: {
+        systemKey: { in: uniqueKeys },
+        status: AccountStatus.ACTIVE,
+        isPostable: true,
+      },
     });
 
     const bySystemKey = new Map<AccountingSystemKey, Account>();
     for (const row of rows) {
+      // A1 (PCGE): systemKey es nullable en el schema desde la Fase A1,
+      // pero el `where` de arriba (`systemKey: { in: uniqueKeys }`, nunca
+      // incluye null) garantiza en runtime que toda fila devuelta tiene un
+      // valor — Prisma simplemente no estrecha el tipo según el filtro.
+      // Un null aquí sería corrupción de datos, no un caso de negocio.
+      if (row.systemKey === null) {
+        throw new InternalServerErrorException(
+          'Se encontró una cuenta sin systemKey al resolver cuentas de sistema; invariante de datos roto',
+        );
+      }
       bySystemKey.set(row.systemKey, row);
     }
 

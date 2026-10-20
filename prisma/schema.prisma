@@ -1034,16 +1034,41 @@ model PaymentMethod {
   @@map("payment_methods")
 }
 
-// Naturaleza contable de una cuenta (Fase 8, plan final aprobado, §7). Solo
-// los cuatro valores realmente usados por las seis cuentas fijas: ninguna
-// de ellas es EQUITY ni EXPENSE, así que esos dos NO se agregan por
-// anticipación (se agregarían de forma aditiva si una fase futura los
-// necesita de verdad).
+// Naturaleza contable de una cuenta (Fase 8, plan final aprobado, §7;
+// ampliado en la Fase A1 — PCGE §4: "Evaluate whether the existing account
+// type enum needs extensions for assets, liabilities, equity, revenue,
+// expenses and costs"). Los cuatro valores originales (ASSET/LIABILITY/
+// REVENUE/CONTRA_REVENUE) son los únicos usados por las seis cuentas de
+// sistema y NUNCA cambian de significado. EQUITY/EXPENSE/COST se agregan
+// de forma puramente aditiva (ningún valor existente se modifica ni se
+// elimina) para que el plan de cuentas PCGE jerárquico (A1.1) pueda
+// clasificar cuentas de patrimonio, gasto y costo — sin que A1 cree ni
+// active ninguna cuenta real de esos tres tipos todavía (eso requiere el
+// PCGE aprobado del contador, fuera de alcance de A1 según el kickoff).
+// La naturaleza débito/crédito NORMAL de cada valor es un dato DERIVADO,
+// nunca una columna nueva (ver accountNormalBalance() en
+// account-hierarchy.utils.ts, mismo criterio que stockStatus en NR-04):
+// ASSET/EXPENSE/COST/CONTRA_REVENUE -> débito; LIABILITY/EQUITY/REVENUE ->
+// crédito.
 enum AccountType {
   ASSET
   LIABILITY
   REVENUE
   CONTRA_REVENUE
+  EQUITY
+  EXPENSE
+  COST
+}
+
+// Estado administrable de una cuenta del plan de cuentas (Fase A1 —
+// PCGE §4/§5): mismo criterio exacto que CategoryStatus/UnitStatus (dos
+// valores, sin un tercer estado "bloqueado" — eso no tiene caso de uso
+// real para una cuenta contable). Las seis cuentas de sistema nacen y
+// permanecen ACTIVE; desactivarlas está bloqueado a nivel de servicio
+// (protección de cuentas de sistema, A1.2), nunca a nivel de schema.
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
 }
 
 // Clave estable de las seis cuentas de sistema fijas (plan final, §6/§8):
@@ -1078,40 +1103,95 @@ enum AccountingEventType {
 }
 
 /**
- * Plan de cuentas básico (Fase 8, Bloque A — Documento Maestro §17:
- * "chart_of_accounts"). Exactamente seis filas de sistema, sembradas de
- * forma idempotente en prisma/seed.ts vía systemKey (ver Bloque A, plan
- * final aprobado §5/§6): sin CRUD, sin activación/desactivación, sin
- * cuentas personalizadas en este MVP. Por eso el modelo es deliberadamente
- * mínimo — sin status, sin updatedAt, sin deletedAt, sin description: nada
- * de eso tiene un caso de uso real mientras la cuenta es inmutable.
+ * Plan de cuentas (Fase 8, Bloque A — Documento Maestro §17:
+ * "chart_of_accounts"; extendido en la Fase A1 a un plan jerárquico
+ * compatible con PCGE). Las seis filas de sistema sembradas desde la Fase
+ * 8 siguen siendo las únicas cuentas REALES hoy — A1 es la base técnica
+ * (jerarquía, clasificación, postable/activa, mapeo reasignable), nunca la
+ * importación de un PCGE completo ni la reasignación de ninguna cuenta de
+ * sistema (eso exige el PCGE aprobado del contador, ver kickoff de A1).
+ *
+ * Jerarquía (parentId/level, mismo patrón exacto que Category —
+ * "AccountHierarchy", ver categories.service.ts): level se calcula
+ * SIEMPRE en el servidor (parent.level + 1, o 1 si es raíz), nunca lo
+ * envía el cliente. isPostable decide si la cuenta puede recibir líneas
+ * NUEVAS de asiento (el motor sigue resolviendo por systemKey, nunca por
+ * jerarquía); una cuenta con subcuentas no puede marcarse postable=true
+ * (validado en el servicio, nunca con un trigger). status administra
+ * activación/desactivación (mismo criterio que PaymentMethod.active):
+ * nunca borrado físico, nunca afecta asientos ya posteados.
  */
 model Account {
   id String @id @default(uuid()) @db.Uuid
 
-  // Identificador interno estable, NO un código PCGE (el Documento Maestro
-  // no exige uno): "CASH", "BANK", "AR", "VAT", "SALES", "DISCOUNTS".
+  // Identificador interno estable. Las seis cuentas de sistema usan un
+  // código corto no-PCGE ("CASH", "BANK", "AR", "VAT", "SALES",
+  // "DISCOUNTS"); una cuenta PCGE usaría su código numérico oficial
+  // (ninguna se inventa ni se siembra en A1). Inmutable después de creada
+  // (mismo criterio que PaymentMethod.code): nunca editable vía PATCH.
   code String @unique @db.VarChar(20)
 
-  // Nombre en español, terminología exacta del Documento Maestro ("Caja",
-  // "Bancos", "Cuentas por cobrar", "IGV por pagar", "Ventas",
-  // "Descuentos").
-  name String @db.VarChar(60)
+  // Nombre en español. Ancho 150 (Fase A1, antes 60): una denominación
+  // PCGE oficial puede ser más larga que los nombres cortos de las seis
+  // cuentas de sistema ("Caja", "Bancos", ...), que siguen cabiendo sin
+  // cambios.
+  name String @db.VarChar(150)
 
   type AccountType
 
-  // Clave estable de mapeo (plan final §6): obligatoria y única — toda
-  // cuenta de la Fase 8 es una de las seis cuentas de sistema fijas, nunca
-  // nullable "por si acaso" una cuenta personalizada futura la necesitara
-  // (esa extensión, si llega, la decide la Fase 10).
-  systemKey AccountingSystemKey @unique @map("system_key")
+  // Clave estable de mapeo (plan final §6 de la Fase 8). NULLABLE desde la
+  // Fase A1 (antes obligatoria): una cuenta PCGE nueva no tiene por qué
+  // resolver ningún evento automático. Sigue siendo única — Postgres
+  // permite múltiples NULL en un índice único, así que cualquier cantidad
+  // de cuentas PCGE sin mapeo coexiste sin conflicto; cuando SÍ tiene un
+  // valor, sigue siendo 1:1 con una sola cuenta, exactamente como antes.
+  // Reasignar qué cuenta sostiene un systemKey es una operación explícita
+  // y auditada (ChartOfAccountsService.reassignSystemKey(), A1.3) que
+  // NUNCA toca AccountingEntryLine.accountId de ningún asiento histórico.
+  systemKey AccountingSystemKey? @unique @map("system_key")
+
+  // Jerarquía (Fase A1 — PCGE §4), mismo patrón que Category
+  // ("AccountHierarchy"). onDelete: Restrict: nunca se borra una cuenta
+  // físicamente (ni este modelo expone un DELETE), así que esto es
+  // defensa en profundidad, no un camino real de la aplicación.
+  parentId String?  @map("parent_id") @db.Uuid
+  parent   Account? @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children Account[] @relation("AccountHierarchy")
+
+  // Profundidad en el árbol (1 = raíz). SIEMPRE derivado por el servicio
+  // a partir del padre, nunca aceptado del cliente — ver docblock del
+  // modelo.
+  level Int @default(1)
+
+  // Si puede recibir líneas de asiento NUEVAS (el motor sigue resolviendo
+  // por systemKey; esta bandera es la base para una futura validación de
+  // mapeo PCGE, A1.3). Las seis cuentas de sistema nacen y permanecen
+  // true (siguen en uso activo). Una cuenta con subcuentas no puede ser
+  // postable (validado en el servicio).
+  isPostable Boolean @default(true) @map("is_postable")
+
+  // Activación/desactivación administrable (Fase A1). Las seis cuentas de
+  // sistema nacen y permanecen ACTIVE (protegidas a nivel de servicio,
+  // nunca a nivel de schema). Desactivar nunca borra ni reescribe
+  // AccountingEntryLine alguno — mismo criterio que PaymentMethod.active.
+  status AccountStatus @default(ACTIVE)
 
   createdAt DateTime @default(now()) @map("created_at")
+  // @default(now()) además de @updatedAt (a diferencia de Category, que
+  // nació con esta columna desde su primera migración): las seis filas
+  // YA EXISTENTES necesitan un valor de backfill explícito para esta
+  // columna NOT NULL nueva; Prisma Client sigue reescribiéndola en cada
+  // `.update()` real sin importar este default, que solo cubre el
+  // backfill y el INSERT inicial.
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   lines AccountingEntryLine[]
 
-  // Los 2 CHECK (code/name no en blanco) se agregan a mano en
+  // Los 2 CHECK de code/name no en blanco (Fase 8) más los 2 nuevos de la
+  // Fase A1 (level >= 1, no auto-padre) se agregan a mano en
   // migration.sql, mismo criterio que Category/Unit/Product.
+  @@index([parentId])
+  @@index([status])
   @@map("chart_of_accounts")
 }
 

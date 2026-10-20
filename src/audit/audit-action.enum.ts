@@ -91,6 +91,21 @@
 // efectivo es un no-op y no genera ninguna de las dos filas. El cliente
 // genérico "Público general" nunca las genera (rechazado con 409, mismo
 // criterio que el resto de mutaciones de Customer).
+// ACCOUNT_ se agregan en la Fase A1 (PCGE): ChartOfAccountsService es su
+// único emisor. CREATED al crear una cuenta nueva del plan de cuentas
+// (nace ACTIVE). UPDATED cubre cualquier PATCH que NO cambie `status`
+// (name/parentId/type/isPostable, individualmente o combinados) — mismo
+// criterio de no-op real que PAYMENT_METHOD_UPDATED: un PATCH sin cambios
+// efectivos no genera ninguna fila. ACTIVATED/DEACTIVATED cubren un PATCH
+// cuyo `status` sí transiciona, igual criterio que
+// PAYMENT_METHOD_ACTIVATED/DEACTIVATED (única acción para esa petición,
+// el resto de cambios viaja en el mismo metadata). SYSTEM_KEY_REASSIGNED
+// es una acción propia, deliberadamente distinta de UPDATED: mueve un
+// AccountingSystemKey de una cuenta a otra (capacidad técnica de A1.3,
+// sin ninguna reasignación real activada todavía) — un evento crítico
+// que afecta qué cuenta resolverá AccountingEngine para TODOS los
+// asientos nuevos de ese systemKey a partir de ese instante, así que
+// amerita su propia fila en vez de confundirse con una edición cualquiera.
 export enum AuditAction {
   LOGIN_SUCCESS = 'LOGIN_SUCCESS',
   LOGIN_FAILED = 'LOGIN_FAILED',
@@ -173,4 +188,9 @@ export enum AuditAction {
   CASH_SESSION_CLOSING_REQUESTED = 'CASH_SESSION_CLOSING_REQUESTED',
   CASH_SESSION_DISCREPANCY_APPROVED = 'CASH_SESSION_DISCREPANCY_APPROVED',
   CASH_SESSION_DISCREPANCY_REJECTED = 'CASH_SESSION_DISCREPANCY_REJECTED',
+  ACCOUNT_CREATED = 'ACCOUNT_CREATED',
+  ACCOUNT_UPDATED = 'ACCOUNT_UPDATED',
+  ACCOUNT_ACTIVATED = 'ACCOUNT_ACTIVATED',
+  ACCOUNT_DEACTIVATED = 'ACCOUNT_DEACTIVATED',
+  ACCOUNT_SYSTEM_KEY_REASSIGNED = 'ACCOUNT_SYSTEM_KEY_REASSIGNED',
 }

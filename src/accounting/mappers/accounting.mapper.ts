@@ -1,3 +1,4 @@
+import { InternalServerErrorException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   SafeAccountingEntry,
@@ -18,7 +19,23 @@ export type AccountSafeRow = Prisma.AccountGetPayload<{
   select: typeof ACCOUNT_SAFE_SELECT;
 }>;
 
+/**
+ * A1 (PCGE): `systemKey` es nullable en el schema desde la Fase A1 (una
+ * cuenta PCGE nueva nace sin mapeo), pero `toSafeAccount()` solo recibe
+ * filas YA filtradas por `AccountingService.listAccounts()`
+ * (`systemKey: { not: null } `) — el único llamador de esta función en
+ * todo el dominio. Si esa invariante se rompiera (un llamador nuevo
+ * pasara una fila sin mapeo), es un error de programación interno, nunca
+ * un caso de negocio: 500 explícito, jamás un `systemKey: null` filtrado
+ * en silencio hacia `SafeAccount` (que sigue siendo no-nullable a
+ * propósito — contrato histórico de GET /accounts, Fase 8).
+ */
 export function toSafeAccount(row: AccountSafeRow): SafeAccount {
+  if (row.systemKey === null) {
+    throw new InternalServerErrorException(
+      'toSafeAccount() recibió una cuenta sin systemKey; el llamador debe filtrar systemKey no nulo antes de mapear',
+    );
+  }
   return {
     id: row.id,
     code: row.code,
