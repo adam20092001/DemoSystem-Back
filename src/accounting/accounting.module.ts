@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { AccountingEngine } from './accounting.engine';
 import { AccountingEntriesController } from './accounting-entries.controller';
 import { AccountingPeriodsController } from './accounting-periods.controller';
 import { AccountingPeriodsService } from './accounting-periods.service';
+import { AccountingReportsController } from './accounting-reports.controller';
+import { AccountingReportsService } from './accounting-reports.service';
 import { AccountingService } from './accounting.service';
 import { AccountsController } from './accounts.controller';
 import { ChartOfAccountsController } from './chart-of-accounts.controller';
@@ -34,6 +37,13 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
  * Tampoco se exporta: ningún otro módulo administra periodos directamente
  * — SalesService/PaymentEngine siguen componiendo únicamente
  * AccountingEngine, que resuelve el periodo internamente.
+ *
+ * Fase A3 (reportes contables): agrega AccountingReportsController/Service
+ * — Libro Diario, Libro Mayor y Balance de comprobación, de SOLO LECTURA.
+ * Reutiliza ExcelExportService (mismo patrón ya usado por Sales/Quotes/
+ * Products/AccountsReceivable, provider local sin dependencias). Nunca
+ * escribe AccountingEntry/AccountingEntryLine ni invoca a AccountingEngine
+ * para postear: deriva exclusivamente de lo ya persistido.
  */
 @Module({
   controllers: [
@@ -41,12 +51,15 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
     AccountingEntriesController,
     ChartOfAccountsController,
     AccountingPeriodsController,
+    AccountingReportsController,
   ],
   providers: [
     AccountingEngine,
     AccountingService,
     ChartOfAccountsService,
     AccountingPeriodsService,
+    AccountingReportsService,
+    ExcelExportService,
   ],
   exports: [AccountingEngine],
 })
