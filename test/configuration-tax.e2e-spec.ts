@@ -129,6 +129,45 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
     return row;
   }
 
+  /**
+   * A0.2 (post-MVP, dureza de integridad financiera): PATCH /configuration
+   * ya rechaza (409) un cambio de currencyCode a un valor DISTINTO en
+   * cuanto existe al menos una Sale o un AccountingEntry — y esta suite ya
+   * crea varias desde §43/§45. Varios puntos de este archivo (§46, §47)
+   * solo necesitan fijar currencyCode como FIXTURE de prueba (o restaurarlo
+   * tras una), no están probando el propio endpoint PATCH — eso ya tiene
+   * su cobertura dedicada de éxito/rechazo en configuration.e2e-spec.ts y
+   * en configuration.service.spec.ts. Por eso usan una escritura DIRECTA
+   * de Prisma — mismo criterio que withTemporarilyRemovedAccount() en
+   * accounting.e2e-spec.ts: un bypass deliberado de una regla de negocio
+   * para armar un fixture, nunca para probar esa regla. taxEnabled/
+   * taxRate/maxDiscountPercent siguen sin restricción alguna de A0.2.
+   */
+  async function setCompanySettingsFixture(data: {
+    currencyCode?: string;
+    taxEnabled?: boolean;
+    taxRate?: string;
+    maxDiscountPercent?: string;
+  }): Promise<void> {
+    await prisma.companySettings.update({
+      where: { singleton: true },
+      data: {
+        ...(data.currencyCode !== undefined && {
+          currencyCode: data.currencyCode,
+        }),
+        ...(data.taxEnabled !== undefined && {
+          taxEnabled: data.taxEnabled,
+        }),
+        ...(data.taxRate !== undefined && {
+          taxRate: new Prisma.Decimal(data.taxRate),
+        }),
+        ...(data.maxDiscountPercent !== undefined && {
+          maxDiscountPercent: new Prisma.Decimal(data.maxDiscountPercent),
+        }),
+      },
+    });
+  }
+
   async function createQuote(body: {
     customerId: string;
     expirationDate?: string;
@@ -1318,73 +1357,234 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
 
   describe('§46 — Snapshot de contexto fiscal (Fase 11, Bloque B): currencyCode/taxEnabled/taxRate', () => {
     it('cotización creada bajo USD+IGV 18% activo persiste ese contexto exacto', async () => {
-      await patchConfiguration({
+      await setCompanySettingsFixture({
         currencyCode: 'USD',
         taxEnabled: true,
         taxRate: '18.00',
         maxDiscountPercent: '100.00',
       });
-      await trackLatestConfigurationAuditRow();
-
-      const quote = await createQuote({
-        customerId,
-        expirationDate: '2030-01-01',
-        items: [{ productId, quantity: '1' }],
-      });
-      expect(quote.status).toBe(201);
-      expect(quote.body.currencyCode).toBe('USD');
-      expect(quote.body.taxEnabled).toBe(true);
-      expect(quote.body.taxRate).toBe('18.00');
-
-      await patchConfiguration({ currencyCode: 'PEN' });
-      await trackLatestConfigurationAuditRow();
+      // A0-review: try/finally — si cualquier expect() de abajo falla, la
+      // moneda se restaura igual (ver A0.2: con historia financiera ya
+      // creada por esta suite, dejarla en USD rompería TODO el resto de la
+      // corrida e2e completa, archivos ajenos incluidos, ya que PATCH
+      // /configuration ya no puede revertirla una vez que existen ventas).
+      try {
+        const quote = await createQuote({
+          customerId,
+          expirationDate: '2030-01-01',
+          items: [{ productId, quantity: '1' }],
+        });
+        expect(quote.status).toBe(201);
+        expect(quote.body.currencyCode).toBe('USD');
+        expect(quote.body.taxEnabled).toBe(true);
+        expect(quote.body.taxRate).toBe('18.00');
+      } finally {
+        await setCompanySettingsFixture({ currencyCode: 'PEN' });
+      }
     });
 
     it('venta directa creada bajo USD+IGV 18% activo persiste ese mismo contexto (misma lectura de settings que taxAmount)', async () => {
-      await patchConfiguration({
+      await setCompanySettingsFixture({
         currencyCode: 'USD',
         taxEnabled: true,
         taxRate: '18.00',
       });
-      await trackLatestConfigurationAuditRow();
-
-      const sale = await createDirectSale({
-        customerId,
-        items: [{ productId, quantity: '1' }],
-      });
-      expect(sale.status).toBe(201);
-      expect(sale.body.currencyCode).toBe('USD');
-      expect(sale.body.taxEnabled).toBe(true);
-      expect(sale.body.taxRate).toBe('18.00');
-
-      await patchConfiguration({ currencyCode: 'PEN' });
-      await trackLatestConfigurationAuditRow();
+      try {
+        const sale = await createDirectSale({
+          customerId,
+          items: [{ productId, quantity: '1' }],
+        });
+        expect(sale.status).toBe(201);
+        expect(sale.body.currencyCode).toBe('USD');
+        expect(sale.body.taxEnabled).toBe(true);
+        expect(sale.body.taxRate).toBe('18.00');
+      } finally {
+        await setCompanySettingsFixture({ currencyCode: 'PEN' });
+      }
     });
 
-    it('conversión Cotización -> Venta copia VERBATIM currencyCode/taxEnabled/taxRate de la cotización, aunque la configuración vigente ya haya cambiado', async () => {
-      await patchConfiguration({
+    it('conversión Cotización -> Venta copia VERBATIM taxEnabled/taxRate de la cotización, aunque la configuración vigente ya haya cambiado en esos dos campos', async () => {
+      await setCompanySettingsFixture({
         currencyCode: 'USD',
         taxEnabled: true,
         taxRate: '18.00',
         maxDiscountPercent: '100.00',
       });
-      await trackLatestConfigurationAuditRow();
+      try {
+        const quote = await createQuote({
+          customerId,
+          expirationDate: '2030-01-01',
+          items: [{ productId, quantity: '1' }],
+        });
+        expect(quote.status).toBe(201);
+        expect(quote.body.currencyCode).toBe('USD');
+        expect(quote.body.taxEnabled).toBe(true);
+        expect(quote.body.taxRate).toBe('18.00');
 
+        // Configuración vigente cambia ANTES de la conversión: IGV
+        // desactivado. La venta debe seguir copiando el contexto fiscal
+        // congelado de la cotización, nunca releer CompanySettings. La
+        // moneda se deja intencionalmente SIN cambiar (sigue en USD,
+        // igual que la cotización): un cambio de moneda ANTES de
+        // convertir es precisamente el escenario que la tarea 2 de
+        // A0-review bloquea con 409 — cubierto por su propio describe
+        // dedicado (§48), nunca mezclado con esta prueba de
+        // taxEnabled/taxRate.
+        await setCompanySettingsFixture({ taxEnabled: false });
+
+        const conversion = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.body.id}`)
+          .set('Cookie', adminCookie)
+          .send({});
+        expect(conversion.status).toBe(201);
+        const sale = conversion.body as SafeSaleBody;
+        createdSaleIds.push(sale.id);
+
+        expect(sale.currencyCode).toBe('USD');
+        expect(sale.taxEnabled).toBe(true);
+        expect(sale.taxRate).toBe('18.00');
+        // Explícitamente NO el contexto vigente al momento de convertir
+        // (taxEnabled, que sí cambió a propósito en este test).
+        expect(sale.taxEnabled).not.toBe(false);
+      } finally {
+        // Restaura el baseline de la suite (PEN/taxEnabled=true) sin
+        // importar en qué punto falló el cuerpo del test.
+        await setCompanySettingsFixture({
+          currencyCode: 'PEN',
+          taxEnabled: true,
+        });
+      }
+    });
+  });
+
+  describe('§47 — A0.2: protección de cambio de moneda cuando ya existe historia financiera', () => {
+    it('PATCH currencyCode a un valor distinto -> 409 en cuanto ya existen Sale/AccountingEntry (creados por §43/§45 en esta misma suite); sin cambio persistido ni auditoría nueva', async () => {
+      const before = await request(app.getHttpServer())
+        .get('/api/v1/configuration')
+        .set('Cookie', adminCookie);
+      expect((before.body as SafeConfigurationBody).currencyCode).toBe('PEN');
+
+      const auditCountBefore = await prisma.auditLog.count({
+        where: { action: AuditAction.CONFIGURATION_UPDATED },
+      });
+
+      const response = await patchConfiguration({ currencyCode: 'USD' });
+      expect(response.status).toBe(409);
+
+      const after = await request(app.getHttpServer())
+        .get('/api/v1/configuration')
+        .set('Cookie', adminCookie);
+      expect((after.body as SafeConfigurationBody).currencyCode).toBe('PEN');
+
+      const auditCountAfter = await prisma.auditLog.count({
+        where: { action: AuditAction.CONFIGURATION_UPDATED },
+      });
+      expect(auditCountAfter).toBe(auditCountBefore);
+    });
+
+    it('reenviar la misma moneda ya vigente (PEN) sigue permitido, aun con historia financiera existente', async () => {
+      const response = await patchConfiguration({ currencyCode: 'pen' });
+      expect(response.status).toBe(200);
+      expect(response.body.currencyCode).toBe('PEN');
+    });
+
+    it('A0-review — concurrencia real: cambio de moneda vs. venta directa creándose en paralelo nunca termina en estado mixto (PATCH 200 + venta con la moneda vieja)', async () => {
+      // Dos peticiones HTTP reales en paralelo (mismo patrón que
+      // accounting.e2e-spec.ts §68-§73), cada una con su propia
+      // transacción Prisma contra el MISMO Postgres real — no un mock. El
+      // lock explícito (FOR UPDATE sobre company_settings, tomado por
+      // ambos lados) debe serializarlas: cualquiera que llegue primero
+      // hace esperar a la otra y ésta, al reanudar, ve el estado YA
+      // comprometido por la primera.
+      const [patchResponse, saleResult] = await Promise.all([
+        patchConfiguration({ currencyCode: 'USD' }),
+        createDirectSale({
+          customerId,
+          items: [{ productId, quantity: '1' }],
+        }),
+      ]);
+
+      expect(saleResult.status).toBe(201);
+      const createdSale = saleResult.body;
+
+      const settingsAfter = await request(app.getHttpServer())
+        .get('/api/v1/configuration')
+        .set('Cookie', adminCookie);
+      const finalCurrency = (settingsAfter.body as SafeConfigurationBody)
+        .currencyCode;
+
+      // Únicos dos desenlaces consistentes posibles; el estado MIXTO
+      // (PATCH 200 pero la venta nace con la moneda vieja, o viceversa)
+      // es precisamente lo que A0.2 + el lock existen para impedir.
+      if (patchResponse.status === 200) {
+        expect(finalCurrency).toBe('USD');
+        expect(createdSale.currencyCode).toBe('USD');
+      } else {
+        expect(patchResponse.status).toBe(409);
+        expect(finalCurrency).toBe('PEN');
+        expect(createdSale.currencyCode).toBe('PEN');
+      }
+
+      // Restaura sin importar el resultado (si el PATCH ganó, vuelve a
+      // PEN; si perdió, ya estaba en PEN y esto es un no-op). Bypass
+      // deliberado del guard: es un fixture de prueba, no un ejercicio
+      // del endpoint.
+      await setCompanySettingsFixture({ currencyCode: 'PEN' });
+    });
+  });
+
+  describe('§48 — A0-review (tarea 2): protección de moneda en la conversión Cotización -> Venta', () => {
+    it('cotización creada en PEN, moneda de la empresa cambia a USD después, sin ventas nuevas de por medio -> la conversión responde 409 y no crea nada', async () => {
       const quote = await createQuote({
         customerId,
         expirationDate: '2030-01-01',
         items: [{ productId, quantity: '1' }],
       });
       expect(quote.status).toBe(201);
-      expect(quote.body.currencyCode).toBe('USD');
-      expect(quote.body.taxEnabled).toBe(true);
-      expect(quote.body.taxRate).toBe('18.00');
+      expect(quote.body.currencyCode).toBe('PEN');
 
-      // Configuración vigente cambia drásticamente ANTES de la conversión:
-      // moneda distinta e IGV desactivado. La venta debe seguir copiando el
-      // contexto congelado de la cotización, nunca releer CompanySettings.
-      await patchConfiguration({ currencyCode: 'PEN', taxEnabled: false });
-      await trackLatestConfigurationAuditRow();
+      // Simula el paso 3 del escenario reportado: la moneda de la empresa
+      // cambia DESPUÉS de crear la cotización. Escritura directa de
+      // Prisma (fixture): esta suite ya tiene Sale/AccountingEntry
+      // históricas de §43/§45, así que el PATCH real /configuration ya
+      // respondería 409 por A0.2 — exactamente la razón por la que este
+      // riesgo (una cotización, que A0.2 nunca bloquea, puede quedar
+      // "huérfana" en la moneda vieja) seguía abierto hasta esta
+      // corrección.
+      await setCompanySettingsFixture({ currencyCode: 'USD' });
+
+      try {
+        const salesBefore = await prisma.sale.count();
+
+        const conversion = await request(app.getHttpServer())
+          .post(`/api/v1/sales/from-quote/${quote.body.id}`)
+          .set('Cookie', adminCookie)
+          .send({});
+        expect(conversion.status).toBe(409);
+
+        const salesAfter = await prisma.sale.count();
+        expect(salesAfter).toBe(salesBefore);
+
+        // La cotización histórica queda exactamente igual: nunca se
+        // reescribe su propio snapshot de moneda por un intento de
+        // conversión rechazado.
+        const quoteAfter = await prisma.quote.findUniqueOrThrow({
+          where: { id: quote.body.id },
+        });
+        expect(quoteAfter.currencyCode).toBe('PEN');
+        expect(quoteAfter.status).not.toBe('CONVERTED');
+      } finally {
+        await setCompanySettingsFixture({ currencyCode: 'PEN' });
+      }
+    });
+
+    it('cotización creada en PEN, moneda de la empresa sigue en PEN -> la conversión procede con normalidad', async () => {
+      const quote = await createQuote({
+        customerId,
+        expirationDate: '2030-01-01',
+        items: [{ productId, quantity: '1' }],
+      });
+      expect(quote.status).toBe(201);
 
       const conversion = await request(app.getHttpServer())
         .post(`/api/v1/sales/from-quote/${quote.body.id}`)
@@ -1393,16 +1593,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       expect(conversion.status).toBe(201);
       const sale = conversion.body as SafeSaleBody;
       createdSaleIds.push(sale.id);
-
-      expect(sale.currencyCode).toBe('USD');
-      expect(sale.taxEnabled).toBe(true);
-      expect(sale.taxRate).toBe('18.00');
-      // Explícitamente NO el contexto vigente al momento de convertir.
-      expect(sale.currencyCode).not.toBe('PEN');
-      expect(sale.taxEnabled).not.toBe(false);
-
-      await patchConfiguration({ currencyCode: 'PEN', taxEnabled: true });
-      await trackLatestConfigurationAuditRow();
+      expect(sale.currencyCode).toBe('PEN');
     });
   });
 });

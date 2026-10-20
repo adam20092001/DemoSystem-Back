@@ -343,6 +343,36 @@ export class ElectronicDocumentsService {
     tx: Prisma.TransactionClient,
     command: IssueElectronicDocumentCommand,
   ): Promise<string> {
+    // A0-review (cierre de condición de carrera emisión vs. anulación):
+    // bloquea la fila de la venta ANTES de leerla. `SalesService.cancel()`
+    // toma el MISMO lock (`lockSale`, FOR UPDATE) antes de decidir si hay
+    // un comprobante "bloqueante". Sin este lock, bajo READ COMMITTED (el
+    // nivel por defecto de Prisma, sin cambios aquí) una lectura plana de
+    // la venta nunca espera a una anulación concurrente en curso: esta
+    // transacción podría leer la venta todavía ACTIVE (la anulación aún no
+    // comprometida) y crear el documento CREATED, mientras la anulación
+    // seguía su curso sin haber visto ningún documento todavía — dejando
+    // una venta CANCELLED con un comprobante en progreso que después
+    // podría resolver a ACCEPTED. Con el lock compartido, quien llegue
+    // segundo a este punto espera al primero y relee el estado YA
+    // comprometido: si la venta ya quedó CANCELLED, el chequeo de abajo la
+    // detecta y nunca se crea el documento; si el documento ya se creó, la
+    // anulación (que corre después) lo encuentra y responde 409. No se
+    // necesita el mismo lock en transitionToSubmitted()/persistProviderOutcome()
+    // (Fases 2-4) ni en retrySubmission(): desde el instante en que existe
+    // una fila ElectronicDocument con CREATED/SUBMITTED/SUBMISSION_FAILED,
+    // SalesService.cancel() ya la encuentra con una lectura plana normal
+    // (la fila ya está comprometida) y rechaza la anulación sin ninguna
+    // ventana — el único hueco real era el intervalo ANTES de que esa
+    // primera fila llegara a existir, que es exactamente lo que este lock
+    // cierra. Tampoco se abre ninguna transacción nueva ni se mantiene
+    // esta abierta mientras se espera al proveedor: el lock se libera al
+    // comprometer esta transacción, mucho antes de llamar a
+    // this.provider.submit() en runSubmissionFlow().
+    await tx.$queryRaw(
+      Prisma.sql`SELECT id FROM sales WHERE id = ${command.saleId}::uuid FOR UPDATE`,
+    );
+
     const sale = await this.loadSaleSnapshot(tx, command.saleId);
 
     // P6-C2: la propiedad se comprueba INMEDIATAMENTE después de cargar la

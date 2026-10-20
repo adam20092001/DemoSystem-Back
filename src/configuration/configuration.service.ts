@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -158,6 +159,14 @@ export class ConfigurationService {
    * final (existente + lo enviado), nunca solo sobre los campos presentes
    * en el body. Se valida ANTES de escribir nada; si falla, no hay UPDATE
    * ni auditoría.
+   *
+   * A0.2 (post-MVP, dureza de integridad financiera): cambiar
+   * currencyCode a un valor DISTINTO del vigente responde 409 en cuanto ya
+   * existe al menos una Sale o un AccountingEntry (ver
+   * assertCurrencyChangeAllowed()). Reenviar el mismo currencyCode ya
+   * vigente sigue permitido como no-op/actualización normal — este MVP no
+   * introduce multimoneda ni conversión alguna, solo evita mezclar
+   * historia financiera entre monedas distintas.
    */
   async updateConfiguration(
     input: UpdateConfigurationInput,
@@ -184,6 +193,32 @@ export class ConfigurationService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // A0-review (cierre de condición de carrera): bloqueo explícito de
+      // la fila singleton ANTES de leerla, solo cuando el PATCH incluye
+      // currencyCode (un PATCH que no lo toca nunca necesita este lock).
+      // `SalesService.createDirect()` toma el MISMO lock antes de
+      // snapshotear currencyCode en la venta nueva, y
+      // `SalesService.createFromQuote()` también lo toma antes de
+      // comparar la moneda vigente contra la ya congelada en la
+      // cotización (verifica el mismo riesgo, por una vía distinta: una
+      // cotización no bloquea el cambio de moneda, solo Sale/
+      // AccountingEntry). Bajo READ COMMITTED
+      // (el nivel por defecto de Prisma, sin cambios aquí), sin un lock
+      // compartido ninguna de las dos transacciones vería el efecto de la
+      // otra: `assertCurrencyChangeAllowed()` podría encontrar "sin
+      // ventas" justo antes de que una venta en curso confirme con la
+      // moneda vieja, dejando CompanySettings en la moneda nueva con al
+      // menos una Sale histórica en la moneda anterior — exactamente el
+      // estado que A0.2 existe para impedir. Con el lock compartido, la
+      // transacción que llega segunda a este punto espera a la que llegó
+      // primera y relee el estado YA comprometido por ella, así que
+      // cualquiera de los dos órdenes de llegada termina consistente.
+      if (input.currencyCode !== undefined) {
+        await tx.$queryRaw(
+          Prisma.sql`SELECT id FROM company_settings WHERE singleton = true FOR UPDATE`,
+        );
+      }
+
       const existing = await tx.companySettings.findUnique({
         where: { singleton: true },
         select: COMPANY_SETTINGS_SAFE_SELECT,
@@ -392,6 +427,26 @@ export class ConfigurationService {
         return toSafeCompanySettings(existing);
       }
 
+      // A0.2 (post-MVP, dureza de integridad financiera): cambiar la moneda
+      // de la empresa a un valor DISTINTO del actual queda bloqueado en
+      // cuanto ya existe historia financiera (al menos una Sale o un
+      // AccountingEntry, sin filtrar por estado: incluso una venta/asiento
+      // ANULADO es historia real con la moneda vigente al momento de su
+      // creación). Reenviar el mismo currencyCode ya vigente nunca llega
+      // aquí (no se marca como cambiado más arriba), así que sigue siendo
+      // un no-op/actualización normal sin este chequeo. Verificado como lo
+      // último antes del UPDATE, dentro de la MISMA transacción, para
+      // acotar al mínimo la ventana de carrera frente a una venta
+      // confirmándose en paralelo (ningún otro punto del dominio toma un
+      // lock sobre company_settings al confirmar una venta — ver auditoría
+      // Fase 00, riesgo ALTO 1 — así que esta ventana, aunque mínima, no se
+      // puede cerrar por completo sin introducir un mecanismo de bloqueo
+      // nuevo que ningún otro módulo usa hoy; fuera de alcance de A0, que
+      // exige un cambio mínimo y seguro, no un rediseño de locking).
+      if (data.currencyCode !== undefined) {
+        await this.assertCurrencyChangeAllowed(tx);
+      }
+
       const updated = await tx.companySettings.update({
         where: { singleton: true },
         data,
@@ -412,6 +467,29 @@ export class ConfigurationService {
 
       return toSafeCompanySettings(updated);
     });
+  }
+
+  /**
+   * A0.2: bloquea el cambio de moneda cuando ya hay historia financiera.
+   * Busca una sola fila de cada tabla (findFirst, sin count()) porque solo
+   * importa la existencia, nunca la cantidad. Se consulta dentro de la
+   * MISMA `tx` del PATCH (nunca this.prisma directo): mismo criterio de
+   * consistencia transaccional que el resto del método. No filtra por
+   * estado: una Sale/AccountingEntry CANCELLED sigue siendo historia real
+   * emitida con la moneda vigente en ese momento, así que también bloquea.
+   */
+  private async assertCurrencyChangeAllowed(
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    const [existingSale, existingEntry] = await Promise.all([
+      tx.sale.findFirst({ select: { id: true } }),
+      tx.accountingEntry.findFirst({ select: { id: true } }),
+    ]);
+    if (existingSale !== null || existingEntry !== null) {
+      throw new ConflictException(
+        'No se puede cambiar la moneda de la empresa: ya existen ventas o asientos contables registrados con la moneda actual',
+      );
+    }
   }
 }
 

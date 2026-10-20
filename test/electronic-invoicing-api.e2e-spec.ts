@@ -43,12 +43,18 @@ import { createTestPrismaClient } from './helpers/prisma-test-client';
  * se duplica aquí. Mismo aislamiento que el resto del dominio: solo
  * pos_db_test, limpieza por ID propio, nunca deleteMany({}).
  *
- * TRES instancias de aplicación:
- *  - `app`: proveedor real (MockElectronicInvoicingProvider).
+ * CUATRO instancias de aplicación:
+ *  - `app`: proveedor real (MockElectronicInvoicingProvider, siempre
+ *    ACCEPTED).
  *  - `failingApp`: proveedor sobrescrito que SIEMPRE lanza
- *    RetryableProviderSubmissionError (falla técnica DEFINITIVA).
+ *    RetryableProviderSubmissionError (falla técnica DEFINITIVA,
+ *    SUBMISSION_FAILED).
  *  - `unknownOutcomeApp`: proveedor sobrescrito que SIEMPRE lanza un Error
- *    genérico no clasificado (resultado DESCONOCIDO, fail closed).
+ *    genérico no clasificado (resultado DESCONOCIDO, fail closed,
+ *    permanece SUBMITTED).
+ *  - `rejectingApp` (A0-review): proveedor sobrescrito que SIEMPRE
+ *    resuelve `{ outcome: 'REJECTED' }` — único camino para que un
+ *    comprobante llegue a REJECTED en esta suite.
  *
  * IGV desactivado a propósito durante toda la suite (CompanySettings
  * restaurada exacta al cierre): así total = subtotal, sin depender de la
@@ -59,6 +65,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
   let app: INestApplication<App>;
   let failingApp: INestApplication<App>;
   let unknownOutcomeApp: INestApplication<App>;
+  let rejectingApp: INestApplication<App>;
   let prisma: PrismaClient;
 
   let adminCookie: string;
@@ -315,6 +322,33 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       unknownOutcomeModule.createNestApplication<INestApplication<App>>();
     setupApp(unknownOutcomeApp);
     await unknownOutcomeApp.init();
+
+    // A0-review (opción B): doble que el proveedor SIEMPRE RECHAZA
+    // (resolución funcional, no un fallo técnico) — único camino hoy para
+    // que un comprobante llegue a REJECTED, necesario para probar que
+    // A0.3 permite anular una venta cuyo comprobante terminó rechazado
+    // (sin ningún camino de reintento posible desde REJECTED).
+    const rejectingProvider: ElectronicInvoicingProvider = {
+      code: 'MOCK',
+      submit: () =>
+        Promise.resolve({
+          outcome: 'REJECTED',
+          externalId: null,
+          providerStatus: 'REJECTED_BY_PROVIDER',
+          providerMessage:
+            'Documento rechazado por el proveedor (simulado, e2e API A0-review)',
+        }),
+    };
+    const rejectingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(ELECTRONIC_INVOICING_PROVIDER)
+      .useValue(rejectingProvider)
+      .compile();
+    rejectingApp =
+      rejectingModule.createNestApplication<INestApplication<App>>();
+    setupApp(rejectingApp);
+    await rejectingApp.init();
 
     const adminLogin = await login(
       app.getHttpServer(),
@@ -682,6 +716,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       await app.close();
       await failingApp.close();
       await unknownOutcomeApp.close();
+      await rejectingApp.close();
       await prisma.$disconnect();
     }
   });
@@ -2085,7 +2120,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       expect(after.total.toFixed(2)).toBe('106.20');
     });
 
-    it('R2-B6: con la venta ANULADA después de emitir, el comprobante se lee e imprime con el contexto fiscal congelado de la venta (nunca CompanySettings vigente)', async () => {
+    it('R2-B6 + A0.3: una venta con comprobante ACEPTADO ya no se puede anular; el comprobante se lee e imprime con el contexto fiscal congelado de la venta (nunca CompanySettings vigente)', async () => {
       const sale = await createFixtureSale({
         customerId: rucCustomerId,
         quantity: '1',
@@ -2101,11 +2136,27 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
         where: { id: sale.id },
       });
 
+      // A0.3 (post-MVP, dureza fiscal/contable): el proveedor MOCK siempre
+      // responde ACCEPTED (ver MockElectronicInvoicingProvider.submit()),
+      // así que esta venta ya no se puede anular directamente — este
+      // sistema no implementa notas de crédito. Antes de A0.3 esta prueba
+      // anulaba la venta aquí mismo para demostrar que el comprobante
+      // seguía mostrando su contexto fiscal congelado con la venta ya
+      // CANCELLED; ese escenario concreto ya no es alcanzable con un
+      // comprobante ACCEPTED, así que la prueba ahora confirma el rechazo
+      // explícitamente (sin ningún efecto persistente: la venta sigue
+      // ACTIVE) y continúa demostrando el congelamiento del contexto
+      // fiscal con la venta todavía ACTIVE — el dato persistido en el
+      // comprobante nunca depende del estado de la venta.
       const cancelled = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/cancel`)
         .set('Cookie', adminCookie)
         .send({ reason: 'R2-B6: anulación posterior a la emisión' });
-      expect(cancelled.status).toBe(200);
+      expect(cancelled.status).toBe(409);
+      const saleAfterRejectedCancel = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleAfterRejectedCancel.status).toBe('ACTIVE');
 
       // Cambiar la configuración vigente no debe alterar el contexto fiscal
       // del documento (la suite restaura su configuración en afterAll).
@@ -2144,7 +2195,7 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       const saleAfter = await prisma.sale.findUniqueOrThrow({
         where: { id: sale.id },
       });
-      expect(saleAfter.status).toBe('CANCELLED');
+      expect(saleAfter.status).toBe('ACTIVE');
       expect(saleAfter.taxEnabled).toBe(saleRow.taxEnabled);
       expect(saleAfter.taxRate.equals(saleRow.taxRate)).toBe(true);
     });
@@ -2155,6 +2206,137 @@ describe('Electronic Invoicing — API pública HTTP (Fase 11, Bloque D) (e2e)',
       for (const item of (list.body as { data: object[] }).data) {
         expect(item).not.toHaveProperty('pricesIncludeTax');
         expect(item).not.toHaveProperty('itemsTotal');
+      }
+    });
+  });
+
+  // ====================================================================
+  // A0-review — corrección final: anulación bloqueada mientras la emisión
+  // está en curso o resuelta, y cierre de la condición de carrera real
+  // entre emitir y anular.
+  // ====================================================================
+  describe('A0-review — bloqueo de anulación por estado del comprobante', () => {
+    it('SUBMISSION_FAILED bloquea la anulación (409); la venta sigue ACTIVE', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(
+        adminCookie,
+        sale.id,
+        { documentType: FiscalDocumentType.FACTURA, series: FACTURA_SERIES },
+        failingApp,
+      );
+      expect(issued.status).toBe(503);
+
+      const doc = await prisma.electronicDocument.findFirstOrThrow({
+        where: { saleId: sale.id },
+      });
+      createdDocumentIds.push(doc.id);
+      expect(doc.status).toBe(ElectronicDocumentStatus.SUBMISSION_FAILED);
+
+      const cancelled = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'A0-review: intento de anular con SUBMISSION_FAILED' });
+      expect(cancelled.status).toBe(409);
+
+      const saleAfter = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleAfter.status).toBe('ACTIVE');
+    });
+
+    it('REJECTED permite la anulación (opción B): sin camino de reintento desde REJECTED', async () => {
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+      const issued = await issueDoc(
+        adminCookie,
+        sale.id,
+        { documentType: FiscalDocumentType.FACTURA, series: FACTURA_SERIES },
+        rejectingApp,
+      );
+      expect(issued.status).toBe(201);
+      const docId = (issued.body as { id: string; status: string }).id;
+      createdDocumentIds.push(docId);
+      expect((issued.body as { status: string }).status).toBe('REJECTED');
+
+      const cancelled = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/cancel`)
+        .set('Cookie', adminCookie)
+        .send({ reason: 'A0-review: anulación con comprobante REJECTED' });
+      expect(cancelled.status).toBe(200);
+
+      const saleAfter = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      expect(saleAfter.status).toBe('CANCELLED');
+    });
+
+    it('A0-review — concurrencia real: emitir comprobante vs. anular la venta en paralelo nunca termina en estado mixto (venta CANCELLED + comprobante en curso/aceptado)', async () => {
+      // Dos peticiones HTTP reales en paralelo contra el MISMO Postgres
+      // real (mismo patrón que accounting.e2e-spec.ts §68-§73 y el de
+      // A0.2 en configuration-tax.e2e-spec.ts §47). El lock explícito
+      // (FOR UPDATE sobre la fila de la venta, tomado por ambos lados:
+      // SalesService.cancel() vía lockSale() y
+      // ElectronicDocumentsService.createFiscalDocument()) debe
+      // serializarlas.
+      const sale = await createFixtureSale({
+        customerId: rucCustomerId,
+        quantity: '1',
+      });
+
+      const [issueResult, cancelResult] = await Promise.all([
+        issueDoc(adminCookie, sale.id, {
+          documentType: FiscalDocumentType.FACTURA,
+          series: FACTURA_SERIES,
+        }),
+        request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/cancel`)
+          .set('Cookie', adminCookie)
+          .send({ reason: 'A0-review: concurrencia emisión vs. anulación' }),
+      ]);
+
+      if (issueResult.status === 201) {
+        createdDocumentIds.push((issueResult.body as { id: string }).id);
+      }
+
+      const saleAfter = await prisma.sale.findUniqueOrThrow({
+        where: { id: sale.id },
+      });
+      const documentAfter = await prisma.electronicDocument.findFirst({
+        where: { saleId: sale.id },
+      });
+
+      // Únicos dos desenlaces consistentes posibles, determinados por cuál
+      // de las dos transacciones gane el lock de la venta primero (ver el
+      // comentario de createFiscalDocument()): si cancel() gana, Fase 1
+      // de issue() SIEMPRE descubre la venta ya CANCELLED al reanudar y
+      // nunca llega a crear ningún documento (falla completa, 409, sin
+      // efecto persistente); si issue() gana, su documento ya comprometido
+      // (en cualquier estado bloqueante) es lo que cancel() encuentra al
+      // reanudar, y por eso siempre responde 409. El estado MIXTO (venta
+      // CANCELLED + un comprobante vigente, o un comprobante creado sin
+      // que la anulación lo haya detectado) es precisamente lo que este
+      // cierre de carrera existe para impedir — y por construcción del
+      // lock, no tiene un tercer desenlace posible.
+      if (saleAfter.status === 'CANCELLED') {
+        expect(cancelResult.status).toBe(200);
+        expect(issueResult.status).toBe(409);
+        expect(documentAfter).toBeNull();
+      } else {
+        expect(saleAfter.status).toBe('ACTIVE');
+        expect(cancelResult.status).toBe(409);
+        expect(issueResult.status).toBe(201);
+        expect(documentAfter).not.toBeNull();
+        expect([
+          'CREATED',
+          'SUBMITTED',
+          'SUBMISSION_FAILED',
+          'ACCEPTED',
+        ]).toContain(documentAfter!.status);
       }
     });
   });
