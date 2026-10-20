@@ -31,6 +31,9 @@ function makeEntryListRow(overrides: Partial<Record<string, unknown>> = {}) {
     description: 'Venta NV-000001',
     postedAt: new Date(),
     createdAt: new Date(),
+    accountingDate: new Date('2026-03-15T00:00:00.000Z'),
+    periodId: 'period-1',
+    journalNumber: 1,
     ...overrides,
   };
 }
@@ -217,8 +220,15 @@ describe('AccountingService', () => {
     it('mapea la fila sin lines/createdBy/sourceNumber', async () => {
       const postedAt = new Date();
       const createdAt = new Date();
+      const accountingDate = new Date('2026-03-15T00:00:00.000Z');
       prisma.accountingEntry.findMany.mockResolvedValue([
-        makeEntryListRow({ postedAt, createdAt }),
+        makeEntryListRow({
+          postedAt,
+          createdAt,
+          accountingDate,
+          periodId: 'period-1',
+          journalNumber: 1,
+        }),
       ]);
       const result = await service.listEntries({}, RoleName.ADMIN);
       expect(result.data[0]).toEqual({
@@ -230,6 +240,9 @@ describe('AccountingService', () => {
         description: 'Venta NV-000001',
         postedAt,
         createdAt,
+        accountingDate: '2026-03-15',
+        periodId: 'period-1',
+        journalNumber: 1,
       });
       const serialized = JSON.stringify(result.data[0]);
       expect(serialized).not.toMatch(/lines|createdBy|sourceNumber/i);

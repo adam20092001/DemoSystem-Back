@@ -134,6 +134,8 @@ function makeReverseCommand(
   };
 }
 
+const PERIOD_ID = '55555555-5555-4555-8555-555555555555';
+
 function createTxMock() {
   return {
     accountingEntry: {
@@ -143,6 +145,11 @@ function createTxMock() {
     account: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
     },
+    accountingPeriod: {
+      findUnique: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    },
+    $executeRaw: jest.fn<Promise<number>, [unknown]>(),
+    $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
   };
 }
 
@@ -169,6 +176,11 @@ describe('AccountingEngine', () => {
       sourceId: SALE_ID,
       eventType: AccountingEventType.ORIGINAL,
     });
+    // Fase A2: por defecto, el periodo (POSTED_AT cae en 2026-03) ya existe
+    // y está OPEN con lastJournalNumber=0 -> el UPDATE...RETURNING entrega 1.
+    tx.accountingPeriod.findUnique.mockResolvedValue({ id: PERIOD_ID });
+    tx.$executeRaw.mockResolvedValue(1);
+    tx.$queryRaw.mockResolvedValue([{ lastJournalNumber: 1 }]);
   });
 
   it('nunca abre transacción propia (no existe this.prisma en la clase)', () => {
@@ -611,6 +623,134 @@ describe('AccountingEngine', () => {
       expect(
         (tx.accountingEntry as unknown as { update?: unknown }).update,
       ).toBeUndefined();
+    });
+  });
+
+  // ====================================================================
+  // Fase A2 — periodos contables, fecha contable y numeración
+  // ====================================================================
+  describe('Fase A2 — periodos contables, fecha contable y numeración', () => {
+    it('deriva accountingDate del postedAt en zona de negocio America/Lima, sin desfase', async () => {
+      // POSTED_AT = 2026-03-15T12:00:00.000Z -> en Lima (UTC-5) sigue siendo 15 de marzo.
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          accountingDate: Date;
+          periodId: string;
+          journalNumber: number;
+        };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-15T00:00:00.000Z',
+      );
+      expect(call.data.periodId).toBe(PERIOD_ID);
+      expect(call.data.journalNumber).toBe(1);
+    });
+
+    it('caso límite de medianoche: un postedAt poco después de medianoche UTC cae en el día ANTERIOR en Lima', async () => {
+      // 2026-03-15T04:30:00Z -> Lima (UTC-5) = 2026-03-14T23:30:00, un día antes.
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand({ postedAt: new Date('2026-03-15T04:30:00.000Z') }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-14T00:00:00.000Z',
+      );
+    });
+
+    it('caso límite de transición de mes: 2026-04-01T04:00:00Z cae en el 31 de marzo en Lima', async () => {
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand({ postedAt: new Date('2026-04-01T04:00:00.000Z') }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-31T00:00:00.000Z',
+      );
+    });
+
+    it('periodo inexistente: lo crea vía INSERT ... ON CONFLICT y resuelve su id antes de numerar', async () => {
+      tx.accountingPeriod.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: PERIOD_ID });
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand(),
+      );
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(tx.accountingPeriod.findUnique).toHaveBeenCalledTimes(2);
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { periodId: string };
+      };
+      expect(call.data.periodId).toBe(PERIOD_ID);
+    });
+
+    it('periodo CLOSED: el UPDATE...RETURNING condicionado a OPEN no devuelve fila -> ConflictException, nunca crea el asiento', async () => {
+      tx.$queryRaw.mockResolvedValue([]);
+      await expect(
+        engine.postSaleRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makeSaleCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('numeración: usa exactamente el lastJournalNumber devuelto por el UPDATE...RETURNING', async () => {
+      tx.$queryRaw.mockResolvedValue([{ lastJournalNumber: 7 }]);
+      await engine.postSaleRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeSaleCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { journalNumber: number };
+      };
+      expect(call.data.journalNumber).toBe(7);
+    });
+
+    it('reversal: usa la fecha contable de SU PROPIO postedAt, nunca la del asiento ORIGINAL (que puede caer en otro mes)', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          id: 'original-entry-1',
+          sourceType: AccountingSourceType.SALE,
+          sourceId: SALE_ID,
+          eventType: AccountingEventType.ORIGINAL,
+          lines: [
+            {
+              accountId: 'acc-ar',
+              debitAmount: d('100.00'),
+              creditAmount: d('0'),
+            },
+            {
+              accountId: 'acc-sales',
+              debitAmount: d('0'),
+              creditAmount: d('100.00'),
+            },
+          ],
+        })
+        .mockResolvedValueOnce(null);
+      // El original se posteó en marzo (POSTED_AT); la anulación ocurre en abril.
+      const reversalPostedAt = new Date('2026-04-10T15:00:00.000Z');
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({ postedAt: reversalPostedAt }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date; postedAt: Date };
+      };
+      expect(call.data.postedAt).toBe(reversalPostedAt);
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-04-10T00:00:00.000Z',
+      );
     });
   });
 });

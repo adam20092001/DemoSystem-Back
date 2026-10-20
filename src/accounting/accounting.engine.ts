@@ -11,8 +11,10 @@ import {
   AccountStatus,
   Prisma,
 } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { resolveAccountingDateParts } from './accounting-period.utils';
 import {
   assertLinesBalanced,
   assertValidAccountingDescription,
@@ -179,6 +181,15 @@ export class AccountingEngine {
         : buildPaymentReversalDescription(command.sourceNumber);
     assertValidAccountingDescription(description);
 
+    // A2.2: el asiento REVERSAL usa la fecha contable de SU PROPIO
+    // postedAt (el instante de la anulación), nunca la del asiento
+    // ORIGINAL que revierte — command.postedAt es siempre un instante
+    // nuevo generado por el llamador en el momento de anular (ver
+    // SalesService.cancel()/PaymentEngine.cancel()), no el postedAt del
+    // `original` leído arriba.
+    const { accountingDate, periodId, journalNumber } =
+      await this.resolvePeriodAndAssignNumber(tx, command.postedAt);
+
     const created = await tx.accountingEntry.create({
       data: {
         sourceType: command.sourceType,
@@ -187,6 +198,9 @@ export class AccountingEngine {
         reversesEntryId: original.id,
         description,
         postedAt: command.postedAt,
+        accountingDate,
+        periodId,
+        journalNumber,
         createdByUserId: command.actorUserId,
         lines: {
           create: invertedLines.map((line) => ({
@@ -265,6 +279,9 @@ export class AccountingEngine {
       input.lines.map((line) => line.systemKey),
     );
 
+    const { accountingDate, periodId, journalNumber } =
+      await this.resolvePeriodAndAssignNumber(tx, input.postedAt);
+
     const created = await tx.accountingEntry.create({
       data: {
         sourceType: input.sourceType,
@@ -272,6 +289,9 @@ export class AccountingEngine {
         eventType: AccountingEventType.ORIGINAL,
         description: input.description,
         postedAt: input.postedAt,
+        accountingDate,
+        periodId,
+        journalNumber,
         createdByUserId: input.actorUserId,
         lines: {
           create: input.lines.map((line) => ({
@@ -375,5 +395,105 @@ export class AccountingEngine {
       );
     }
     return account;
+  }
+
+  // ==================================================================
+  // Periodos contables, fecha contable y numeración (Fase A2)
+  // ==================================================================
+
+  /**
+   * Punto único (A2.4) donde se resuelve el periodo contable de
+   * `postedAt`, se valida que esté OPEN y se asigna el siguiente número de
+   * asiento DENTRO de ese periodo — todo en un único UPDATE ... RETURNING
+   * sobre la fila de AccountingPeriod (mismo patrón exacto que
+   * DocumentSequenceService.next()): el propio UPDATE toma el lock de fila
+   * y lo mantiene hasta el commit/rollback de `tx`, sin ventana entre leer
+   * y escribir. Esto resuelve simultáneamente las dos condiciones de
+   * carrera críticas de A2.4:
+   *   - Posteo vs. cierre del mismo periodo: si CLOSED ya confirmó cuando
+   *     este UPDATE corre, el WHERE status='OPEN' no matchea ninguna fila
+   *     (0 RETURNING) y se rechaza con 409; si este UPDATE ya tiene el
+   *     lock, el UPDATE de cierre espera hasta que esta transacción
+   *     termine, así que un cierre nunca "alcanza" a un asiento que ya
+   *     estaba en vuelo.
+   *   - Dos posteos simultáneos en el mismo periodo: PostgreSQL serializa
+   *     ambos UPDATE sobre la misma fila; cada uno recibe un
+   *     lastJournalNumber distinto y consecutivo, nunca duplicado.
+   * Si la transacción que llama a este método se revierte, el UPDATE de
+   * abajo revierte con ella (es una fila normal, no una secuencia de
+   * PostgreSQL): nunca deja huecos en la numeración ya comprometida.
+   */
+  private async resolvePeriodAndAssignNumber(
+    tx: Prisma.TransactionClient,
+    postedAt: Date,
+  ): Promise<{
+    accountingDate: Date;
+    periodId: string;
+    journalNumber: number;
+  }> {
+    const { accountingDate, year, month } =
+      resolveAccountingDateParts(postedAt);
+    const periodId = await this.resolveOrCreateOpenPeriodId(tx, year, month);
+
+    const rows = await tx.$queryRaw<{ lastJournalNumber: number }[]>(Prisma.sql`
+      UPDATE accounting_periods
+      SET last_journal_number = last_journal_number + 1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${periodId}::uuid AND status = 'OPEN'
+      RETURNING last_journal_number AS "lastJournalNumber"
+    `);
+    const row = rows[0];
+    if (row === undefined) {
+      throw new ConflictException(
+        `No se puede contabilizar: el periodo contable ${year}-${String(month).padStart(2, '0')} está cerrado`,
+      );
+    }
+
+    return { accountingDate, periodId, journalNumber: row.lastJournalNumber };
+  }
+
+  /**
+   * Resuelve el id del periodo (year, month), creándolo como OPEN si
+   * todavía no existe (A2.1: "safe automatic creation of the current
+   * period as OPEN when an accounting event needs it" — la actividad
+   * comercial normal nunca debe bloquearse porque nadie inicializó
+   * manualmente el mes vigente). `INSERT ... ON CONFLICT DO NOTHING` es
+   * atómico: si dos transacciones intentan crear el mismo (year, month)
+   * por primera vez a la vez, una gana el INSERT y la otra simplemente no
+   * inserta nada (sin lanzar error ni bloquear), y ambas terminan leyendo
+   * el mismo id ya creado por la ganadora. Nunca reabre un periodo CLOSED:
+   * si ya existe, se devuelve su id tal cual (OPEN o CLOSED) y es
+   * `resolvePeriodAndAssignNumber()` quien decide si se puede postear.
+   */
+  private async resolveOrCreateOpenPeriodId(
+    tx: Prisma.TransactionClient,
+    year: number,
+    month: number,
+  ): Promise<string> {
+    const existing = await tx.accountingPeriod.findUnique({
+      where: { year_month: { year, month } },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      return existing.id;
+    }
+
+    const candidateId = randomUUID();
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO accounting_periods (id, year, month, status, last_journal_number, created_at, updated_at)
+      VALUES (${candidateId}::uuid, ${year}, ${month}, 'OPEN', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (year, month) DO NOTHING
+    `);
+
+    const resolved = await tx.accountingPeriod.findUnique({
+      where: { year_month: { year, month } },
+      select: { id: true },
+    });
+    if (resolved === null) {
+      throw new InternalServerErrorException(
+        `No se pudo resolver ni crear el periodo contable ${year}-${String(month).padStart(2, '0')}`,
+      );
+    }
+    return resolved.id;
   }
 }

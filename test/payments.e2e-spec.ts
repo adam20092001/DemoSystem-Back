@@ -20,6 +20,7 @@ import {
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
+import { businessToday, toPrismaDate } from '../src/common/date/business-date';
 import { deriveSalePaymentSummary } from '../src/sales/sale-calculator';
 import { assertAuditRowHasNoSecrets } from './helpers/audit-assertions';
 import {
@@ -457,6 +458,37 @@ describe('Payments (e2e)', () => {
     status?: SaleStatus;
   }
 
+  /**
+   * Fase A2: réplica mínima (fuera de AccountingEngine, igual criterio que
+   * el resto de esta fixture) de la resolución de periodo/fecha
+   * contable/número de asiento, para los AccountingEntry creados a mano
+   * más abajo. Suficiente para un fixture secuencial de pruebas (no
+   * concurrente): no reemplaza ni necesita el lock atómico real de
+   * AccountingEngine.resolvePeriodAndAssignNumber().
+   */
+  async function resolveFixtureAccountingPeriod(postedAt: Date): Promise<{
+    accountingDate: Date;
+    periodId: string;
+    journalNumber: number;
+  }> {
+    const dateOnly = businessToday(postedAt);
+    const [year, month] = dateOnly.split('-').map(Number);
+    const period = await prisma.accountingPeriod.upsert({
+      where: { year_month: { year, month } },
+      update: {},
+      create: { year, month },
+    });
+    const updated = await prisma.accountingPeriod.update({
+      where: { id: period.id },
+      data: { lastJournalNumber: { increment: 1 } },
+    });
+    return {
+      accountingDate: toPrismaDate(dateOnly),
+      periodId: period.id,
+      journalNumber: updated.lastJournalNumber,
+    };
+  }
+
   /** Venta fixture mínima pero válida frente a las 18 CHECK de cabecera de `sales` (Fase 6). */
   async function createFixtureSale(
     overrides: FixtureSaleOverrides = {},
@@ -504,6 +536,8 @@ describe('Payments (e2e)', () => {
     // archivo, pero se guarda la condición por fidelidad al invariante
     // real de AccountingEngine: sin actividad económica, sin ORIGINAL).
     if (total.greaterThan(0)) {
+      const { accountingDate, periodId, journalNumber } =
+        await resolveFixtureAccountingPeriod(row.confirmedAt);
       const entry = await prisma.accountingEntry.create({
         data: {
           sourceType: AccountingSourceType.SALE,
@@ -511,6 +545,9 @@ describe('Payments (e2e)', () => {
           eventType: AccountingEventType.ORIGINAL,
           description: `Venta ${row.number}`,
           postedAt: row.confirmedAt,
+          accountingDate,
+          periodId,
+          journalNumber,
           createdByUserId: adminId,
         },
       });

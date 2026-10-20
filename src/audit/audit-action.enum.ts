@@ -193,4 +193,13 @@ export enum AuditAction {
   ACCOUNT_ACTIVATED = 'ACCOUNT_ACTIVATED',
   ACCOUNT_DEACTIVATED = 'ACCOUNT_DEACTIVATED',
   ACCOUNT_SYSTEM_KEY_REASSIGNED = 'ACCOUNT_SYSTEM_KEY_REASSIGNED',
+  // Fase A2.1/A2.6. AccountingPeriodsService es su único emisor: la
+  // auto-creación implícita de un periodo dentro de
+  // AccountingEngine.resolvePeriodAndAssignNumber() nunca audita por sí
+  // misma (ya queda evidenciada por el ACCOUNTING_ENTRY_POSTED del asiento
+  // que la disparó) — solo las acciones EXPLÍCITAS de ADMIN sobre el ciclo
+  // de vida del periodo se auditan aquí.
+  ACCOUNTING_PERIOD_OPENED = 'ACCOUNTING_PERIOD_OPENED',
+  ACCOUNTING_PERIOD_CLOSED = 'ACCOUNTING_PERIOD_CLOSED',
+  ACCOUNTING_PERIOD_REOPENED = 'ACCOUNTING_PERIOD_REOPENED',
 }

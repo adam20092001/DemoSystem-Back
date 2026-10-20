@@ -132,54 +132,59 @@ model UserRole {
 }
 
 model User {
-  id                       String              @id @default(uuid()) @db.Uuid
-  firstName                String              @map("first_name") @db.VarChar(80)
-  lastName                 String              @map("last_name") @db.VarChar(80)
-  username                 String              @unique @db.VarChar(50)
-  email                    String              @unique @db.VarChar(150)
-  passwordHash             String              @map("password_hash") @db.VarChar(255)
+  id                        String              @id @default(uuid()) @db.Uuid
+  firstName                 String              @map("first_name") @db.VarChar(80)
+  lastName                  String              @map("last_name") @db.VarChar(80)
+  username                  String              @unique @db.VarChar(50)
+  email                     String              @unique @db.VarChar(150)
+  passwordHash              String              @map("password_hash") @db.VarChar(255)
   // KAN-18: roleId/role (relación singular) se reemplazan por roles
   // (UserRole[]) — autorización persistente de uno o más roles. El rol
   // ACTIVO de una sesión nunca se persiste aquí (ver TokenService.sign()/
   // JwtAuthGuard): solo vive en el JWT firmado, validado en vivo contra
   // esta colección en cada petición.
-  roles                    UserRole[]
-  status                   UserStatus          @default(ACTIVE)
-  mustChangePassword       Boolean             @default(true) @map("must_change_password")
-  failedLoginAttempts      Int                 @default(0) @map("failed_login_attempts")
-  blockedAt                DateTime?           @map("blocked_at")
-  lastLoginAt              DateTime?           @map("last_login_at")
-  createdAt                DateTime            @default(now()) @map("created_at")
-  updatedAt                DateTime            @updatedAt @map("updated_at")
-  auditLogs                AuditLog[]
-  inventoryMovements       InventoryMovement[]
+  roles                     UserRole[]
+  status                    UserStatus          @default(ACTIVE)
+  mustChangePassword        Boolean             @default(true) @map("must_change_password")
+  failedLoginAttempts       Int                 @default(0) @map("failed_login_attempts")
+  blockedAt                 DateTime?           @map("blocked_at")
+  lastLoginAt               DateTime?           @map("last_login_at")
+  createdAt                 DateTime            @default(now()) @map("created_at")
+  updatedAt                 DateTime            @updatedAt @map("updated_at")
+  auditLogs                 AuditLog[]
+  inventoryMovements        InventoryMovement[]
   // Cotizaciones donde este usuario es el emisor comercial (sellerId =
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
-  issuedQuotes             Quote[]
+  issuedQuotes              Quote[]
   // Ventas donde este usuario es el vendedor (D10, Fase 6): directa = actor
   // autenticado; desde cotización = Quote.sellerId (no necesariamente quien
   // ejecuta la conversión). Dos relaciones nombradas porque Sale referencia
   // User dos veces (vendedor y quien anula).
-  soldSales                Sale[]              @relation("SaleSeller")
-  cancelledSales           Sale[]              @relation("SaleCancelledBy")
+  soldSales                 Sale[]              @relation("SaleSeller")
+  cancelledSales            Sale[]              @relation("SaleCancelledBy")
   // Pagos (Fase 7, Bloque A): dos relaciones nombradas porque Payment
   // referencia User dos veces (quien registra y quien anula), mismo
   // criterio que soldSales/cancelledSales arriba.
-  createdPayments          Payment[]           @relation("PaymentCreatedBy")
-  cancelledPayments        Payment[]           @relation("PaymentCancelledBy")
+  createdPayments           Payment[]           @relation("PaymentCreatedBy")
+  cancelledPayments         Payment[]           @relation("PaymentCancelledBy")
   // Arqueos de caja (Ticket B post-MVP, Bloque B1: solo persistencia, sin
   // reglas de negocio todavía). Dos relaciones nombradas por el mismo
   // motivo que Sale/Payment arriba: CashSession referencia User dos veces
   // (el cobrador dueño de la caja y, opcionalmente, quien aprueba un cierre
   // con descuadre).
-  cashSessions             CashSession[]       @relation("CashSessionOwner")
-  approvedCashSessions     CashSession[]       @relation("CashSessionApprovedBy")
+  cashSessions              CashSession[]       @relation("CashSessionOwner")
+  approvedCashSessions      CashSession[]       @relation("CashSessionApprovedBy")
   // Asientos contables (Fase 8, Bloque A): un único actor por asiento (quien
   // ejecutó la operación de negocio que lo generó); a diferencia de
   // Sale/Payment, un AccountingEntry nunca se "anula" con el mismo actor
   // relation — su reversión es una fila nueva con su propio createdBy.
-  createdAccountingEntries AccountingEntry[]   @relation("AccountingEntryCreatedBy")
+  createdAccountingEntries  AccountingEntry[]   @relation("AccountingEntryCreatedBy")
+  // Periodos contables (Fase A2.1): dos relaciones nombradas porque
+  // AccountingPeriod referencia User dos veces (quien cierra y, si aplica,
+  // quien reabre), mismo criterio que Sale/Payment arriba.
+  closedAccountingPeriods   AccountingPeriod[]  @relation("AccountingPeriodClosedBy")
+  reopenedAccountingPeriods AccountingPeriod[]  @relation("AccountingPeriodReopenedBy")
 
   @@index([status])
   @@map("users")
@@ -1018,7 +1023,7 @@ model PaymentMethod {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  payments Payment[]
+  payments             Payment[]
   // Desglose de cierres de caja por método (Ticket B post-MVP, Bloque B1:
   // tabla vacía hasta un bloque de negocio posterior).
   cashSessionSummaries CashSessionPaymentMethodSummary[]
@@ -1102,6 +1107,15 @@ enum AccountingEventType {
   REVERSAL
 }
 
+// Ciclo de vida de un periodo contable mensual (Fase A2.1). Sin un tercer
+// valor: nunca REJECTED/ARCHIVED/PENDING — la máquina es exactamente
+// OPEN <-> CLOSED, simétrica y reversible solo mediante acción explícita de
+// ADMIN (nunca automática en el sentido CLOSED -> OPEN).
+enum AccountingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
 /**
  * Plan de cuentas (Fase 8, Bloque A — Documento Maestro §17:
  * "chart_of_accounts"; extendido en la Fase A1 a un plan jerárquico
@@ -1110,7 +1124,6 @@ enum AccountingEventType {
  * (jerarquía, clasificación, postable/activa, mapeo reasignable), nunca la
  * importación de un PCGE completo ni la reasignación de ninguna cuenta de
  * sistema (eso exige el PCGE aprobado del contador, ver kickoff de A1).
- *
  * Jerarquía (parentId/level, mismo patrón exacto que Category —
  * "AccountHierarchy", ver categories.service.ts): level se calcula
  * SIEMPRE en el servidor (parent.level + 1, o 1 si es raíz), nunca lo
@@ -1154,8 +1167,8 @@ model Account {
   // ("AccountHierarchy"). onDelete: Restrict: nunca se borra una cuenta
   // físicamente (ni este modelo expone un DELETE), así que esto es
   // defensa en profundidad, no un camino real de la aplicación.
-  parentId String?  @map("parent_id") @db.Uuid
-  parent   Account? @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  parentId String?   @map("parent_id") @db.Uuid
+  parent   Account?  @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   children Account[] @relation("AccountHierarchy")
 
   // Profundidad en el árbol (1 = raíz). SIEMPRE derivado por el servicio
@@ -1237,6 +1250,31 @@ model AccountingEntry {
   // cliente nunca lo controla ni puede retrofecharlo.
   postedAt DateTime @map("posted_at")
 
+  // Fase A2.2: fecha contable derivada de postedAt en la zona de negocio
+  // (America/Lima, mismo criterio que common/date/business-date.ts), nunca
+  // elegida por el cliente. Un asiento REVERSAL usa la fecha contable de SU
+  // PROPIO postedAt (el instante de la anulación), nunca la del asiento
+  // ORIGINAL que revierte. @db.Date: solo la fecha calendario importa, sin
+  // componente de hora.
+  accountingDate DateTime @map("accounting_date") @db.Date
+
+  // Fase A2.1/A2.3: periodo contable mensual que contiene este asiento,
+  // resuelto por AccountingEngine a partir de accountingDate (creado
+  // automáticamente como OPEN si todavía no existe). Restrict: un periodo
+  // con asientos nunca se puede borrar.
+  periodId String           @map("period_id") @db.Uuid
+  period   AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+
+  // Fase A2.3: número secuencial, único y sin huecos POR PERIODO (nunca
+  // global), asignado por AccountingEngine mediante el mismo patrón
+  // transaccional que DocumentSequenceService.next() (UPDATE ... RETURNING
+  // sobre AccountingPeriod.lastJournalNumber, dentro del mismo tx que crea
+  // este asiento): si la transacción se revierte, el contador revierte con
+  // ella. Un asiento REVERSAL recibe su propio número, nunca reutiliza el
+  // del ORIGINAL. Sin edición manual posible (sin endpoint que lo exponga
+  // como editable).
+  journalNumber Int @map("journal_number")
+
   createdByUserId String @map("created_by_user_id") @db.Uuid
   createdBy       User   @relation("AccountingEntryCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
 
@@ -1249,11 +1287,65 @@ model AccountingEntry {
   // accounting_entries_one_original_per_source se agregan a mano en
   // migration.sql: el DSL de Prisma no expresa CHECK ni WHERE de forma
   // declarativa (mismo criterio que Category/Sale/Payment/
-  // InventoryMovement).
+  // InventoryMovement). journalNumber único POR periodo (@@unique abajo),
+  // nunca global.
+  @@unique([periodId, journalNumber])
   @@index([postedAt, id])
   @@index([sourceType, sourceId])
   @@index([eventType, postedAt])
+  @@index([accountingDate])
   @@map("accounting_entries")
+}
+
+/**
+ * Periodo contable mensual (Fase A2.1), identificado por (year, month).
+ * Ciclo de vida OPEN/CLOSED administrado exclusivamente por ADMIN
+ * (AccountingPeriodsService vía GET/POST /accounting/periods): MANAGEMENT
+ * solo lee (mismo criterio ya cerrado para el resto del dominio contable,
+ * P6-E4), SELLER/WAREHOUSE no tienen ningún acceso. AccountingEngine crea
+ * automáticamente, dentro de su propia transacción de posteo, el periodo
+ * del mes en curso como OPEN la primera vez que lo necesita — la actividad
+ * comercial normal (confirmar una venta, cobrar un pago) nunca debe
+ * bloquearse porque nadie inicializó manualmente el mes vigente. Un
+ * periodo CLOSED nunca se reabre automáticamente: reopen() es siempre una
+ * acción explícita y auditada de ADMIN.
+ * lastJournalNumber es el contador transaccional de numeración de asientos
+ * de ESTE periodo (mismo patrón que DocumentSequence.currentNumber):
+ * siempre avanzado mediante un único UPDATE ... RETURNING dentro de la
+ * transacción que postea el asiento, nunca mediante una secuencia de
+ * PostgreSQL (CREATE SEQUENCE) — su nextval() no revierte con un ROLLBACK,
+ * lo que dejaría huecos en la numeración comprometida; un UPDATE normal
+ * sobre esta fila sí revierte junto con el resto de la transacción.
+ */
+model AccountingPeriod {
+  id String @id @default(uuid()) @db.Uuid
+
+  year  Int
+  month Int
+
+  status AccountingPeriodStatus @default(OPEN)
+
+  lastJournalNumber Int @default(0) @map("last_journal_number")
+
+  closedAt       DateTime? @map("closed_at")
+  closedByUserId String?   @map("closed_by_user_id") @db.Uuid
+  closedBy       User?     @relation("AccountingPeriodClosedBy", fields: [closedByUserId], references: [id], onDelete: Restrict)
+
+  reopenedAt       DateTime? @map("reopened_at")
+  reopenedByUserId String?   @map("reopened_by_user_id") @db.Uuid
+  reopenedBy       User?     @relation("AccountingPeriodReopenedBy", fields: [reopenedByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  entries AccountingEntry[]
+
+  // El CHECK de month (1-12) se agrega a mano en migration.sql, mismo
+  // criterio que el resto del dominio (ver comentario de AccountingEntry
+  // arriba).
+  @@unique([year, month])
+  @@index([status])
+  @@map("accounting_periods")
 }
 
 /**
@@ -1624,7 +1716,6 @@ enum CashSessionStatus {
  * mismo usuario ADMIN o SELLER es el mismo dueño de caja
  * independientemente del rol con el que haya iniciado sesión en un momento
  * dado.
- *
  * Máquina de 3 estados (sin REJECTED/CANCELLED/APPROVED, ver
  * CashSessionStatus): OPEN -> PENDING_APPROVAL (cierre con descuadre) ->
  * OPEN (rechazo, snapshot de cierre limpiado) o CLOSED (aprobación); OPEN ->
