@@ -763,8 +763,8 @@ cuentas).
      pero seguro: nunca puede dar falso negativo, cada asiento tiene
      mínimo 2 líneas). Mayor y Balance ya contaban correctamente filas
      reales desde la implementación original.
-- **Validación:** 98 suites / 3259 pruebas unitarias; regresión E2E
-  completa (33 suites, incluida la nueva `test/accounting-reports.e2e-spec.ts`,
+- **Validación:** 96 suites / 3230 pruebas unitarias; regresión E2E
+  completa (34 suites, incluida la nueva `test/accounting-reports.e2e-spec.ts`,
   26 pruebas: RBAC, Diario/Mayor/Balance con historial determinista
   enero-marzo 2026, reversión en periodo distinto, periodo CLOSED,
   jerarquía padre/hijo, cuenta inactiva, reasignación de `systemKey`,
