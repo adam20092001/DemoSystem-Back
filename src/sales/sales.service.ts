@@ -12,6 +12,7 @@ import {
   CustomerStatus,
   CustomerType,
   DocumentType,
+  ElectronicDocumentStatus,
   InventoryMovementOrigin,
   InventoryMovementType,
   LineDiscountType,
@@ -241,6 +242,23 @@ export class SalesService {
     const initialPayments = parseInitialPayments(input.payment, input.payments);
 
     return this.prisma.$transaction(async (tx) => {
+      // A0-review (cierre de condición de carrera, simétrico con
+      // ConfigurationService.updateConfiguration()): bloquea la fila
+      // singleton de configuración ANTES de leer currencyCode para el
+      // snapshot de esta venta. Sin este lock, bajo READ COMMITTED (el
+      // nivel por defecto de Prisma, sin cambios aquí), un cambio de
+      // moneda concurrente (A0.2) podría confirmar DESPUÉS de que esta
+      // transacción ya leyó la moneda vieja pero ANTES de que el INSERT
+      // de Sale se comprometa — dejando una venta nueva con la moneda
+      // anterior sin que la guardia de A0.2 la detectara nunca (su
+      // chequeo de "sin ventas" ya habría corrido antes de que esta venta
+      // existiera). No aplica a createFromQuote(): esa conversión nunca
+      // lee CompanySettings para currencyCode, copia el snapshot ya
+      // congelado de la cotización.
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id FROM company_settings WHERE singleton = true FOR UPDATE`,
+      );
+
       // Bloque 10, B: snapshot ÚNICO de configuración para esta operación
       // (descuento máximo permitido en la venta DIRECTA). La conversión de
       // cotización (createFromQuote) NUNCA llama a SettingsReader para
@@ -485,6 +503,39 @@ export class SalesService {
         throw new ConflictException('La cotización ya generó una venta');
       }
 
+      // A0-review (riesgo confirmado de A0.2): la cotización congela su
+      // propia moneda en Quote.currencyCode al crearse (snapshot
+      // intocado, nunca se reescribe aquí ni en ningún otro lugar), pero
+      // A0.2 NUNCA bloquea un cambio de moneda por cotizaciones existentes
+      // — solo por Sale/AccountingEntry (una cotización no tiene efecto
+      // contable). Así que es perfectamente posible: 1) cotización creada
+      // en PEN, 2) sin ventas/asientos todavía, 3) la moneda de la empresa
+      // cambia a USD (permitido, A0.2 no lo bloquea), 4) esta conversión
+      // crea una Sale/AccountingEntry en PEN mientras CompanySettings ya
+      // dice USD — el mismo estado mixto que A0.2 existe para impedir,
+      // alcanzado por una vía distinta. Se rechaza ANTES de leer items/
+      // bloquear cliente/productos o escribir nada: ningún monto se
+      // convierte nunca, la cotización histórica queda exactamente igual.
+      //
+      // Bloqueo explícito (mismo lock de A0.2, FOR UPDATE sobre la fila
+      // singleton de company_settings) ANTES de leer currencyCode: sin
+      // él, esta comparación tendría la MISMA ventana de carrera que
+      // createDirect() tenía antes del cierre de A0.2 (un cambio de
+      // moneda concurrente podría confirmar justo después de leerse aquí
+      // el valor viejo, dejando esta conversión crear una Sale con una
+      // moneda que ya no es la vigente sin que el guardia de
+      // updateConfiguration() la hubiera visto todavía).
+      const [{ currencyCode: currentCompanyCurrencyCode }] = await tx.$queryRaw<
+        { currencyCode: string }[]
+      >(
+        Prisma.sql`SELECT currency_code AS "currencyCode" FROM company_settings WHERE singleton = true FOR UPDATE`,
+      );
+      if (currentCompanyCurrencyCode !== quote.currencyCode) {
+        throw new ConflictException(
+          `No se puede convertir la cotización: fue creada en ${quote.currencyCode}, pero la moneda vigente de la empresa ya cambió a ${currentCompanyCurrencyCode}`,
+        );
+      }
+
       const quoteItems: QuoteItemRow[] = await tx.quoteItem.findMany({
         where: { quoteId: quote.id },
         select: {
@@ -724,6 +775,54 @@ export class SalesService {
       const sale = await this.lockSale(tx, input.saleId);
       if (sale.status === SaleStatus.CANCELLED) {
         throw new ConflictException('La venta ya está anulada');
+      }
+
+      // A0.3 (post-MVP, dureza de integridad fiscal/contable; ampliado en
+      // la revisión previa al commit — decisión del cliente: opción B).
+      // Una venta con un comprobante electrónico "bloqueante" nunca se
+      // anula directamente — ni este MVP ni este bloque implementan notas
+      // de crédito. Bloqueante = CREATED/SUBMITTED/SUBMISSION_FAILED (una
+      // emisión o reintento todavía puede resolver a ACCEPTED) o ACCEPTED
+      // (ya resuelto, sin contraparte posible en Ventas/Inventario/
+      // Contabilidad). REJECTED es el ÚNICO estado que permite anular: es
+      // terminal sin ningún camino de reintento (transitionToSubmitted()
+      // solo acepta SUBMISSION_FAILED como origen, nunca REJECTED) y el
+      // índice único parcial electronic_documents_one_primary_per_sale
+      // (migration.sql, Fase 11A) garantiza que jamás exista un segundo
+      // documento primario "pendiente" en paralelo — así que "sin otra
+      // emisión/reintento pendiente" se cumple automáticamente para
+      // REJECTED, nunca hace falta una segunda consulta.
+      //
+      // Verificado ANTES de cualquier mutación (stock, pagos, contabilidad,
+      // Sale.status): un rechazo aquí no revierte nada porque todavía no
+      // se escribió nada. Cierre de la condición de carrera con la
+      // emisión: createFiscalDocument() (Fase 1 de issue()) toma el MISMO
+      // lock de la venta (FOR UPDATE) antes de decidir si puede crear el
+      // documento — ver su comentario para el análisis completo de ambos
+      // órdenes de llegada. Una vez que existe CUALQUIER fila con un
+      // estado bloqueante, esta lectura plana (sin lock adicional) ya la
+      // encuentra sin ninguna ventana: toda transición de estado del
+      // documento ocurre en su propia transacción ya comprometida antes
+      // de que el proveedor externo se llame (nunca con una transacción
+      // abierta esperando al proveedor).
+      const blockingDocument = await tx.electronicDocument.findFirst({
+        where: {
+          saleId: sale.id,
+          status: {
+            in: [
+              ElectronicDocumentStatus.CREATED,
+              ElectronicDocumentStatus.SUBMITTED,
+              ElectronicDocumentStatus.SUBMISSION_FAILED,
+              ElectronicDocumentStatus.ACCEPTED,
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      if (blockingDocument !== null) {
+        throw new ConflictException(
+          'No se puede anular la venta: tiene un comprobante electrónico en curso o aceptado (CREATED/SUBMITTED/SUBMISSION_FAILED/ACCEPTED; sin soporte de nota de crédito en este sistema)',
+        );
       }
 
       // Instante ÚNICO de la operación de anulación completa (Fase 8,

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -48,6 +49,20 @@ function createPrismaMock() {
       findUnique: jest.fn<Promise<unknown>, [CompanySettingsFindUniqueArgs]>(),
       update: jest.fn<Promise<unknown>, [CompanySettingsUpdateArgs]>(),
     },
+    // A0.2: guardia de cambio de moneda — por defecto sin historia
+    // financiera (null); las pruebas que necesitan bloquear el cambio
+    // sobrescriben uno de los dos.
+    sale: {
+      findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    },
+    accountingEntry: {
+      findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    },
+    // A0-review: lock explícito (FOR UPDATE) tomado solo cuando el PATCH
+    // incluye currencyCode — ver cierre de condición de carrera en
+    // updateConfiguration(). El resultado nunca se usa, solo el efecto
+    // de bloqueo; cualquier valor resuelto alcanza.
+    $queryRaw: jest.fn<Promise<unknown[]>, [Prisma.Sql]>(),
   };
 
   return {
@@ -74,6 +89,9 @@ describe('ConfigurationService', () => {
 
   beforeEach(() => {
     prisma = createPrismaMock();
+    prisma.tx.sale.findFirst.mockResolvedValue(null);
+    prisma.tx.accountingEntry.findFirst.mockResolvedValue(null);
+    prisma.tx.$queryRaw.mockResolvedValue([]);
     auditService = createAuditServiceMock();
     auditService.record.mockResolvedValue(undefined);
 
@@ -426,6 +444,174 @@ describe('ConfigurationService', () => {
 
       const updateArgs = prisma.tx.companySettings.update.mock.calls[0][0];
       expect(updateArgs.data).toEqual({ currencyCode: 'USD' });
+    });
+
+    describe('A0.2 — protección de cambio de moneda', () => {
+      it('reenviar la MISMA moneda ya vigente nunca consulta Sale/AccountingEntry (no-op, sin cambio real)', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+
+        await service.updateConfiguration({
+          currencyCode: 'pen',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(prisma.tx.sale.findFirst).not.toHaveBeenCalled();
+        expect(prisma.tx.accountingEntry.findFirst).not.toHaveBeenCalled();
+        expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      });
+
+      it('cambiar a una moneda distinta sin historia financiera: permitido', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.companySettings.update.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'USD' }),
+        );
+        prisma.tx.sale.findFirst.mockResolvedValue(null);
+        prisma.tx.accountingEntry.findFirst.mockResolvedValue(null);
+
+        const result = await service.updateConfiguration({
+          currencyCode: 'USD',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(result.currencyCode).toBe('USD');
+        expect(prisma.tx.companySettings.update).toHaveBeenCalledTimes(1);
+      });
+
+      it('cierre de carrera: toma el lock explícito (FOR UPDATE) cuando el PATCH incluye currencyCode', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.companySettings.update.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'USD' }),
+        );
+
+        await service.updateConfiguration({
+          currencyCode: 'USD',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(prisma.tx.$queryRaw).toHaveBeenCalledTimes(1);
+        const [sql] = prisma.tx.$queryRaw.mock.calls[0];
+        expect(sql.strings.join(' ')).toContain('FOR UPDATE');
+        expect(sql.strings.join(' ')).toContain('company_settings');
+      });
+
+      it('cierre de carrera: NO toma el lock cuando el PATCH no incluye currencyCode', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ businessName: 'X' }),
+        );
+        prisma.tx.companySettings.update.mockResolvedValue(
+          makeSettingsRow({ businessName: 'Otro' }),
+        );
+
+        await service.updateConfiguration({
+          businessName: 'Otro',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(prisma.tx.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('cierre de carrera: toma el lock incluso cuando currencyCode termina siendo un no-op (misma moneda)', async () => {
+        // El lock se evalúa antes de comparar con el valor existente (hace
+        // falta leer `existing` bajo el lock para decidir si es no-op), así
+        // que SÍ se toma aunque el PATCH normalice al mismo valor vigente.
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+
+        await service.updateConfiguration({
+          currencyCode: 'pen',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(prisma.tx.$queryRaw).toHaveBeenCalledTimes(1);
+      });
+
+      it('cambiar a una moneda distinta con al menos una Sale histórica: 409, sin UPDATE ni auditoría', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.sale.findFirst.mockResolvedValue({ id: 'sale-1' });
+        prisma.tx.accountingEntry.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.updateConfiguration({
+            currencyCode: 'USD',
+            actorUserId: ACTOR_ID,
+            requesterRole: RoleName.ADMIN,
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+
+      it('cambiar a una moneda distinta con al menos un AccountingEntry histórico (sin Sale encontrada): 409', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.sale.findFirst.mockResolvedValue(null);
+        prisma.tx.accountingEntry.findFirst.mockResolvedValue({
+          id: 'entry-1',
+        });
+
+        await expect(
+          service.updateConfiguration({
+            currencyCode: 'USD',
+            actorUserId: ACTOR_ID,
+            requesterRole: RoleName.ADMIN,
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.tx.companySettings.update).not.toHaveBeenCalled();
+      });
+
+      it('el chequeo ocurre dentro de la MISMA transacción del PATCH', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.sale.findFirst.mockResolvedValue({ id: 'sale-1' });
+
+        await expect(
+          service.updateConfiguration({
+            currencyCode: 'USD',
+            actorUserId: ACTOR_ID,
+            requesterRole: RoleName.ADMIN,
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+
+        // El mock de nivel superior `prisma.sale` (fuera de tx) no existe en
+        // este factory: la única forma de que la aserción pase es que el
+        // servicio haya consultado vía `tx.sale`, nunca `this.prisma.sale`.
+        expect(prisma.tx.sale.findFirst).toHaveBeenCalledTimes(1);
+      });
+
+      it('un cambio de moneda rechazado no impide actualizar otros campos en un PATCH posterior sin moneda', async () => {
+        prisma.tx.companySettings.findUnique.mockResolvedValue(
+          makeSettingsRow({ currencyCode: 'PEN' }),
+        );
+        prisma.tx.companySettings.update.mockResolvedValue(
+          makeSettingsRow({ businessName: 'Otro' }),
+        );
+
+        const result = await service.updateConfiguration({
+          businessName: 'Otro',
+          actorUserId: ACTOR_ID,
+          requesterRole: RoleName.ADMIN,
+        });
+
+        expect(result.businessName).toBe('Otro');
+        expect(prisma.tx.sale.findFirst).not.toHaveBeenCalled();
+        expect(prisma.tx.accountingEntry.findFirst).not.toHaveBeenCalled();
+      });
     });
 
     it('rechaza currencyCode con formato inválido', async () => {

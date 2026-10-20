@@ -281,13 +281,20 @@ interface QueryRawRouterConfig {
   quote?: Record<string, unknown> | null;
   sale?: Record<string, unknown> | null;
   products?: Map<string, Record<string, unknown>>;
+  // A0-review: moneda vigente de la empresa, para el lock + lectura de
+  // company_settings que createFromQuote() toma antes de comparar contra
+  // Quote.currencyCode. 'PEN' por defecto (coincide con el default de
+  // makeQuoteRow()) para que los tests que no les interesa esta regla no
+  // necesiten especificarlo.
+  companySettingsCurrencyCode?: string;
 }
 
 /**
  * `$queryRaw` se enruta por el contenido literal del SQL (nunca por orden
  * de llamada): SalesService ejecuta varias consultas raw distintas dentro
  * de una misma transacción (cliente, producto por producto, cotización,
- * venta), así que un único mockResolvedValue no alcanza.
+ * venta, configuración de la empresa), así que un único mockResolvedValue
+ * no alcanza.
  */
 function createQueryRawRouter(config: QueryRawRouterConfig) {
   return jest.fn((query: Prisma.Sql) => {
@@ -297,6 +304,11 @@ function createQueryRawRouter(config: QueryRawRouterConfig) {
     }
     if (sqlText.includes('FROM quotes')) {
       return Promise.resolve(config.quote ? [config.quote] : []);
+    }
+    if (sqlText.includes('FROM company_settings')) {
+      return Promise.resolve([
+        { currencyCode: config.companySettingsCurrencyCode ?? 'PEN' },
+      ]);
     }
     if (sqlText.includes('FROM sales')) {
       return Promise.resolve(config.sale ? [config.sale] : []);
@@ -332,6 +344,9 @@ function createTxMock() {
     },
     payment: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+    },
+    electronicDocument: {
+      findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     },
   };
 }
@@ -490,6 +505,9 @@ describe('SalesService', () => {
     prisma.tx.customer.update.mockResolvedValue(makeCustomerRow());
     prisma.tx.inventoryMovement.findMany.mockResolvedValue([]);
     prisma.tx.payment.findMany.mockResolvedValue([makePaymentRow()]);
+    // A0.3: por defecto, sin comprobante electrónico ACEPTADO — las
+    // pruebas de cancel() que sí necesitan uno lo sobrescriben.
+    prisma.tx.electronicDocument.findFirst.mockResolvedValue(null);
     prisma.inventoryMovement.findMany.mockResolvedValue([]);
     prisma.sale.findUnique.mockResolvedValue(makeSaleDetailRow());
   });
@@ -512,6 +530,18 @@ describe('SalesService', () => {
     it('crea correctamente y devuelve SafeSale', async () => {
       const result = await service.createDirect(validDirectInput);
       expect(result.id).toBe(SALE_ID);
+    });
+
+    it('A0-review: bloquea company_settings (FOR UPDATE) antes de leer currencyCode, para cerrar la carrera con A0.2', async () => {
+      await service.createDirect(validDirectInput);
+      const lockCall = prisma.tx.$queryRaw.mock.calls.find((call) =>
+        call[0].strings.join(' ').includes('company_settings'),
+      );
+      expect(lockCall).toBeDefined();
+      expect((lockCall?.[0] as Prisma.Sql).strings.join(' ')).toContain(
+        'FOR UPDATE',
+      );
+      expect(settingsReader.getCurrent).toHaveBeenCalledTimes(1);
     });
 
     it('Fase 11, Bloque B: snapshotea currencyCode/taxEnabled/taxRate con el MISMO settings ya leído para taxAmount, sin una segunda lectura', async () => {
@@ -2268,11 +2298,13 @@ describe('SalesService', () => {
       ).resolves.toBeDefined();
     });
 
-    it('Fase 11, Bloque B: copia currencyCode/taxEnabled/taxRate VERBATIM de Quote, incluso si CompanySettings vigente ya difiere', async () => {
-      // La cotización quedó snapshoteada con USD/true/20.00; CompanySettings
-      // vigente al momento de la conversión es completamente distinto
-      // (PEN/false/18.00, el default de makeSettingsSnapshot()) — nunca debe
-      // usarse, ni siquiera leerse, para estos 3 campos.
+    it('Fase 11, Bloque B: copia taxEnabled/taxRate VERBATIM de Quote, incluso si CompanySettings vigente ya difiere en esos dos campos', async () => {
+      // La cotización quedó snapshoteada con taxEnabled=true/taxRate=20.00;
+      // CompanySettings vigente al momento de la conversión es distinto en
+      // AMBOS (false/18.00) — nunca debe usarse, ni siquiera leerse, para
+      // estos 2 campos. currencyCode SÍ se compara desde A0-review (ver el
+      // describe dedicado más abajo), así que aquí coincide a propósito
+      // (USD/USD) para aislar la aserción de taxEnabled/taxRate.
       prisma.tx.$queryRaw.mockImplementation(
         createQueryRawRouter({
           customer: makeCustomerRow(),
@@ -2282,6 +2314,7 @@ describe('SalesService', () => {
             taxRate: new Prisma.Decimal('20.00'),
           }),
           products: new Map([[PRODUCT_ID, makeProductRow()]]),
+          companySettingsCurrencyCode: 'USD',
         }),
       );
       await service.createFromQuote(validConvertInput);
@@ -2293,8 +2326,56 @@ describe('SalesService', () => {
       expect(createArgs.data.taxRate).toEqual(new Prisma.Decimal('20.00'));
       // D18 aprobado (Fase 6): la conversión NUNCA llama a SettingsReader
       // para el snapshot comercial/fiscal — ni siquiera para leerlo y
-      // descartarlo.
+      // descartarlo. El chequeo de moneda de A0-review usa su propia
+      // consulta $queryRaw dedicada, nunca SettingsReader.
       expect(settingsReader.getCurrent).not.toHaveBeenCalled();
+    });
+
+    describe('A0-review — protección de moneda en la conversión', () => {
+      it('Quote.currencyCode distinto de la moneda vigente de la empresa -> 409, sin crear nada', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            quote: makeQuoteRow({ currencyCode: 'PEN' }),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            companySettingsCurrencyCode: 'USD',
+          }),
+        );
+
+        await expect(
+          service.createFromQuote(validConvertInput),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+        expect(prisma.tx.quote.update).not.toHaveBeenCalled();
+        expect(accountingEngine.postSaleRecognition).not.toHaveBeenCalled();
+      });
+
+      it('Quote.currencyCode igual a la moneda vigente -> conversión permitida', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            quote: makeQuoteRow({ currencyCode: 'USD' }),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+            companySettingsCurrencyCode: 'USD',
+          }),
+        );
+
+        await expect(
+          service.createFromQuote(validConvertInput),
+        ).resolves.toBeDefined();
+      });
+
+      it('toma el lock explícito (FOR UPDATE) sobre company_settings antes de comparar', async () => {
+        await service.createFromQuote(validConvertInput);
+
+        const lockCall = prisma.tx.$queryRaw.mock.calls.find((call) =>
+          call[0].strings.join(' ').includes('company_settings'),
+        );
+        expect(lockCall).toBeDefined();
+        expect((lockCall?.[0] as Prisma.Sql).strings.join(' ')).toContain(
+          'FOR UPDATE',
+        );
+      });
     });
 
     it.each([false, true])(
@@ -3428,6 +3509,48 @@ describe('SalesService', () => {
       expect((saleCall?.[0] as Prisma.Sql).strings.join(' ')).toContain(
         'FOR UPDATE',
       );
+    });
+
+    describe('A0.3 — comprobante electrónico (ampliado en la revisión previa al commit, opción B)', () => {
+      it('comprobante bloqueante encontrado -> 409, sin ninguna mutación (stock, pagos, contabilidad, auditoría)', async () => {
+        prisma.tx.electronicDocument.findFirst.mockResolvedValue({
+          id: 'edoc-1',
+        });
+
+        await expect(service.cancel(validCancelInput)).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+
+        expect(engine.apply).not.toHaveBeenCalled();
+        expect(paymentEngine.cancelAllActiveForSale).not.toHaveBeenCalled();
+        expect(
+          accountingEngine.reverseOriginalForSource,
+        ).not.toHaveBeenCalled();
+        expect(prisma.tx.sale.update).not.toHaveBeenCalled();
+        expect(auditService.record).not.toHaveBeenCalled();
+      });
+
+      it('consulta el comprobante exclusivamente por saleId + status IN (CREATED, SUBMITTED, SUBMISSION_FAILED, ACCEPTED) — REJECTED explícitamente fuera', async () => {
+        await service.cancel(validCancelInput);
+
+        expect(prisma.tx.electronicDocument.findFirst).toHaveBeenCalledWith({
+          where: {
+            saleId: SALE_ID,
+            status: {
+              in: ['CREATED', 'SUBMITTED', 'SUBMISSION_FAILED', 'ACCEPTED'],
+            },
+          },
+          select: { id: true },
+        });
+      });
+
+      it('sin comprobante bloqueante (REJECTED, o inexistente): la anulación procede normalmente', async () => {
+        prisma.tx.electronicDocument.findFirst.mockResolvedValue(null);
+
+        await expect(service.cancel(validCancelInput)).resolves.toBeDefined();
+
+        expect(prisma.tx.sale.update).toHaveBeenCalled();
+      });
     });
 
     describe('normalización de motivo', () => {

@@ -242,7 +242,10 @@ export class SalesController {
     description: 'Motivo de anulación ausente, vacío o demasiado largo.',
   })
   @ApiNotFoundResponse({ description: 'No existe.' })
-  @ApiConflictResponse({ description: 'La venta ya está anulada.' })
+  @ApiConflictResponse({
+    description:
+      'La venta ya está anulada, o tiene un comprobante electrónico en curso o aceptado (CREATED/SUBMITTED/SUBMISSION_FAILED/ACCEPTED; sin soporte de nota de crédito en este sistema). Un comprobante REJECTED no bloquea la anulación.',
+  })
   @Roles(...CANCEL_ROLES)
   @Post(':id/cancel')
   @HttpCode(HttpStatus.OK)

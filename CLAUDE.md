@@ -79,7 +79,7 @@ Reglas de capas:
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código. Desde NR-01, los 5 métodos activos nacen con `requiresReference=false` en el baseline (`prisma/seed.ts`): la referencia es opcional por defecto en todos ellos, sin dejar de ser editable por ADMIN vía `PATCH /payment-methods/:id` (ver §11).
-12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones.
+12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones. Esto es lo que existe implementado hoy; el cliente aprobó (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE, periodos contables, asientos manuales, libro diario/mayor, balance de comprobación, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
@@ -177,6 +177,8 @@ No implementar, ni preparar abstracciones anticipadas para:
 - Integraciones externas
 
 Si una tarea parece requerir algo de esta lista, **detenerse y consultar** antes de implementar.
+
+> **Nota (Fase A0, ver §11):** el cliente aprobó un roadmap de Contabilidad empresarial (PCGE, periodos, libros, compras/cuentas por pagar, multimoneda) que algún día alcanzará varios puntos de esta lista (Compras y proveedores, Kardex valorizado, Multi-moneda). Esa aprobación es de **dirección estratégica**, no de implementación: cada capacidad sigue fuera de alcance hasta que se apruebe puntualmente y se implemente en una fase dedicada. Un futuro módulo de Importaciones (no iniciado) dependerá de esa base contable. Facturación electrónica SUNAT real, Alquileres, CRM avanzado, Ecommerce, Aplicación móvil e Integraciones externas no forman parte de este roadmap y siguen fuera de alcance sin excepción.
 
 ---
 
@@ -370,8 +372,8 @@ unitarias**; **31 suites / 1250 pruebas E2E en dos ejecuciones consecutivas**
 (exit code 0 ambas); `lint:check` y `build` correctos.
 
 **NR-01 — referencia de pago opcional por defecto** (rama
-`feat/optional-payment-references`, base `main` en `ab280a9`, **en curso,
-sin PR ni merge todavía**): los 5 métodos de pago activos (`CASH`, `CARD`,
+`feat/optional-payment-references`, **fusionada a `main` vía PR #25**):
+los 5 métodos de pago activos (`CASH`, `CARD`,
 `TRANSFER`, `YAPE`, `PLIN`) nacen con `requiresReference=false` en el
 baseline (`SEED_PAYMENT_METHODS`, `prisma/seed.ts`) — antes solo `CASH` lo
 tenía así; los 4 métodos legacy inactivos no cambian. La referencia sigue
@@ -386,12 +388,10 @@ seedeada (incluida `pos_db`, demo o producción); para una instalación
 existente, aplicar el nuevo baseline requiere una acción ADMIN separada
 (el mismo `PATCH` por método) — no ocurre por desplegar este cambio ni por
 reejecutar el seed. No se modificó ningún dato histórico (`Payment.reference`
-de pagos ya registrados queda intacto). Pendiente: ejecución E2E completa
-(no realizada en la sesión de implementación, que fue sin acceso a base de
-datos) y autorización para commit/push/PR.
+de pagos ya registrados queda intacto).
 
-**NR-04 — alertas de stock bajo** (rama `feat/low-stock-alerts`, base `main`
-en `1a86ae5`, **en curso, sin PR ni merge todavía**): corrige una nota
+**NR-04 — alertas de stock bajo** (rama `feat/low-stock-alerts`,
+**fusionada a `main` vía PR #28**): corrige una nota
 desactualizada de este documento — el umbral de stock bajo configurable por
 producto (`Product.stockMinimum`, `GET /inventory/low-stock`) ya existía
 desde la Fase 9, Bloque A (R5/R6), bien probado y documentado en código,
@@ -402,8 +402,127 @@ arquitectura por completo (sin umbral global ni tabla nueva) y añade
 expuesta en `GET /inventory/low-stock`, y un default de 3 unidades para
 `stockMinimum` cuando `POST /products` lo omite en un producto inventariable
 nuevo (los productos SERVICE/no inventariables siguen naciendo en 0; ningún
-producto ya existente se ve afectado). Pendiente: ejecución E2E (preparada,
-no ejecutada) y autorización para commit/push/PR.
+producto ya existente se ve afectado).
+
+**Fase A0 — ampliación de alcance de Contabilidad y dureza de integridad
+financiera** (rama `feat/accounting-a0-hardening`, base `main` en `eec645c`,
+**implementada y validada, sin commit/push/PR todavía** — pendiente de
+autorización explícita del cliente):
+
+- **Aprobación de dirección estratégica.** El cliente aprobó ampliar
+  DemoSystem POS de precontabilidad básica a un módulo de Contabilidad
+  empresarial completo, usando el ERP peruano ContaNet únicamente como
+  referencia FUNCIONAL — nunca como integración ni código a copiar. El
+  roadmap aprobado (PCGE, periodos contables, asientos manuales, libro
+  diario/mayor, balance de comprobación, compras y cuentas por pagar,
+  tesorería, multimoneda; un futuro módulo de Importaciones después de esa
+  base) es una aprobación de **dirección**, no de implementación: ninguna
+  de esas capacidades existe todavía en el código, y cada una requiere su
+  propio plan aprobado antes de escribirse. `AccountingEngine`
+  (`src/accounting/accounting.engine.ts`) sigue siendo el ÚNICO motor de
+  posteo contable; A0 no introduce un segundo escritor ni modifica su
+  comportamiento existente. Las políticas contables/tributarias de detalle
+  requieren validación de un contador peruano antes de implementarse.
+- **A0.2 — protección de cambio de moneda.** `ConfigurationService.
+  updateConfiguration()` (`src/configuration/configuration.service.ts`)
+  rechaza con 409 un cambio de `CompanySettings.currencyCode` a un valor
+  DISTINTO del vigente en cuanto ya existe al menos una `Sale` o un
+  `AccountingEntry` (sin filtrar por estado: un registro `CANCELLED`
+  también es historia real). El chequeo corre dentro de la misma
+  transacción del PATCH, como el último paso antes del `UPDATE`.
+  Reenviar la misma moneda ya vigente sigue funcionando como no-op; no se
+  introduce multimoneda ni conversión alguna.
+- **A0.3 — protección de anulación con comprobante ACEPTADO.**
+  `SalesService.cancel()` (`src/sales/sales.service.ts`) rechaza con 409,
+  ANTES de cualquier mutación (stock, pagos, contabilidad, auditoría), la
+  anulación de una venta con un `ElectronicDocument` en estado `ACCEPTED`
+  — este sistema no implementa notas de crédito. El resto de las reglas de
+  anulación (venta ya `CANCELLED`, motivo obligatorio, reversión de stock
+  y contabilidad) queda intacto.
+- **Compatibilidad de pruebas existentes.** 4 pruebas e2e preexistentes
+  asumían un comportamiento que A0 vuelve inválido a propósito: 3 en
+  `test/configuration-tax.e2e-spec.ts` §46 (cambiaban `currencyCode` en
+  vivo con historia financiera ya creada por la misma suite — ahora fijan
+  la moneda como fixture vía escritura directa de Prisma, igual criterio
+  que `withTemporarilyRemovedAccount()` en `accounting.e2e-spec.ts`) y 1
+  en `test/electronic-invoicing-api.e2e-spec.ts` (R2-B6: anulaba una venta
+  con comprobante `ACCEPTED` — ahora confirma el 409 explícitamente y
+  continúa probando el resto del caso con la venta `ACTIVE`). Se agregaron
+  además pruebas unitarias y e2e dedicadas para ambos casos (aceptado y
+  rechazado) de A0.2/A0.3.
+- **Revisión previa al commit — cierre de condición de carrera (A0.2).**
+  El guardia original de A0.2 comprobaba Sale/AccountingEntry SIN ningún
+  lock: bajo READ COMMITTED (el nivel por defecto de Prisma, sin cambios
+  en A0), una venta directa confirmándose en paralelo podía quedar
+  invisible para el guardia y comprometerse DESPUÉS de que el cambio de
+  moneda ya decidiera "sin historia" — exactamente el estado mixto que
+  A0.2 existe para impedir. Cerrado con un lock explícito simétrico
+  (`SELECT ... FOR UPDATE` sobre la fila singleton de `company_settings`)
+  en ambos lados: `ConfigurationService.updateConfiguration()` (solo
+  cuando el PATCH incluye `currencyCode`) y `SalesService.createDirect()`
+  (siempre, antes de leer `currencyCode` para el snapshot de la venta;
+  `createFromQuote()` no lo necesita — copia el snapshot ya congelado de
+  la cotización, nunca relee `CompanySettings`). Verificado con una
+  prueba de concurrencia real (dos peticiones HTTP en paralelo contra
+  Postgres real, mismo patrón que `accounting.e2e-spec.ts` §68-§73) en
+  `test/configuration-tax.e2e-spec.ts` §47, estable en 4 ejecuciones.
+- **Revisión previa al commit — robustez de fixtures E2E.** Los 3 tests
+  de `test/configuration-tax.e2e-spec.ts` §46 que fijan `currencyCode`
+  como fixture ahora envuelven su cuerpo en `try/finally`: antes, un
+  `expect()` fallido a mitad de prueba dejaba la moneda en `USD` para el
+  resto de la corrida completa (archivos ajenos incluidos), y A0.2 ya
+  impedía que el `afterAll` de ese mismo archivo la revirtiera por la vía
+  normal (PATCH) una vez creada la historia financiera de la suite.
+  `createTestPrismaClient()`/`jest-e2e.setup.ts` ya verificaban (sin
+  relación con A0) que estos escrituras directas de Prisma solo pueden
+  apuntar a `pos_db_test`, nunca a `pos_db`.
+- **Cierre final — A0.3, decisión del cliente: opción B.** El hallazgo
+  anterior (carrera emisión vs. anulación, `persistProviderOutcome()`
+  nunca revisaba si la venta había sido anulada mientras tanto) quedó
+  **corregido**, no solo documentado:
+  - `SalesService.cancel()` ahora rechaza (409) con un comprobante
+    primario en `CREATED`, `SUBMITTED`, `SUBMISSION_FAILED` o `ACCEPTED`
+    — solo `REJECTED` permite anular (es terminal: ningún camino de
+    reintento existe desde `REJECTED`, y el índice único parcial
+    `electronic_documents_one_primary_per_sale` garantiza que nunca haya
+    un segundo documento primario en paralelo).
+  - `ElectronicDocumentsService.createFiscalDocument()` (Fase 1 de
+    `issue()`) toma el MISMO lock de la venta (`SELECT ... FOR UPDATE`)
+    antes de leerla, simétrico con `SalesService.cancel()` (`lockSale()`).
+    Esto cierra el único hueco real: el intervalo ANTES de que exista
+    cualquier fila `ElectronicDocument` (una vez que existe, con
+    cualquier estado bloqueante, `cancel()` ya la encuentra con una
+    lectura plana sin necesitar lock adicional). Ninguna transacción
+    queda abierta esperando al proveedor externo (sin cambios ahí).
+  - Verificado con una prueba de concurrencia real (dos peticiones HTTP
+    en paralelo — emitir comprobante vs. anular la misma venta — contra
+    Postgres real) en `test/electronic-invoicing-api.e2e-spec.ts`, más
+    pruebas deterministas para cada estado (`SUBMISSION_FAILED` bloquea,
+    `REJECTED` permite, vía proveedores de prueba dedicados).
+- **Cierre final — riesgo confirmado en la conversión Cotización -> Venta
+  (tarea 2).** `Quote.currencyCode` nunca participaba en el guardia de
+  A0.2 (que solo mira `Sale`/`AccountingEntry`), así que era posible:
+  1) cotización creada en PEN, 2) sin historia financiera todavía, 3) la
+  moneda de la empresa cambia a USD (A0.2 lo permite, correctamente, no
+  hay historia que lo bloquee), 4) la conversión de esa cotización crea
+  una `Sale`/`AccountingEntry` en PEN mientras `CompanySettings` ya dice
+  USD — el mismo estado mixto que A0.2 existe para impedir, alcanzado
+  por una vía distinta. **Corregido**: `SalesService.createFromQuote()`
+  ahora compara `Quote.currencyCode` contra la moneda vigente (tomando
+  el MISMO lock de `company_settings` que A0.2) y rechaza la conversión
+  con 409 si difieren, sin convertir ni reescribir ningún monto ni la
+  cotización histórica. Verificado en
+  `test/configuration-tax.e2e-spec.ts` §48 (caso bloqueado y caso
+  permitido); la concurrencia específica moneda-vs-conversión reutiliza
+  el mismo primitivo de lock ya validado por la prueba de concurrencia
+  real de A0.2 (§47) — no se duplicó un segundo escenario de carrera de
+  bajo valor en un archivo cuya historia financiera compartida ya
+  garantiza que el PATCH de moneda pierda siempre frente a ventas
+  previas de la misma suite.
+- **Validación final:** 88 suites / 3107 pruebas unitarias; 31 suites /
+  1332 pruebas E2E en dos ejecuciones consecutivas (exit code 0 ambas);
+  `lint:check` y `build` correctos. Sin cambios de esquema ni migración
+  nueva (A0 es exclusivamente lógica de servicio sobre tablas existentes).
 
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
@@ -421,8 +540,10 @@ conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
 aislamiento global no está completamente resuelto); 11 errores preexistentes
 en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **15** (sin cambios por el requerimiento de propiedad
-por vendedor: es exclusivamente de autorización, sin alteraciones de esquema).
+Migraciones totales: **17** (conteo corregido; la cifra anterior de esta
+sección —15— estaba desactualizada). Sin cambios por el requerimiento de
+propiedad por vendedor ni por la Fase A0: ambos son exclusivamente de
+autorización/lógica de servicio, sin alteraciones de esquema.
 
 ---
 
