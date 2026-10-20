@@ -1,5 +1,6 @@
 import { InternalServerErrorException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { fromPrismaDate } from '../../common/date/business-date';
 import {
   SafeAccountingEntry,
   SafeAccountingEntryListItem,
@@ -55,6 +56,9 @@ export const ACCOUNTING_ENTRY_LIST_SELECT = {
   description: true,
   postedAt: true,
   createdAt: true,
+  accountingDate: true,
+  periodId: true,
+  journalNumber: true,
 } satisfies Prisma.AccountingEntrySelect;
 
 export type AccountingEntryListRow = Prisma.AccountingEntryGetPayload<{
@@ -73,6 +77,9 @@ export function toSafeAccountingEntryListItem(
     description: row.description,
     postedAt: row.postedAt,
     createdAt: row.createdAt,
+    accountingDate: fromPrismaDate(row.accountingDate),
+    periodId: row.periodId,
+    journalNumber: row.journalNumber,
   };
 }
 
@@ -99,6 +106,9 @@ export const ACCOUNTING_ENTRY_DETAIL_SELECT = {
   description: true,
   postedAt: true,
   createdAt: true,
+  accountingDate: true,
+  periodId: true,
+  journalNumber: true,
   createdBy: { select: ACCOUNTING_ENTRY_USER_SELECT },
   lines: {
     select: {
@@ -129,6 +139,9 @@ export function toSafeAccountingEntry(
     description: row.description,
     postedAt: row.postedAt,
     createdAt: row.createdAt,
+    accountingDate: fromPrismaDate(row.accountingDate),
+    periodId: row.periodId,
+    journalNumber: row.journalNumber,
     createdBy: row.createdBy,
     lines: row.lines.map((line) => ({
       id: line.id,

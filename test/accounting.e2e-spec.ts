@@ -23,8 +23,10 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AuditAction } from '../src/audit/audit-action.enum';
 import {
+  businessToday,
   endOfBusinessDayExclusiveUtc,
   startOfBusinessDayUtc,
+  toPrismaDate,
 } from '../src/common/date/business-date';
 import { assertAuditRowHasNoSecrets } from './helpers/audit-assertions';
 import {
@@ -102,6 +104,9 @@ interface SafeAccountingEntryListItemBody {
   description: string;
   postedAt: string;
   createdAt: string;
+  accountingDate: string;
+  periodId: string;
+  journalNumber: number;
 }
 
 interface SafeAccountingUserBody {
@@ -704,6 +709,34 @@ describe('Basic Accounting (e2e)', () => {
    * las pruebas de invariantes de base de datos (§45-§60). `id` fijo
    * opcional para escenarios de auto-reversa (§49).
    */
+  /**
+   * Fase A2: réplica mínima (fuera de AccountingEngine, igual criterio que
+   * el equivalente en payments.e2e-spec.ts) de la resolución de periodo/
+   * número de asiento, para los INSERT crudos de abajo.
+   */
+  async function resolveRawFixturePeriod(postedAt: Date): Promise<{
+    accountingDate: Date;
+    periodId: string;
+    journalNumber: number;
+  }> {
+    const dateOnly = businessToday(postedAt);
+    const [year, month] = dateOnly.split('-').map(Number);
+    const period = await prisma.accountingPeriod.upsert({
+      where: { year_month: { year, month } },
+      update: {},
+      create: { year, month },
+    });
+    const updated = await prisma.accountingPeriod.update({
+      where: { id: period.id },
+      data: { lastJournalNumber: { increment: 1 } },
+    });
+    return {
+      accountingDate: toPrismaDate(dateOnly),
+      periodId: period.id,
+      journalNumber: updated.lastJournalNumber,
+    };
+  }
+
   async function rawInsertEntry(overrides: {
     id?: string;
     sourceType?: AccountingSourceType;
@@ -724,14 +757,18 @@ describe('Basic Accounting (e2e)', () => {
       postedAt: overrides.postedAt ?? new Date(),
       createdByUserId: overrides.createdByUserId ?? adminId,
     };
+    const { accountingDate, periodId, journalNumber } =
+      await resolveRawFixturePeriod(o.postedAt);
     const rows = await prisma.$queryRaw<{ id: string }[]>`
       INSERT INTO accounting_entries
         (id, source_type, source_id, event_type, reverses_entry_id,
-         description, posted_at, created_by_user_id, created_at)
+         description, posted_at, accounting_date, period_id, journal_number,
+         created_by_user_id, created_at)
       VALUES
         (${o.id}::uuid, ${o.sourceType}::"AccountingSourceType", ${o.sourceId}::uuid,
          ${o.eventType}::"AccountingEventType", ${o.reversesEntryId}::uuid,
-         ${o.description}, ${o.postedAt}::timestamp, ${o.createdByUserId}::uuid, now())
+         ${o.description}, ${o.postedAt}::timestamp, ${accountingDate}::date,
+         ${periodId}::uuid, ${journalNumber}, ${o.createdByUserId}::uuid, now())
       RETURNING id
     `;
     return rows[0].id;
@@ -2148,6 +2185,10 @@ describe('Basic Accounting (e2e)', () => {
             'description',
             'postedAt',
             'createdAt',
+            // Fase A2.6: extensión aditiva retrocompatible.
+            'accountingDate',
+            'periodId',
+            'journalNumber',
           ].sort(),
         );
       }
@@ -2184,6 +2225,10 @@ describe('Basic Accounting (e2e)', () => {
           'createdAt',
           'createdBy',
           'lines',
+          // Fase A2.6: extensión aditiva retrocompatible.
+          'accountingDate',
+          'periodId',
+          'journalNumber',
         ].sort(),
       );
       expect(Object.keys(body.createdBy).sort()).toEqual(

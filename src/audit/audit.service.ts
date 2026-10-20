@@ -437,6 +437,13 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'fromAccountCode',
     'toAccountCode',
   ],
+  // ACCOUNTING_PERIOD_ (Fase A2.1/A2.6): AccountingPeriodsService es su
+  // único emisor. Solo year/month (identidad legible del periodo, sin
+  // depender de entityId): nunca status/lastJournalNumber ni los ids del
+  // actor (ya los registra RecordAuditLogInput.userId por separado).
+  [AuditAction.ACCOUNTING_PERIOD_OPENED]: ['year', 'month'],
+  [AuditAction.ACCOUNTING_PERIOD_CLOSED]: ['year', 'month'],
+  [AuditAction.ACCOUNTING_PERIOD_REOPENED]: ['year', 'month'],
 };
 
 function isPlainObject(

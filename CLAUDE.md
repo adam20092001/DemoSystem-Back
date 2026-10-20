@@ -79,7 +79,7 @@ Reglas de capas:
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código. Desde NR-01, los 5 métodos activos nacen con `requiresReference=false` en el baseline (`prisma/seed.ts`): la referencia es opcional por defecto en todos ellos, sin dejar de ser editable por ADMIN vía `PATCH /payment-methods/:id` (ver §11).
-12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones. Esto es lo que existe implementado hoy; el cliente aprobó (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE, periodos contables, asientos manuales, libro diario/mayor, balance de comprobación, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
+12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones, agrupados en **periodos contables mensuales** (`AccountingPeriod`, Fase A2.1) con ciclo de vida OPEN/CLOSED, **fecha contable** propia por asiento (`AccountingEntry.accountingDate`, zona America/Lima, Fase A2.2) y **numeración secuencial** sin huecos dentro de cada periodo (`AccountingEntry.journalNumber`, Fase A2.3) — ver detalle en §11. El cliente aprobó además (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE —cuyo plan de cuentas jerárquico ya existe desde la Fase A1, ver §11—, asientos manuales, libro diario/mayor, balance de comprobación, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía salvo lo ya descrito arriba. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
@@ -524,6 +524,127 @@ autorización explícita del cliente):
   `lint:check` y `build` correctos. Sin cambios de esquema ni migración
   nueva (A0 es exclusivamente lógica de servicio sobre tablas existentes).
 
+**Fase A2 — periodos contables, fecha contable y numeración de asientos**
+(rama `feat/accounting-a2-periods`, base `main` en `795b1f0`, **implementada
+y validada, sin commit/push/PR todavía** — pendiente de autorización
+explícita del cliente; migración aplicada EXCLUSIVAMENTE en `pos_db_test`,
+nunca en `pos_db`). Construye sobre A1 (plan de cuentas jerárquico PCGE,
+ya fusionado a `main` vía PR #31) la base técnica reutilizable para A3
+(libro diario/mayor, balance de comprobación): `AccountingEngine` sigue
+siendo el ÚNICO escritor de `AccountingEntry`/`AccountingEntryLine`; A2 no
+introduce un segundo escritor ni reemplaza su comportamiento existente de
+SALE/PAYMENT.
+
+- **A2.1 — Periodos contables mensuales.** Modelo nuevo `AccountingPeriod`
+  (`year`+`month` únicos, `status` `OPEN`/`CLOSED`, `lastJournalNumber`
+  como contador transaccional). Administración EXPLÍCITA (listar, detalle,
+  abrir/crear por adelantado, cerrar, reabrir) vía
+  `GET/POST /api/v1/accounting/periods`,
+  `POST /api/v1/accounting/periods/:id/close`,
+  `POST /api/v1/accounting/periods/:id/reopen` — ADMIN administra,
+  MANAGEMENT solo lee, SELLER/WAREHOUSE sin ningún acceso (mismo criterio
+  que el resto del dominio contable). Distinta de la auto-creación
+  IMPLÍCITA: `AccountingEngine` crea automáticamente, dentro de su propia
+  transacción de posteo, el periodo del mes en curso como `OPEN` la primera
+  vez que lo necesita (`INSERT ... ON CONFLICT (year, month) DO NOTHING`,
+  atómico y seguro bajo dos transacciones concurrentes) — la actividad
+  comercial normal nunca se bloquea porque nadie inicializó manualmente el
+  mes vigente. Un periodo `CLOSED` nunca se reabre automáticamente: siempre
+  requiere `POST .../reopen` explícito y auditado (`ACCOUNTING_PERIOD_
+  OPENED`/`CLOSED`/`REOPENED`); la auto-creación implícita nunca audita por
+  sí misma (ya queda evidenciada por el `ACCOUNTING_ENTRY_POSTED` del
+  asiento que la disparó).
+- **A2.2 — Fecha contable.** `AccountingEntry.accountingDate` (`@db.Date`,
+  nueva) se deriva siempre de `postedAt` (el mismo instante factual ya
+  existente: `Sale.confirmedAt`/`Payment.paidAt`/el instante de una
+  anulación) en la zona de negocio única del MVP, **America/Lima**,
+  reutilizando `businessToday()`/`toPrismaDate()` de
+  `common/date/business-date.ts` (ya usadas por los filtros de rango de
+  `GET /accounting/entries`) en vez de un segundo cálculo de huso horario
+  paralelo. `postedAt` conserva su significado histórico sin cambios. Un
+  asiento REVERSAL usa la fecha contable de SU PROPIO `postedAt` (el
+  instante de la anulación), nunca la del asiento ORIGINAL que revierte.
+  Ninguna API comercial permite retrofechar: `postedAt` siempre es
+  `new Date()` generado por el backend en el instante de la operación,
+  nunca un valor enviado por el cliente — invariante preexistente, sin
+  cambios en A2.
+- **A2.3 — Numeración secuencial.** `AccountingEntry.journalNumber`, único
+  y sin huecos **dentro de su periodo** (`@@unique([periodId,
+  journalNumber])`, nunca global), asignado mediante el mismo patrón
+  transaccional ya usado por `DocumentSequenceService.next()`: un único
+  `UPDATE accounting_periods SET last_journal_number = last_journal_number
+  + 1 ... WHERE id = ? AND status = 'OPEN' RETURNING last_journal_number`
+  dentro de la misma transacción que crea el asiento — nunca una secuencia
+  de PostgreSQL (`CREATE SEQUENCE`), cuyo `nextval()` no revertiría junto
+  con un `ROLLBACK` y dejaría huecos en la numeración ya comprometida. El
+  mismo `UPDATE` resuelve a la vez la validación "periodo OPEN" (0 filas
+  `RETURNING` -> 409) y el lock de concurrencia (ver A2.4). Un asiento
+  REVERSAL recibe su propio número, nunca reutiliza el del ORIGINAL. Sin
+  edición manual posible.
+- **A2.4 — Integración con AccountingEngine y concurrencia.**
+  `AccountingEngine` resuelve periodo+fecha contable+número dentro de
+  `postOriginal()`/`reverseOriginalForSource()`, antes del `INSERT` del
+  asiento, con el `tx` del llamador (SalesService/PaymentEngine, sin
+  cambios en su forma de invocar al motor). Garantías de concurrencia,
+  todas basadas en locking de fila de PostgreSQL (READ COMMITTED, sin
+  locks adicionales ni nuevos puntos de deadlock con los locks existentes
+  de Sale/company_settings):
+  - *Posteo vs. cierre del mismo periodo*: el `UPDATE` condicionado a
+    `status='OPEN'` serializa contra el `UPDATE status=CLOSED` del cierre
+    — cualquiera que tome el lock de la fila primero gana; nunca un
+    asiento nuevo comprometido después de que el periodo ya cerró.
+  - *Dos posteos simultáneos en el mismo periodo*: PostgreSQL serializa
+    ambos `UPDATE` sobre la misma fila; números consecutivos, nunca
+    duplicados.
+  - *Reversión vs. cierre*: mismo mecanismo exacto (la reversión también
+    pasa por `resolvePeriodAndAssignNumber()`).
+  - *Creación concurrente del mismo periodo nuevo*: `INSERT ... ON
+    CONFLICT DO NOTHING` es atómico; ninguna de las dos transacciones
+    falla ni duplica la fila.
+  Las cuatro verificadas con pruebas E2E reales contra PostgreSQL (ver
+  abajo), no con mocks.
+- **A2.5 — Migración e historial.** Migración 100% aditiva y editada a
+  mano (mismo criterio que A1):
+  `accounting_date`/`period_id`/`journal_number` nacen NULLABLE, se
+  completan con un backfill determinista y solo entonces se vuelven
+  `NOT NULL`. Backfill (no-op exacto hoy: 0 filas históricas en `pos_db`/
+  `pos_db_test`, pero escrito para ser correcto contra un historial real
+  poblado — nunca se asume que una base vacía representa el caso general):
+  `accounting_date` se deriva de `posted_at` ya persistido vía
+  `(posted_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Lima'`; se crea un
+  periodo `OPEN` por cada `(year, month)` distinto ya presente en el
+  historial; `journal_number` se asigna con el mismo criterio de desempate
+  ya usado en el resto del dominio (`posted_at ASC, id ASC`). Los 6
+  registros de sistema de `chart_of_accounts` y todo el historial de
+  `accounting_entries`/`accounting_entry_lines` quedan intactos — ninguna
+  fila existente se reescribe ni se elimina.
+  - **Decisión tomada (la más segura por defecto, sin validación de
+    contador todavía):** todo periodo creado por el backfill nace `OPEN`,
+    nunca `CLOSED` automáticamente — cerrar un periodo histórico es una
+    decisión de negocio explícita de ADMIN que esta migración no debe
+    asumir por sí misma (ver decisiones pendientes).
+- **A2.6 — Endpoints.** `GET/POST /api/v1/accounting/periods`,
+  `GET /api/v1/accounting/periods/:id`,
+  `POST /api/v1/accounting/periods/:id/close`,
+  `POST /api/v1/accounting/periods/:id/reopen` (ver A2.1 para roles).
+  `GET /api/v1/accounting/entries*` ahora incluye `accountingDate`
+  (string `YYYY-MM-DD`), `periodId` (uuid) y `journalNumber` (entero) —
+  aditivo, retrocompatible; ningún campo existente cambia de forma.
+  `GET /api/v1/accounts` (legado, Fase 8) y el resto de la superficie de
+  Ventas/Pagos/Cotizaciones no cambian de contrato. Libro diario/mayor y
+  balance de comprobación NO se implementan todavía (quedan para A3, igual
+  que indica el kickoff aprobado).
+- **Validación:** 97 suites / 3244 pruebas unitarias (+9 suites/+43 sobre
+  el baseline de A1); 32 suites E2E incluyendo la nueva
+  `test/accounting-periods.e2e-spec.ts` (RBAC, ciclo de vida OPEN/CLOSED,
+  integración con una venta real, y 4 pruebas de concurrencia real contra
+  PostgreSQL: numeración concurrente, posteo vs. cierre, reversión vs.
+  cierre, creación concurrente del mismo periodo nuevo vía integración
+  directa con `AccountingEngine` + `PrismaService` reales); regresión
+  completa de la suite E2E preexistente (ventas, pagos, contabilidad,
+  plan de cuentas, configuración/IGV) sin romper ningún comportamiento
+  previo; `lint:check` y `build` correctos.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
@@ -532,7 +653,13 @@ reportes contables terminados (hoy solo existen los asientos básicos de
 Contabilidad básica, §4 punto 12); reportes contables adicionales; módulo de
 importaciones y proveedores; cualquier cambio futuro que amplíe los permisos
 de facturación/escritura de MANAGEMENT (su alcance actual —lectura global,
-cero escritura— es la decisión vigente, confirmada en el cierre P6-E4).
+cero escritura— es la decisión vigente, confirmada en el cierre P6-E4);
+**(Fase A2)** si los periodos contables backfilleados a partir de
+historial real deberían nacer `CLOSED` en vez de `OPEN` (decisión tomada
+por defecto: `OPEN`, ver §11 A2.5 — requiere validación de un contador
+antes de cambiarse); política formal de cierre periódico recurrente
+(mensual/anual) una vez exista un calendario contable real; rol
+`ACCOUNTANT` dedicado (seguirá diferido hasta Fase A3 o posterior).
 
 **Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
 `products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
@@ -540,10 +667,12 @@ conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
 aislamiento global no está completamente resuelto); 11 errores preexistentes
 en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **17** (conteo corregido; la cifra anterior de esta
-sección —15— estaba desactualizada). Sin cambios por el requerimiento de
-propiedad por vendedor ni por la Fase A0: ambos son exclusivamente de
-autorización/lógica de servicio, sin alteraciones de esquema.
+Migraciones totales: **19** (conteo corregido; esta sección no reflejaba
+todavía la migración 18 de la Fase A1 —plan de cuentas jerárquico PCGE,
+ya en `main`— ni la 19, de la Fase A2 arriba, aplicada hoy EXCLUSIVAMENTE
+en `pos_db_test`, todavía pendiente en `pos_db` y en `main`). Sin cambios
+de esquema por el requerimiento de propiedad por vendedor ni por la Fase
+A0: ambos son exclusivamente de autorización/lógica de servicio.
 
 ---
 

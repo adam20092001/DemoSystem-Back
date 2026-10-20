@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { AccountingEngine } from './accounting.engine';
 import { AccountingEntriesController } from './accounting-entries.controller';
+import { AccountingPeriodsController } from './accounting-periods.controller';
+import { AccountingPeriodsService } from './accounting-periods.service';
 import { AccountingService } from './accounting.service';
 import { AccountsController } from './accounts.controller';
 import { ChartOfAccountsController } from './chart-of-accounts.controller';
@@ -26,14 +28,26 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
  * Nunca se exporta: ningún otro módulo necesita administrar cuentas, y
  * AccountingEngine sigue siendo el único lector de Account.systemKey para
  * resolver asientos — sin cambios en esta fase.
+ *
+ * Fase A2 (periodos contables): agrega AccountingPeriodsController/Service,
+ * el recurso de administración EXPLÍCITA del ciclo de vida OPEN/CLOSED.
+ * Tampoco se exporta: ningún otro módulo administra periodos directamente
+ * — SalesService/PaymentEngine siguen componiendo únicamente
+ * AccountingEngine, que resuelve el periodo internamente.
  */
 @Module({
   controllers: [
     AccountsController,
     AccountingEntriesController,
     ChartOfAccountsController,
+    AccountingPeriodsController,
   ],
-  providers: [AccountingEngine, AccountingService, ChartOfAccountsService],
+  providers: [
+    AccountingEngine,
+    AccountingService,
+    ChartOfAccountsService,
+    AccountingPeriodsService,
+  ],
   exports: [AccountingEngine],
 })
 export class AccountingModule {}

@@ -15,6 +15,12 @@ export interface SafeAccountingEntryListItem {
   description: string;
   postedAt: Date;
   createdAt: Date;
+  /** Fase A2.2: YYYY-MM-DD en zona de negocio (America/Lima), nunca un instante. */
+  accountingDate: string;
+  /** Fase A2.1: solo el id — el detalle del periodo se consulta vía GET /accounting/periods/:id. */
+  periodId: string;
+  /** Fase A2.3: único y sin huecos DENTRO de periodId, nunca global. */
+  journalNumber: number;
 }
 
 /** Identidad mínima segura de un usuario, igual criterio que PaymentSafeRow.createdBy. */

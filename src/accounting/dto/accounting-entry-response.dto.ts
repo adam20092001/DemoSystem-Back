@@ -30,6 +30,29 @@ export class AccountingEntryListItemResponseDto {
 
   @ApiProperty({ type: String, format: 'date-time' })
   createdAt!: Date;
+
+  @ApiProperty({
+    type: String,
+    format: 'date',
+    example: '2026-10-20',
+    description:
+      'Fecha contable (Fase A2.2), derivada de postedAt en la zona de negocio America/Lima. Nunca editable por el cliente.',
+  })
+  accountingDate!: string;
+
+  @ApiProperty({
+    format: 'uuid',
+    description:
+      'Periodo contable mensual que contiene este asiento (Fase A2.1). Detalle vía GET /accounting/periods/:id.',
+  })
+  periodId!: string;
+
+  @ApiProperty({
+    description:
+      'Número secuencial del asiento DENTRO de su periodo (Fase A2.3), nunca global ni editable.',
+    example: 7,
+  })
+  journalNumber!: number;
 }
 
 /** Respuesta paginada de asientos contables, orden cronológico. */
