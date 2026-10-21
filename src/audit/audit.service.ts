@@ -476,6 +476,14 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.SUPPLIER_UPDATED]: ['updatedFields'],
   [AuditAction.SUPPLIER_ACTIVATED]: ['previousStatus'],
   [AuditAction.SUPPLIER_DEACTIVATED]: ['previousStatus'],
+  // PURCHASE_INVOICE_ (Fase A5.2a). PurchaseInvoicesService es su único
+  // emisor. Nunca descriptionSnapshot de línea ni datos del proveedor: solo
+  // identificadores y montos estructurales ya conocidos por el propio
+  // documento.
+  [AuditAction.PURCHASE_INVOICE_CREATED]: ['supplierId', 'documentType'],
+  [AuditAction.PURCHASE_INVOICE_UPDATED]: ['updatedFieldCount'],
+  [AuditAction.PURCHASE_INVOICE_CONFIRMED]: ['entryId', 'journalNumber'],
+  [AuditAction.PURCHASE_INVOICE_CANCELLED]: ['reversalEntryId', 'reason'],
 };
 
 function isPlainObject(

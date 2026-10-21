@@ -27,6 +27,7 @@ import {
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
   buildPaymentReversalDescription,
+  buildPurchaseReversalDescription,
   buildSaleOriginalDescription,
   buildSaleRecognitionLines,
   buildSaleReversalDescription,
@@ -36,6 +37,7 @@ import {
 import {
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
+  PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
 } from './types/accounting-command';
@@ -151,7 +153,7 @@ export class AccountingEngine {
    *   - El periodo debe existir y estar OPEN de antemano, salvo que sea
    *     el mes de negocio EN CURSO (mismo criterio de auto-creación ya
    *     usado por el posteo comercial) — ver
-   *     resolveOpenPeriodIdForManualEntry(): nunca se crea un periodo
+   *     resolveOpenPeriodIdForExplicitDate(): nunca se crea un periodo
    *     histórico arbitrario a partir de una fecha manual.
    * `sourceId` = `command.draftId`: el índice único parcial
    * accounting_entries_one_original_per_source (migration.sql, sin
@@ -202,7 +204,7 @@ export class AccountingEngine {
     const { accountingDate, year, month } = parseAccountingDateOnly(
       command.accountingDateOnly,
     );
-    const periodId = await this.resolveOpenPeriodIdForManualEntry(
+    const periodId = await this.resolveOpenPeriodIdForExplicitDate(
       tx,
       year,
       month,
@@ -218,6 +220,135 @@ export class AccountingEngine {
       data: {
         sourceType: AccountingSourceType.MANUAL,
         sourceId: command.draftId,
+        eventType: AccountingEventType.ORIGINAL,
+        description: command.description,
+        postedAt: new Date(),
+        accountingDate,
+        periodId,
+        journalNumber,
+        createdByUserId: command.actorUserId,
+        lines: {
+          create: resolvedLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: line.debitAmount,
+            creditAmount: line.creditAmount,
+          })),
+        },
+      },
+      select: ACCOUNTING_ENTRY_RESULT_SELECT,
+    });
+
+    await this.auditService.record({
+      userId: command.actorUserId,
+      module: 'ACCOUNTING',
+      action: AuditAction.ACCOUNTING_ENTRY_POSTED,
+      entityType: 'AccountingEntry',
+      entityId: created.id,
+      description: command.description,
+      metadata: {
+        entryId: created.id,
+        sourceType: created.sourceType,
+        sourceId: created.sourceId,
+        eventType: created.eventType,
+      },
+      ipAddress: command.ipAddress,
+      client: tx,
+    });
+
+    return created;
+  }
+
+  /**
+   * Contabiliza DEFINITIVAMENTE una factura de compra confirmada (Fase
+   * A5.2a) — único punto donde una PurchaseInvoice produce una fila real
+   * de AccountingEntry (sourceType=PURCHASE). A diferencia de
+   * postManualEntry() (cuentas elegidas a mano por el ACCOUNTANT), aquí
+   * las líneas llegan YA resueltas por AccountingSystemKey — el destino
+   * contable de cada línea es sistemático, decidido por
+   * PurchasePurpose a través de un mapeo fijo (PURCHASE_PURPOSE_TO_SYSTEM_KEY
+   * en purchase-invoice-calculator.ts), nunca un accountId discrecional.
+   * Igual que postManualEntry(): fecha contable EXPLÍCITA (nunca derivada
+   * de un instante) y mismo criterio de periodo (existente y OPEN, o
+   * auto-creado solo si es el mes de negocio EN CURSO) — se reutiliza
+   * resolveOpenPeriodIdForExplicitDate() sin duplicar esa lógica.
+   *
+   * A diferencia de resolveAccounts() (cuentas de SISTEMA ya activadas,
+   * cuya ausencia es corrupción de configuración del servidor, 500): un
+   * AccountingSystemKey de compra sin mapeo real todavía (ACCOUNTS_PAYABLE/
+   * VAT_RECEIVABLE/PURCHASE_*, Fase A5.2a) es un estado de configuración
+   * incompleta ESPERADO mientras el contador no lo haya aprobado y
+   * activado — por eso resolvePurchaseDestinationAccounts() falla con
+   * ConflictException (409 "mapeo contable no configurado"), nunca con el
+   * 500 de resolveAccounts(). `creditableTaxAmount=0` en todas las líneas
+   * NUNCA se interpreta como "no se requiere mapeo": ACCOUNTS_PAYABLE
+   * sigue siendo obligatorio para cualquier compra, y cada
+   * PURCHASE_* presente en las líneas se exige igual sin importar el
+   * monto resultante.
+   *
+   * `sourceId` = `command.purchaseInvoiceId`: el mismo índice único
+   * parcial accounting_entries_one_original_per_source (sin código nuevo)
+   * impide por sí solo una doble contabilización.
+   */
+  async postPurchaseRecognition(
+    tx: Prisma.TransactionClient,
+    command: PostPurchaseRecognitionCommand,
+  ): Promise<PostedAccountingEntry> {
+    assertValidAccountingDescription(command.description);
+
+    const existing = await tx.accountingEntry.findFirst({
+      where: {
+        sourceType: AccountingSourceType.PURCHASE,
+        sourceId: command.purchaseInvoiceId,
+        eventType: AccountingEventType.ORIGINAL,
+      },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'Esta factura de compra ya fue contabilizada anteriormente',
+      );
+    }
+
+    const accountsBySystemKey = await this.resolvePurchaseDestinationAccounts(
+      tx,
+      command.lines.map((line) => line.systemKey),
+    );
+    const resolvedLines: ResolvedAccountingLine[] = command.lines.map(
+      (line) => ({
+        accountId: this.requirePurchaseAccount(
+          accountsBySystemKey,
+          line.systemKey,
+        ).id,
+        debitAmount: line.debitAmount,
+        creditAmount: line.creditAmount,
+      }),
+    );
+    // Defensa en profundidad: PurchaseInvoicesService ya valida este mismo
+    // cuadre al construir `command.lines` (buildPurchaseRecognitionLines()
+    // garantiza el balance por construcción) — esto nunca debería fallar
+    // aquí; si lo hace, es un invariante interno roto (500), no una
+    // entrada de usuario malformada que ya debió rechazarse antes.
+    assertLinesBalanced(resolvedLines);
+
+    const { accountingDate, year, month } = parseAccountingDateOnly(
+      command.accountingDateOnly,
+    );
+    const periodId = await this.resolveOpenPeriodIdForExplicitDate(
+      tx,
+      year,
+      month,
+    );
+    const journalNumber = await this.incrementJournalNumber(
+      tx,
+      periodId,
+      year,
+      month,
+    );
+
+    const created = await tx.accountingEntry.create({
+      data: {
+        sourceType: AccountingSourceType.PURCHASE,
+        sourceId: command.purchaseInvoiceId,
         eventType: AccountingEventType.ORIGINAL,
         description: command.description,
         postedAt: new Date(),
@@ -303,16 +434,27 @@ export class AccountingEngine {
     const invertedLines = invertResolvedLines(originalLines);
     assertLinesBalanced(invertedLines);
 
-    // Fase A4.5: MANUAL nunca tiene número de documento — reutiliza la
-    // propia descripción del ORIGINAL ya cargado arriba, nunca
-    // `command.sourceNumber` (que ManualJournalEntriesService envía
-    // vacío para esta rama, al no aplicar).
-    const description =
-      command.sourceType === AccountingSourceType.SALE
-        ? buildSaleReversalDescription(command.sourceNumber)
-        : command.sourceType === AccountingSourceType.PAYMENT
-          ? buildPaymentReversalDescription(command.sourceNumber)
-          : buildManualReversalDescription(original.description);
+    // Fase A4.5/A5.2a: MANUAL/PURCHASE nunca tienen número de documento
+    // comercial propio — MANUAL reutiliza la propia descripción del
+    // ORIGINAL ya cargado arriba; PURCHASE SÍ tiene un identificador de
+    // documento (serie-número del proveedor), que PurchaseInvoicesService
+    // envía en `command.sourceNumber` (a diferencia de MANUAL, que envía
+    // vacío al no aplicar).
+    let description: string;
+    switch (command.sourceType) {
+      case AccountingSourceType.SALE:
+        description = buildSaleReversalDescription(command.sourceNumber);
+        break;
+      case AccountingSourceType.PAYMENT:
+        description = buildPaymentReversalDescription(command.sourceNumber);
+        break;
+      case AccountingSourceType.PURCHASE:
+        description = buildPurchaseReversalDescription(command.sourceNumber);
+        break;
+      case AccountingSourceType.MANUAL:
+        description = buildManualReversalDescription(original.description);
+        break;
+    }
     assertValidAccountingDescription(description);
 
     // A2.2: el asiento REVERSAL usa la fecha contable de SU PROPIO
@@ -579,12 +721,12 @@ export class AccountingEngine {
   }
 
   /**
-   * Paso atómico compartido (A2.4/A4.4) de "avanzar el contador de
+   * Paso atómico compartido (A2.4/A4.4/A5.2a) de "avanzar el contador de
    * asientos de un periodo ya resuelto, validando que esté OPEN" — único
    * UPDATE ... RETURNING, extraído de resolvePeriodAndAssignNumber() para
-   * que postManualEntry() (Fase A4.4) lo reutilice exactamente igual tras
-   * resolver su periodo con una regla distinta
-   * (resolveOpenPeriodIdForManualEntry(), nunca auto-creación arbitraria
+   * que postManualEntry()/postPurchaseRecognition() lo reutilicen
+   * exactamente igual tras resolver su periodo con una regla distinta
+   * (resolveOpenPeriodIdForExplicitDate(), nunca auto-creación arbitraria
    * de un periodo histórico). Ver el docblock de
    * resolvePeriodAndAssignNumber() para el análisis completo de
    * concurrencia: sigue aplicando sin cambios, el UPDATE es el mismo.
@@ -612,17 +754,19 @@ export class AccountingEngine {
   }
 
   /**
-   * Resuelve el periodo de un asiento MANUAL (Fase A4.4): si ya existe,
-   * se usa tal cual (OPEN o CLOSED — es incrementJournalNumber() quien
-   * decide si se puede postear). Si NO existe, solo se auto-crea cuando
-   * la fecha solicitada cae en el mes de negocio EN CURSO (reutilizando
+   * Resuelve el periodo de un asiento con fecha contable EXPLÍCITA (Fase
+   * A4.4, reutilizado sin cambios por A5.2a): si ya existe, se usa tal
+   * cual (OPEN o CLOSED — es incrementJournalNumber() quien decide si se
+   * puede postear). Si NO existe, solo se auto-crea cuando la fecha
+   * solicitada cae en el mes de negocio EN CURSO (reutilizando
    * resolveOrCreateOpenPeriodId(), idéntico criterio que un posteo
    * comercial de hoy — nunca una regla paralela). Para cualquier OTRO mes
-   * sin periodo todavía, se rechaza explícitamente: A4.4 prohíbe crear
-   * automáticamente un periodo histórico arbitrario a partir de una fecha
-   * manual; ADMIN debe abrirlo primero (POST /accounting/periods, A2.6).
+   * sin periodo todavía, se rechaza explícitamente: ni un asiento manual
+   * ni una factura de compra pueden crear automáticamente un periodo
+   * histórico arbitrario; ADMIN debe abrirlo primero
+   * (POST /accounting/periods, A2.6).
    */
-  private async resolveOpenPeriodIdForManualEntry(
+  private async resolveOpenPeriodIdForExplicitDate(
     tx: Prisma.TransactionClient,
     year: number,
     month: number,
@@ -641,7 +785,7 @@ export class AccountingEngine {
     }
 
     throw new NotFoundException(
-      `No existe el periodo contable ${year}-${String(month).padStart(2, '0')}; cree el periodo primero (POST /api/v1/accounting/periods) antes de contabilizar un asiento manual con esa fecha`,
+      `No existe el periodo contable ${year}-${String(month).padStart(2, '0')}; cree el periodo primero (POST /api/v1/accounting/periods) antes de contabilizar con esa fecha`,
     );
   }
 
@@ -686,6 +830,68 @@ export class AccountingEngine {
     if (account === undefined) {
       throw new BadRequestException(
         `La cuenta ${accountId} no existe, no está activa o no es postable`,
+      );
+    }
+    return account;
+  }
+
+  /**
+   * Resuelve cuentas de compra por AccountingSystemKey (Fase A5.2a) — misma
+   * forma exacta que resolveAccounts() (filtro ACTIVE+isPostable, misma
+   * consulta), pero con semántica de excepción DISTINTA a propósito: un
+   * ACCOUNTS_PAYABLE/VAT_RECEIVABLE/PURCHASE_* sin mapeo real todavía
+   * (ningún Account.systemKey apunta ahí) es el estado NORMAL y ESPERADO
+   * mientras el contador no lo haya aprobado y ADMIN no lo haya activado
+   * — nunca una corrupción de configuración del servidor como las 6
+   * cuentas de sistema originales (Fase 8). Por eso ConflictException
+   * (409, "mapeo contable no configurado"), nunca el
+   * InternalServerErrorException (500) de resolveAccounts(): esto es lo
+   * que permite que PurchaseInvoicesService.confirm() falle CERRADO con
+   * un error de negocio claro en vez de un 500 opaco, exactamente como
+   * exige el requerimiento de A5.2a.
+   */
+  private async resolvePurchaseDestinationAccounts(
+    tx: Prisma.TransactionClient,
+    systemKeys: AccountingSystemKey[],
+  ): Promise<Map<AccountingSystemKey, Account>> {
+    const uniqueKeys = Array.from(new Set(systemKeys));
+    const rows = await tx.account.findMany({
+      where: {
+        systemKey: { in: uniqueKeys },
+        status: AccountStatus.ACTIVE,
+        isPostable: true,
+      },
+    });
+
+    const bySystemKey = new Map<AccountingSystemKey, Account>();
+    for (const row of rows) {
+      if (row.systemKey === null) {
+        continue;
+      }
+      bySystemKey.set(row.systemKey, row);
+    }
+
+    for (const key of uniqueKeys) {
+      if (!bySystemKey.has(key)) {
+        throw new ConflictException(
+          `No se puede contabilizar: falta el mapeo contable configurado para "${key}". ` +
+            'ADMIN debe asignar una cuenta activa y postable a este AccountingSystemKey ' +
+            '(PATCH /api/v1/chart-of-accounts/system-keys/:systemKey) antes de confirmar esta factura.',
+        );
+      }
+    }
+
+    return bySystemKey;
+  }
+
+  private requirePurchaseAccount(
+    accounts: Map<AccountingSystemKey, Account>,
+    systemKey: AccountingSystemKey,
+  ): Account {
+    const account = accounts.get(systemKey);
+    if (account === undefined) {
+      throw new ConflictException(
+        `No se puede contabilizar: falta el mapeo contable configurado para "${systemKey}".`,
       );
     }
     return account;

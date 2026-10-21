@@ -1,5 +1,6 @@
 import {
   AccountingSourceType,
+  AccountingSystemKey,
   PaymentMethodAccountingDestination,
   Prisma,
 } from '@prisma/client';
@@ -83,6 +84,33 @@ export interface PostManualEntryCommand {
   accountingDateOnly: string;
   lines: {
     accountId: string;
+    debitAmount: Prisma.Decimal;
+    creditAmount: Prisma.Decimal;
+  }[];
+  actorUserId: string;
+  ipAddress: string | null;
+}
+
+/**
+ * Comando interno de AccountingEngine.postPurchaseRecognition() (Fase
+ * A5.2a). `purchaseInvoiceId` es el `PurchaseInvoice.id` — se usa tal cual
+ * como `AccountingEntry.sourceId` (sourceType=PURCHASE), mismo polimorfismo
+ * sin FK que SALE/PAYMENT/MANUAL. `accountingDateOnly` es SIEMPRE explícita
+ * (elegida por quien registra la factura), mismo criterio que
+ * PostManualEntryCommand — nunca derivada de un instante como SALE/PAYMENT.
+ * `lines` llega YA resuelto por `AccountingSystemKey` (nunca por
+ * `accountId` elegido a mano, a diferencia de PostManualEntryCommand): el
+ * reconocimiento de compra es un evento sistemático — el destino contable
+ * de cada línea lo decide `purchasePurpose` vía un mapeo fijo
+ * (PURCHASE_PURPOSE_TO_SYSTEM_KEY en purchase-invoice-calculator.ts), nunca
+ * un `accountId` discrecional.
+ */
+export interface PostPurchaseRecognitionCommand {
+  purchaseInvoiceId: string;
+  description: string;
+  accountingDateOnly: string;
+  lines: {
+    systemKey: AccountingSystemKey;
     debitAmount: Prisma.Decimal;
     creditAmount: Prisma.Decimal;
   }[];

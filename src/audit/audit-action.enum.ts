@@ -220,4 +220,12 @@ export enum AuditAction {
   SUPPLIER_UPDATED = 'SUPPLIER_UPDATED',
   SUPPLIER_ACTIVATED = 'SUPPLIER_ACTIVATED',
   SUPPLIER_DEACTIVATED = 'SUPPLIER_DEACTIVATED',
+  // Fase A5.2a (facturas de compra universales). PurchaseInvoicesService es
+  // su único emisor. Nunca se audita descriptionSnapshot de línea ni el
+  // nombre legal del proveedor (PII/negocio) — solo metadatos estructurales,
+  // mismo criterio que SUPPLIER_*/MANUAL_JOURNAL_*.
+  PURCHASE_INVOICE_CREATED = 'PURCHASE_INVOICE_CREATED',
+  PURCHASE_INVOICE_UPDATED = 'PURCHASE_INVOICE_UPDATED',
+  PURCHASE_INVOICE_CONFIRMED = 'PURCHASE_INVOICE_CONFIRMED',
+  PURCHASE_INVOICE_CANCELLED = 'PURCHASE_INVOICE_CANCELLED',
 }

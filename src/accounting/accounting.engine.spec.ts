@@ -19,6 +19,7 @@ import { AccountingEngine } from './accounting.engine';
 import {
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
+  PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
 } from './types/accounting-command';
@@ -77,6 +78,50 @@ function makeAccountRow(
       code: 'DISCOUNTS',
       name: 'Descuentos',
       type: AccountType.CONTRA_REVENUE,
+    },
+    // Fase A5.2a: fixtures de prueba únicamente, ninguna cuenta real en
+    // pos_db/pos_db_test tiene estos systemKey mapeados todavía.
+    [AccountingSystemKey.ACCOUNTS_PAYABLE]: {
+      id: 'acc-ap',
+      code: 'AP',
+      name: 'Cuentas por pagar',
+      type: AccountType.LIABILITY,
+    },
+    [AccountingSystemKey.VAT_RECEIVABLE]: {
+      id: 'acc-vat-receivable',
+      code: 'VAT_RECEIVABLE',
+      name: 'IGV por recuperar',
+      type: AccountType.ASSET,
+    },
+    [AccountingSystemKey.PURCHASE_RESALE_INVENTORY]: {
+      id: 'acc-purchase-resale',
+      code: 'PURCHASE_RESALE',
+      name: 'Compras para reventa',
+      type: AccountType.ASSET,
+    },
+    [AccountingSystemKey.PURCHASE_INTERNAL_CONSUMPTION]: {
+      id: 'acc-purchase-internal',
+      code: 'PURCHASE_INTERNAL',
+      name: 'Compras de consumo interno',
+      type: AccountType.EXPENSE,
+    },
+    [AccountingSystemKey.PURCHASE_FIXED_ASSET]: {
+      id: 'acc-purchase-fixed-asset',
+      code: 'PURCHASE_FIXED_ASSET',
+      name: 'Compras de activo fijo',
+      type: AccountType.ASSET,
+    },
+    [AccountingSystemKey.PURCHASE_OPERATING_EXPENSE]: {
+      id: 'acc-purchase-opex',
+      code: 'PURCHASE_OPEX',
+      name: 'Compras de gasto operativo',
+      type: AccountType.EXPENSE,
+    },
+    [AccountingSystemKey.PURCHASE_OTHER]: {
+      id: 'acc-purchase-other',
+      code: 'PURCHASE_OTHER',
+      name: 'Compras otros',
+      type: AccountType.EXPENSE,
     },
   };
   const base = byKey[systemKey];
@@ -183,6 +228,45 @@ function makeReverseCommand(
     sourceId: SALE_ID,
     sourceNumber: SALE_NUMBER,
     postedAt: POSTED_AT,
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+    ...overrides,
+  };
+}
+
+const PURCHASE_INVOICE_ID = '99999999-9999-4999-8999-999999999999';
+
+const PURCHASE_ACCOUNTS = [
+  makeAccountRow(AccountingSystemKey.ACCOUNTS_PAYABLE),
+  makeAccountRow(AccountingSystemKey.VAT_RECEIVABLE),
+  makeAccountRow(AccountingSystemKey.PURCHASE_RESALE_INVENTORY),
+  makeAccountRow(AccountingSystemKey.PURCHASE_OPERATING_EXPENSE),
+];
+
+function makePurchaseCommand(
+  overrides: Partial<PostPurchaseRecognitionCommand> = {},
+): PostPurchaseRecognitionCommand {
+  return {
+    purchaseInvoiceId: PURCHASE_INVOICE_ID,
+    description: 'Compra FACTURA F001-123',
+    accountingDateOnly: '2026-03-15',
+    lines: [
+      {
+        systemKey: AccountingSystemKey.PURCHASE_RESALE_INVENTORY,
+        debitAmount: d('100.00'),
+        creditAmount: d('0.00'),
+      },
+      {
+        systemKey: AccountingSystemKey.VAT_RECEIVABLE,
+        debitAmount: d('18.00'),
+        creditAmount: d('0.00'),
+      },
+      {
+        systemKey: AccountingSystemKey.ACCOUNTS_PAYABLE,
+        debitAmount: d('0.00'),
+        creditAmount: d('118.00'),
+      },
+    ],
     actorUserId: ACTOR_ID,
     ipAddress: '10.0.0.1',
     ...overrides,
@@ -717,6 +801,185 @@ describe('AccountingEngine', () => {
   });
 
   // ====================================================================
+  // postPurchaseRecognition (Fase A5.2a)
+  // ====================================================================
+  describe('postPurchaseRecognition', () => {
+    beforeEach(() => {
+      tx.account.findMany.mockResolvedValue(PURCHASE_ACCOUNTS);
+      tx.accountingEntry.create.mockResolvedValue({
+        id: ENTRY_ID,
+        sourceType: AccountingSourceType.PURCHASE,
+        sourceId: PURCHASE_INVOICE_ID,
+        eventType: AccountingEventType.ORIGINAL,
+        journalNumber: 1,
+        accountingDate: new Date('2026-03-15T00:00:00.000Z'),
+      });
+    });
+
+    it('crea ORIGINAL con sourceType=PURCHASE, sourceId=purchaseInvoiceId y las líneas resueltas por systemKey', async () => {
+      await engine.postPurchaseRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          eventType: AccountingEventType;
+          description: string;
+          lines: {
+            create: {
+              accountId: string;
+              debitAmount: Prisma.Decimal;
+              creditAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.PURCHASE);
+      expect(call.data.sourceId).toBe(PURCHASE_INVOICE_ID);
+      expect(call.data.eventType).toBe(AccountingEventType.ORIGINAL);
+      expect(call.data.description).toBe('Compra FACTURA F001-123');
+      expect(call.data.lines.create).toHaveLength(3);
+    });
+
+    it('factura ya contabilizada (ya existe ORIGINAL con sourceType=PURCHASE/sourceId=purchaseInvoiceId): ConflictException', async () => {
+      tx.accountingEntry.findFirst.mockResolvedValue({ id: 'existing-entry' });
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+      expect(tx.accountingEntry.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            sourceType: AccountingSourceType.PURCHASE,
+            sourceId: PURCHASE_INVOICE_ID,
+            eventType: AccountingEventType.ORIGINAL,
+          },
+        }),
+      );
+    });
+
+    it('falta un mapeo contable (p. ej. ACCOUNTS_PAYABLE sin cuenta activa/postable): ConflictException (409, nunca 500)', async () => {
+      tx.account.findMany.mockResolvedValue(
+        PURCHASE_ACCOUNTS.filter(
+          (a) => a.systemKey !== AccountingSystemKey.ACCOUNTS_PAYABLE,
+        ),
+      );
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('creditableTaxAmount=0 en todas las líneas NUNCA exime el mapeo de ACCOUNTS_PAYABLE', async () => {
+      tx.account.findMany.mockResolvedValue(
+        PURCHASE_ACCOUNTS.filter(
+          (a) => a.systemKey !== AccountingSystemKey.ACCOUNTS_PAYABLE,
+        ),
+      );
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand({
+            lines: [
+              {
+                systemKey: AccountingSystemKey.PURCHASE_RESALE_INVENTORY,
+                debitAmount: d('100.00'),
+                creditAmount: d('0.00'),
+              },
+              {
+                systemKey: AccountingSystemKey.ACCOUNTS_PAYABLE,
+                debitAmount: d('0.00'),
+                creditAmount: d('100.00'),
+              },
+            ],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('usa la fecha contable EXPLÍCITA del comando, nunca derivada de un instante', async () => {
+      await engine.postPurchaseRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseCommand({ accountingDateOnly: '2026-03-20' }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-20T00:00:00.000Z',
+      );
+    });
+
+    it('periodo del mes solicitado no existe y no es el mes en curso: NotFoundException', async () => {
+      tx.accountingPeriod.findUnique.mockResolvedValue(null);
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand({ accountingDateOnly: '2020-01-15' }),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('periodo existe pero está CERRADO: ConflictException vía el mismo UPDATE...RETURNING', async () => {
+      tx.accountingPeriod.findUnique.mockResolvedValue({ id: PERIOD_ID });
+      tx.$queryRaw.mockResolvedValue([]);
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('líneas desbalanceadas: defensa en profundidad del motor (InternalServerErrorException)', async () => {
+      await expect(
+        engine.postPurchaseRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseCommand({
+            lines: [
+              {
+                systemKey: AccountingSystemKey.PURCHASE_RESALE_INVENTORY,
+                debitAmount: d('100.00'),
+                creditAmount: d('0.00'),
+              },
+              {
+                systemKey: AccountingSystemKey.ACCOUNTS_PAYABLE,
+                debitAmount: d('0.00'),
+                creditAmount: d('90.00'),
+              },
+            ],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('audita ACCOUNTING_ENTRY_POSTED exactamente una vez, mismo tx', async () => {
+      await engine.postPurchaseRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseCommand(),
+      );
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+      const call = auditService.record.mock.calls[0][0] as {
+        action: AuditAction;
+        client: unknown;
+      };
+      expect(call.action).toBe(AuditAction.ACCOUNTING_ENTRY_POSTED);
+      expect(call.client).toBe(tx);
+    });
+  });
+
+  // ====================================================================
   // reverseOriginalForSource
   // ====================================================================
   describe('reverseOriginalForSource', () => {
@@ -869,6 +1132,31 @@ describe('AccountingEngine', () => {
       };
       expect(call.data.description).toBe(
         'Reversión de asiento manual: Ajuste de provisión de alquiler',
+      );
+    });
+
+    it('descripción de reversión PURCHASE: usa sourceNumber (serie-número de documento), nunca original.description', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          ...makeOriginalWithLines(),
+          sourceType: AccountingSourceType.PURCHASE,
+          sourceId: PURCHASE_INVOICE_ID,
+          description: 'Compra FACTURA F001-123',
+        })
+        .mockResolvedValueOnce(null);
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({
+          sourceType: AccountingSourceType.PURCHASE,
+          sourceId: PURCHASE_INVOICE_ID,
+          sourceNumber: 'FACTURA F001-123',
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { description: string };
+      };
+      expect(call.data.description).toBe(
+        'Reversión de compra FACTURA F001-123',
       );
     });
 
