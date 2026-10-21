@@ -468,6 +468,78 @@ model Customer {
   @@map("customers")
 }
 
+// --- Proveedores (Fase A5.1) ------------------------------------------------
+// Maestro de datos puro: sin ningún vínculo a Compras/Cuentas por Pagar
+// (todavía no existen) ni a AccountingEngine/AccountingSourceType (sin
+// cambios en esta fase). Modelo deliberadamente SEPARADO de Customer —
+// mismo criterio superficial (documento + datos de contacto) pero dominios
+// y ciclos de vida distintos; nunca se comparte la tabla ni se crea un
+// Customer artificial para representar un proveedor.
+
+enum SupplierDocumentType {
+  RUC
+  DNI
+  // Identificación tributaria extranjera genérica: evita inventar un enum
+  // por país. Las compras/proveedores internacionales reales (formato,
+  // validación) son responsabilidad de una fase de Importaciones futura.
+  FOREIGN_TAX_ID
+  OTHER
+}
+
+enum SupplierStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/**
+ * A diferencia de Customer, aquí no existe un proveedor "genérico": todo
+ * proveedor exige documento (documentType/documentNumber NUNCA nulos) — no
+ * hay un caso análogo a "Público general" que lo justifique. Sin
+ * createdByUserId/updatedByUserId: igual que Customer/Product/Category/Unit,
+ * la autoría vive exclusivamente en AuditLog (ver SuppliersService) — esos
+ * campos denormalizados en la propia fila son exclusivos de registros
+ * TRANSACCIONALES (InventoryMovement/Payment/AccountingEntry/
+ * ManualJournalDraft), nunca de maestros de datos.
+ */
+model Supplier {
+  id String @id @default(uuid()) @db.Uuid
+
+  documentType   SupplierDocumentType @map("document_type")
+  documentNumber String               @db.VarChar(32) @map("document_number")
+
+  // ISO 3166-1 alpha-2. 'PE' es el default aplicado por SuppliersService
+  // cuando el llamador lo omite (igual criterio que
+  // ProductsService/stockMinimum, NR-04) — nunca un @default de columna,
+  // para que la normalización (incluida la validación de formato) pase
+  // siempre por el servicio.
+  countryCode String @map("country_code") @db.VarChar(2)
+
+  legalName     String  @map("legal_name") @db.VarChar(150)
+  tradeName     String? @map("trade_name") @db.VarChar(150)
+  contactName   String? @map("contact_name") @db.VarChar(120)
+  phone         String? @db.VarChar(30)
+  email         String? @db.VarChar(150)
+  address       String? @db.VarChar(300)
+  internalNotes String? @map("internal_notes") @db.VarChar(1000)
+
+  // Puramente informativo (ver Fase A5, blueprint §3/§11): ningún cálculo
+  // ni posteo contable lo usa todavía. ISO 4217, ej. 'PEN'/'USD'.
+  defaultCurrencyCode String? @map("default_currency_code") @db.VarChar(3)
+
+  status SupplierStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Las 3 CHECK y el índice único funcional (documentType+countryCode+
+  // UPPER(BTRIM(documentNumber))) se añaden a mano en migration.sql (mismo
+  // motivo que Customer: el DSL de Prisma no expresa CHECK, UPPER() ni
+  // BTRIM()). Sin WHERE parcial: a diferencia de Customer, el documento
+  // nunca es nulo aquí.
+  @@index([createdAt, id])
+  @@map("suppliers")
+}
+
 // --- Secuencias de documentos y cotizaciones (Fase 5, Bloque A) ------------
 
 // SALE se declara ahora (sin sembrarse) para que la futura Fase de Ventas no

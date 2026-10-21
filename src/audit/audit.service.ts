@@ -469,6 +469,13 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'reversalEntryId',
     'reason',
   ],
+  // Fase A5.1. Nunca se audita PII de proveedor (documentNumber/legalName/
+  // tradeName/contactName/email/phone/address): solo metadatos
+  // estructurales, mismo criterio exacto que CUSTOMER_CREATED/UPDATED.
+  [AuditAction.SUPPLIER_CREATED]: ['documentType', 'countryCode'],
+  [AuditAction.SUPPLIER_UPDATED]: ['updatedFields'],
+  [AuditAction.SUPPLIER_ACTIVATED]: ['previousStatus'],
+  [AuditAction.SUPPLIER_DEACTIVATED]: ['previousStatus'],
 };
 
 function isPlainObject(
