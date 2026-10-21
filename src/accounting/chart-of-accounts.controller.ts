@@ -45,7 +45,11 @@ import { UpdateAccountDto } from './dto/update-account.dto';
 import { AccountTreeNode } from './types/account-tree-node';
 import { SafeChartAccount } from './types/safe-chart-account';
 
-const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+] as const;
 const MUTATE_ROLES = [RoleName.ADMIN] as const;
 
 /**

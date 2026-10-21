@@ -39,8 +39,12 @@ const MAX_LIMIT = 100;
  */
 function hasAccountingReadAccess(role: RoleName): boolean {
   switch (role) {
+    // Fase A4.1: ACCOUNTANT lee el libro contable interno igual que
+    // MANAGEMENT, nunca escribe a través de este servicio (que es de
+    // solo lectura en sí mismo).
     case RoleName.ADMIN:
     case RoleName.MANAGEMENT:
+    case RoleName.ACCOUNTANT:
       return true;
     case RoleName.SELLER:
     case RoleName.WAREHOUSE:

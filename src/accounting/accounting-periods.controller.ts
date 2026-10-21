@@ -39,7 +39,11 @@ import { CreateAccountingPeriodDto } from './dto/create-accounting-period.dto';
 import { ListAccountingPeriodsQueryDto } from './dto/list-accounting-periods-query.dto';
 import { SafeAccountingPeriod } from './types/safe-accounting-period';
 
-const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+] as const;
 const MUTATE_ROLES = [RoleName.ADMIN] as const;
 
 /**

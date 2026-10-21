@@ -444,6 +444,31 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.ACCOUNTING_PERIOD_OPENED]: ['year', 'month'],
   [AuditAction.ACCOUNTING_PERIOD_CLOSED]: ['year', 'month'],
   [AuditAction.ACCOUNTING_PERIOD_REOPENED]: ['year', 'month'],
+  // MANUAL_JOURNAL_ (Fase A4.8): ManualJournalEntriesService es su único
+  // emisor. `draftId` identifica al borrador en las 4; `entryId` solo
+  // cuando ya existe un AccountingEntry definitivo (POSTED/REVERSED).
+  // `changedFields` en UPDATED nunca incluye oldValues/newValues: las
+  // líneas son un arreglo, no un escalar, y no hay ningún caso de uso
+  // real para diferenciar campo por campo un borrador editado (a
+  // diferencia de CONFIGURATION_UPDATED). `reason` en REVERSED es el
+  // único lugar donde ese texto se conserva — el asiento REVERSAL nunca
+  // lo embebe en su descripción (mismo criterio que el resto del dominio:
+  // sin motivo de anulación libre en el documento contable) — mismo
+  // criterio ya usado por CASH_SESSION_DISCREPANCY_REJECTED.
+  [AuditAction.MANUAL_JOURNAL_DRAFT_CREATED]: ['draftId', 'accountingDate'],
+  [AuditAction.MANUAL_JOURNAL_DRAFT_UPDATED]: ['draftId', 'changedFields'],
+  [AuditAction.MANUAL_JOURNAL_POSTED]: [
+    'draftId',
+    'entryId',
+    'accountingDate',
+    'journalNumber',
+  ],
+  [AuditAction.MANUAL_JOURNAL_REVERSED]: [
+    'draftId',
+    'entryId',
+    'reversalEntryId',
+    'reason',
+  ],
 };
 
 function isPlainObject(

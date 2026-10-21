@@ -65,3 +65,27 @@ export interface ReverseOriginalForSourceCommand {
   actorUserId: string;
   ipAddress: string | null;
 }
+
+/**
+ * Comando interno de AccountingEngine.postManualEntry() (Fase A4.4).
+ * `draftId` es el `ManualJournalDraft.id` — se usa tal cual como
+ * `AccountingEntry.sourceId` (sourceType=MANUAL), reutilizando el mismo
+ * polimorfismo sin FK ya usado por SALE/PAYMENT. A diferencia de los dos
+ * comandos de arriba, `accountingDateOnly` es una fecha YA explícita
+ * (elegida por el ACCOUNTANT/ADMIN al crear el borrador), nunca derivada
+ * de un instante — y `lines` referencia cuentas por `accountId` real,
+ * nunca por `systemKey` (el ACCOUNTANT elige la cuenta directamente del
+ * plan de cuentas, A4.3).
+ */
+export interface PostManualEntryCommand {
+  draftId: string;
+  description: string;
+  accountingDateOnly: string;
+  lines: {
+    accountId: string;
+    debitAmount: Prisma.Decimal;
+    creditAmount: Prisma.Decimal;
+  }[];
+  actorUserId: string;
+  ipAddress: string | null;
+}

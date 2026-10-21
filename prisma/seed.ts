@@ -20,6 +20,8 @@ const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   SELLER: 'Cotizaciones, ventas, pagos y clientes',
   WAREHOUSE: 'Productos, categorías, unidades e inventario',
   MANAGEMENT: 'Dashboard y reportes de lectura y análisis',
+  ACCOUNTANT:
+    'Lectura contable global y ciclo de vida completo de asientos manuales',
 };
 
 /**
@@ -235,7 +237,9 @@ async function seedRoles(): Promise<void> {
       create: { name, description: ROLE_DESCRIPTIONS[name] },
     });
   }
-  console.log('Roles verificados: ADMIN, SELLER, WAREHOUSE, MANAGEMENT');
+  console.log(
+    'Roles verificados: ADMIN, SELLER, WAREHOUSE, MANAGEMENT, ACCOUNTANT',
+  );
 }
 
 async function seedInitialAdmin(): Promise<void> {

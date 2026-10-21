@@ -1960,10 +1960,13 @@ describe('Basic Accounting (e2e)', () => {
       });
       expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
 
-      // AccountingSourceType es un enum cerrado de 2 valores (SALE|PAYMENT):
-      // no existe ni puede existir en tiempo de compilación un valor QUOTE,
-      // garantía estática, no una comprobación en runtime.
+      // AccountingSourceType (Fase A4.4: ampliado con MANUAL para los
+      // asientos manuales, que nunca se originan en una conversión de
+      // cotización) nunca incluye un valor QUOTE: no existe ni puede
+      // existir en tiempo de compilación, garantía estática, no una
+      // comprobación en runtime.
       expect(Object.values(AccountingSourceType).sort()).toEqual([
+        'MANUAL',
         'PAYMENT',
         'SALE',
       ]);

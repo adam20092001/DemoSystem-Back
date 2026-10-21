@@ -1,4 +1,8 @@
-import { resolveAccountingDateParts } from './accounting-period.utils';
+import { BadRequestException } from '@nestjs/common';
+import {
+  parseAccountingDateOnly,
+  resolveAccountingDateParts,
+} from './accounting-period.utils';
 
 describe('resolveAccountingDateParts', () => {
   it('instante normal del mediodía: misma fecha calendario en Lima', () => {
@@ -61,5 +65,38 @@ describe('resolveAccountingDateParts', () => {
     expect(result.accountingDate.toISOString()).toBe(
       '2026-12-31T00:00:00.000Z',
     );
+  });
+});
+
+describe('parseAccountingDateOnly', () => {
+  it('fecha explícita válida: year/month/accountingDate correctos, sin desplazamiento de huso', () => {
+    const result = parseAccountingDateOnly('2026-05-20');
+    expect(result.year).toBe(2026);
+    expect(result.month).toBe(5);
+    expect(result.accountingDate.toISOString()).toBe(
+      '2026-05-20T00:00:00.000Z',
+    );
+  });
+
+  it('formato inválido (no YYYY-MM-DD): BadRequestException', () => {
+    expect(() => parseAccountingDateOnly('20/05/2026')).toThrow(
+      BadRequestException,
+    );
+    expect(() => parseAccountingDateOnly('2026-5-20')).toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('fecha calendario inexistente: BadRequestException', () => {
+    expect(() => parseAccountingDateOnly('2026-02-30')).toThrow(
+      BadRequestException,
+    );
+    expect(() => parseAccountingDateOnly('2026-13-01')).toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('string vacío: BadRequestException', () => {
+    expect(() => parseAccountingDateOnly('')).toThrow(BadRequestException);
   });
 });

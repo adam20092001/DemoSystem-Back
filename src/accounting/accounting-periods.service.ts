@@ -36,6 +36,7 @@ const AUDIT_ENTITY_TYPE = 'AccountingPeriod';
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
 ]);
 
 function assertCanReadPeriods(requesterRole: RoleName): void {

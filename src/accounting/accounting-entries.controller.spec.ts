@@ -73,13 +73,17 @@ describe('AccountingEntriesController', () => {
   });
 
   describe('matriz exacta de roles', () => {
-    it('list y findOne exponen @Roles(ADMIN, MANAGEMENT) exactamente', () => {
+    it('list y findOne exponen @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) exactamente (A4.1: ACCOUNTANT lee el libro contable igual que MANAGEMENT)', () => {
       for (const method of ['list', 'findOne']) {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
           controllerPrototype[method],
         ) as RoleName[];
-        expect(metadata).toEqual([RoleName.ADMIN, RoleName.MANAGEMENT]);
+        expect(metadata).toEqual([
+          RoleName.ADMIN,
+          RoleName.MANAGEMENT,
+          RoleName.ACCOUNTANT,
+        ]);
       }
     });
 

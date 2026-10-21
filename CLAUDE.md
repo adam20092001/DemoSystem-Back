@@ -79,7 +79,7 @@ Reglas de capas:
 9. **Cotizaciones** — propuestas comerciales, sin efecto sobre stock. Desde R2 se calculan con precios finales (IGV incluido); ver §6 "Precios e IGV".
 10. **Ventas / POS** — registro y confirmación de ventas. Desde R1, la confirmación (directa o desde cotización) admite un pago inicial único (`payment`) o un lote de 1 a 10 pagos iniciales (`payments[]`), excluyentes entre sí y registrados en la misma transacción que la venta.
 11. **Pagos** — cobros aplicados a ventas, control de saldo pendiente. El método de pago (`method`) es un código dinámico administrado por ADMIN (`PaymentMethodsModule`, `GET/POST/PATCH /api/v1/payment-methods`), no un enum fijo: cada `Payment` resuelve y snapshotea el método (código, nombre, si afecta caja) en el instante del cobro, así que un método renombrado o desactivado después nunca altera pagos ya registrados. Baseline inicial: `CASH`/`CARD`/`TRANSFER`/`YAPE`/`PLIN` activos; `BANK_TRANSFER`/`BANK_DEPOSIT`/`DIGITAL_WALLET`/`OTHER` inactivos (preservados solo por historial). Solo un método `active` puede usarse en un cobro nuevo; `requiresReference` también es configuración por método, no una regla fija por código. Desde NR-01, los 5 métodos activos nacen con `requiresReference=false` en el baseline (`prisma/seed.ts`): la referencia es opcional por defecto en todos ellos, sin dejar de ser editable por ADMIN vía `PATCH /payment-methods/:id` (ver §11).
-12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones, agrupados en **periodos contables mensuales** (`AccountingPeriod`, Fase A2.1) con ciclo de vida OPEN/CLOSED, **fecha contable** propia por asiento (`AccountingEntry.accountingDate`, zona America/Lima, Fase A2.2) y **numeración secuencial** sin huecos dentro de cada periodo (`AccountingEntry.journalNumber`, Fase A2.3). Sobre esa base, tres **reportes contables de solo lectura** (Fase A3, ver §11): Libro Diario, Libro Mayor (por cuenta) y Balance de comprobación, con exportación a Excel — ninguno constituye un libro electrónico con validez fiscal SUNAT. El cliente aprobó además (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE —cuyo plan de cuentas jerárquico ya existe desde la Fase A1, ver §11—, asientos manuales, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía salvo lo ya descrito arriba. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
+12. **Contabilidad básica** — asientos derivados de ventas, pagos y anulaciones, agrupados en **periodos contables mensuales** (`AccountingPeriod`, Fase A2.1) con ciclo de vida OPEN/CLOSED, **fecha contable** propia por asiento (`AccountingEntry.accountingDate`, zona America/Lima, Fase A2.2) y **numeración secuencial** sin huecos dentro de cada periodo (`AccountingEntry.journalNumber`, Fase A2.3). Sobre esa base, tres **reportes contables de solo lectura** (Fase A3, ver §11): Libro Diario, Libro Mayor (por cuenta) y Balance de comprobación, con exportación a Excel — ninguno constituye un libro electrónico con validez fiscal SUNAT. Desde la Fase A4 (ver §11) existen además **asientos manuales**: borradores (`ManualJournalDraft`, ciclo DRAFT→POSTED, nunca una fila de `AccountingEntry` mientras no se contabilizan) creados/editados/contabilizados/revertidos por ADMIN o por el rol dedicado `ACCOUNTANT` (ver §5) vía `/api/v1/accounting/manual-entries*`, siempre posteados a través del mismo `AccountingEngine` que ya posteaba SALE/PAYMENT. El cliente aprobó además (Fase A0, ver §11) un alcance de ROADMAP mucho mayor para este módulo (PCGE —cuyo plan de cuentas jerárquico ya existe desde la Fase A1, ver §11—, compras y cuentas por pagar, multimoneda) — aprobación de dirección estratégica, no autorización para implementar todavía salvo lo ya descrito arriba. Ver §11 para el detalle y §7 para lo que sigue expresamente fuera de alcance mientras no se apruebe cada capacidad puntual.
 13. **Reportes** — ventas, cobranzas, inventario, cuentas por cobrar. Los 5 reportes operativos de venta/cobranza/cotización (R2/R3/R4/R8/R9) están restringidos por propiedad del vendedor desde P6-E1 (ver §6 y §11).
 14. **Configuración y correlativos** — parámetros del sistema y series de documentos.
 15. **Auditoría** — registro de acciones críticas.
@@ -94,6 +94,7 @@ Reglas de capas:
 - `SELLER` — cotizaciones, ventas, pagos, clientes, comprobantes electrónicos y reportes/dashboard comerciales, pero **restringido a sus propios registros** (`Sale.sellerId`/`Quote.sellerId`) desde P1–P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11). No tiene acceso a Contabilidad básica ni a Auditoría.
 - `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes.
 - `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones (ver §11, cierre P6-E4).
+- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Sin acceso a ningún módulo fuera de Contabilidad (ventas, inventario, usuarios, configuración, etc. responden 403).
 
 La autorización se resuelve **siempre en el backend** mediante guards y decoradores de rol.
 El frontend puede ocultar opciones, pero eso **no** cuenta como control de acceso.
@@ -774,10 +775,165 @@ cuentas).
   ningún comportamiento previo de A0/A1/A2; `lint:check` y `build`
   correctos.
 
+**Fase A4 — Asientos manuales y rol ACCOUNTANT** (rama
+`feat/accounting-a4-manual-entries`, base `main` en `a55c8cc`,
+**implementada y validada, sin commit/push/PR todavía** — pendiente de
+autorización explícita del cliente; migración aplicada EXCLUSIVAMENTE en
+`pos_db_test`, nunca en `pos_db`). Construye sobre A0-A3: `AccountingEngine`
+sigue siendo el ÚNICO escritor de `AccountingEntry`/`AccountingEntryLine`;
+A4 no introduce un segundo escritor ni modifica el comportamiento existente
+de SALE/PAYMENT.
+
+- **A4.1 — Rol `ACCOUNTANT`.** Nuevo valor de `RoleName`. Lectura: mismo
+  alcance que `MANAGEMENT` en todo el dominio contable (`GET /accounts`,
+  `/accounting/entries*`, `/chart-of-accounts*`, `/accounting/periods*`,
+  `/accounting/reports/*`, incluidas las exportaciones `.xlsx`) —
+  `READ_ROLES` de cada controller/`READ_ROLES`/`ReadonlySet` de cada
+  service existente se extendió con `RoleName.ACCOUNTANT` (sin tocar
+  `MUTATE_ROLES`, que siguen siendo exclusivos de ADMIN donde ya lo eran).
+  Escritura: **exclusiva** de `/api/v1/accounting/manual-entries*` (crear,
+  editar, contabilizar, revertir) junto con ADMIN; `MANAGEMENT` nunca
+  adquiere escritura aquí (mismo criterio ya cerrado en P6-E4).
+  `SELLER`/`WAREHOUSE` sin ningún acceso. Verificado explícitamente que
+  `ACCOUNTANT` no escala a módulos no relacionados (ventas, productos,
+  usuarios, etc. responden 403). Asignable de inmediato por el flujo
+  existente de gestión de usuarios (`PATCH /users/:id` con `roleNames`):
+  extender el enum no requirió ningún otro cambio en `UsersModule`, porque
+  tanto el seed de roles (`Object.values(RoleName)`) como el validador del
+  DTO (`@IsEnum(RoleName, {each:true})`) ya son genéricos sobre el enum.
+  **Hallazgo corregido durante esta fase:** `resolveDefaultActiveRole()`
+  (`src/auth/default-active-role.ts`, KAN-18) tenía una lista FIJA de
+  roles elegibles como "rol activo por defecto al iniciar sesión" que no
+  incluía `ACCOUNTANT` — un usuario cuyo único rol fuera `ACCOUNTANT` no
+  podía iniciar sesión en absoluto (500 "El usuario no tiene ningún rol
+  asignado"). Corregido agregando `ACCOUNTANT` a `DEFAULT_ACTIVE_ROLE_ORDER`,
+  junto a `MANAGEMENT` y antes de `ADMIN` (mismo sesgo "rol menos
+  privilegiado primero" ya documentado en esa función); con prueba unitaria
+  dedicada (`default-active-role.spec.ts`) cubriendo el caso de regresión.
+- **A4.2 — Borradores de asiento manual.** Modelo nuevo, deliberadamente
+  SEPARADO de `AccountingEntry` (para que A3 nunca incluya un monto sin
+  contabilizar): `ManualJournalDraft` (fecha contable `@db.Date`,
+  descripción, `status` `DRAFT`/`POSTED`, `postedEntryId` único nullable →
+  `AccountingEntry`, creador, timestamps) + `ManualJournalDraftLine`
+  (cuenta real por `accountId`, `debitAmount`/`creditAmount`). CRUD vía
+  `GET/POST /api/v1/accounting/manual-entries`,
+  `GET/PATCH /api/v1/accounting/manual-entries/:id`. Un borrador puede
+  crearse/editarse sin líneas o con líneas incompletas (CHECK de base de
+  datos permite `0/0`, a diferencia del CHECK de `accounting_entry_lines`
+  que exige exactamente un lado positivo): toda validación financiera
+  estricta se aplica solo al contabilizar (A4.3). `PATCH` reemplaza el
+  arreglo de líneas por completo (nunca un parche línea a línea) y solo
+  mientras `status=DRAFT` (409 si ya está `POSTED`). Nunca reserva número
+  de asiento mientras es borrador. Sin flujo de aprobación.
+- **A4.3 — Validación de posteo.** Al contabilizar (`POST
+  .../manual-entries/:id/post`): mínimo 2 líneas, ninguna línea en 0/0,
+  cuentas ACTIVE+`isPostable` (cuenta inexistente/inactiva/no postable →
+  400, resuelta por `accountId` real — nunca por `systemKey`, a diferencia
+  de SALE/PAYMENT), total débito = total crédito
+  (`assertManualDraftLinesBalanced()`, que reutiliza la MISMA aritmética
+  `assertLinesBalanced()` de SALE/PAYMENT traducida a 400 en vez de 500
+  — nunca una segunda implementación del cuadre), `Prisma.Decimal` en
+  todo el cálculo, fecha contable obligatoria, periodo debe existir y
+  estar OPEN (ver A4.4).
+- **A4.4 — Posteo vía AccountingEngine.** Nuevo método
+  `AccountingEngine.postManualEntry()` (único punto donde un
+  `ManualJournalDraft` se convierte en una fila real de
+  `AccountingEntry`): `sourceType=MANUAL` (valor nuevo de
+  `AccountingSourceType`) + `sourceId=draftId` — mismo polimorfismo sin FK
+  ya usado por SALE/PAYMENT, así que el índice único parcial
+  `accounting_entries_one_original_per_source` (A1/A2, sin cambios)
+  garantiza por sí solo, a nivel de base de datos, que un borrador nunca
+  se contabilice dos veces. Usa la fecha contable EXPLÍCITA elegida por
+  el ACCOUNTANT/ADMIN (`parseAccountingDateOnly()`), nunca derivada de un
+  instante. Política de periodo (nunca auto-crea un periodo histórico
+  arbitrario): si el periodo del mes solicitado ya existe, se usa tal
+  cual (OPEN o CLOSED — 409 si CLOSED); si no existe pero es el mes de
+  negocio EN CURSO, se auto-crea OPEN con el mismo criterio ya usado por
+  el posteo comercial; si no existe y NO es el mes en curso, 404 (ADMIN
+  debe abrir el periodo primero vía `POST /accounting/periods`, A2.6).
+  Numeración/asignación de periodo reutilizan el mismo `UPDATE ...
+  RETURNING` atómico de A2.4 (`incrementJournalNumber()`, extraído de
+  `resolvePeriodAndAssignNumber()` para compartirlo sin duplicar lógica).
+  Marca el borrador `POSTED` con su `postedEntryId` en la MISMA
+  transacción que crea el asiento. SALE/PAYMENT sin cambios de
+  comportamiento.
+- **A4.5 — Reversión.** `POST .../manual-entries/:id/reverse`
+  (`reason` obligatorio, máx. 200 caracteres), exclusivo de un asiento
+  MANUAL ya `POSTED` (409 en cualquier otro estado). Reutiliza
+  `AccountingEngine.reverseOriginalForSource()` sin cambios de
+  comportamiento salvo una rama nueva de descripción (`buildManual
+  ReversalDescription()`: reutiliza la propia descripción del asiento
+  ORIGINAL, recortada a 200 caracteres — un asiento manual no tiene
+  número de documento del que derivarla). Doble reversión bloqueada por
+  el mismo chequeo `existingReversal` ya existente en esa función (sin
+  código nuevo). Nunca edita/elimina el asiento posteado; nunca revierte
+  SALE/PAYMENT por esta vía (`sourceType=MANUAL` lo hace estructuralmente
+  imposible).
+- **A4.6 — Transaccionalidad y concurrencia.** Un único mecanismo de lock
+  de fila (`SELECT ... FOR UPDATE` sobre `manual_journal_drafts`,
+  reutilizado idéntico por `updateDraft()`/`postDraft()`/`reverseEntry()`
+  en `ManualJournalEntriesService`) serializa edición/contabilización/
+  reversión de UN MISMO borrador entre sí, sin ningún lock global nuevo —
+  respaldado por el índice único parcial de A4.4 como segunda línea de
+  defensa independiente a nivel de base de datos. Verificado con pruebas
+  E2E de concurrencia real contra PostgreSQL (nunca mocks): doble posteo
+  simultáneo del mismo borrador (exactamente uno gana, un solo
+  `AccountingEntry`), edición vs. contabilización en paralelo (nunca un
+  estado mixto), doble reversión simultánea (exactamente una gana, un
+  solo REVERSAL).
+- **A4.7 — Endpoints.** `GET/POST /api/v1/accounting/manual-entries`,
+  `GET/PATCH /api/v1/accounting/manual-entries/:id`,
+  `POST /api/v1/accounting/manual-entries/:id/post`,
+  `POST /api/v1/accounting/manual-entries/:id/reverse`. DTOs con
+  `class-validator`, Swagger completo, errores 400/403/404/409
+  consistentes vía el filtro global existente. Ninguna acción vía GET;
+  nunca expone edición del `AccountingEntry` definitivo.
+- **A4.8 — Auditoría.** Cuatro acciones nuevas:
+  `MANUAL_JOURNAL_DRAFT_CREATED`, `MANUAL_JOURNAL_DRAFT_UPDATED`,
+  `MANUAL_JOURNAL_POSTED`, `MANUAL_JOURNAL_REVERSED` — emitidas por
+  `ManualJournalEntriesService` (con `draftId`/`entryId`/`reason`/
+  `changedFields` según la acción), ADICIONALES al
+  `ACCOUNTING_ENTRY_POSTED`/`ACCOUNTING_ENTRY_REVERSED` genérico que
+  `AccountingEngine` ya emitía para cualquier `sourceType` (mismo patrón
+  dual que `PAYMENT_REGISTERED`+`ACCOUNTING_ENTRY_POSTED`). Whitelist de
+  metadata (`AuditService`) extendida para las cuatro.
+- **A4.9 — Integración con A3.** Sin ningún cambio en
+  `AccountingReportsService`/cálculos de A3: un `ManualJournalDraft` en
+  `DRAFT` nunca aparece en Libro Diario/Mayor/Balance (vive en una tabla
+  separada); una vez `POSTED`, el asiento `MANUAL` aparece de forma
+  natural en los tres reportes (mismo `accountingDate`/`periodId`/
+  `journalNumber` que cualquier asiento SALE/PAYMENT); una reversión
+  aparece como un asiento independiente; los totales siguen cuadrando
+  (débito=crédito) después de contabilizar y después de revertir.
+  Verificado con pruebas E2E dedicadas contra el Libro Diario y el
+  Balance de comprobación reales.
+- **Migración.** `20261020223254_add_manual_journal_entries_and_
+  accountant_role` — 100% aditiva: `ALTER TYPE "RoleName" ADD VALUE
+  'ACCOUNTANT'`, `ALTER TYPE "AccountingSourceType" ADD VALUE 'MANUAL'`,
+  tipo nuevo `ManualJournalDraftStatus`, tablas nuevas
+  `manual_journal_drafts`/`manual_journal_draft_lines` con sus FK/índices/
+  CHECK. Ninguna tabla ni columna existente se modifica. Aplicada y
+  verificada (sin drift, `prisma migrate diff`) únicamente en
+  `pos_db_test`; `pos_db` queda intacta con esta migración pendiente,
+  confirmado con `prisma migrate status`.
+- **Validación:** 99 suites / 3301 pruebas unitarias; 35 suites / 1440
+  pruebas E2E (incluida la nueva `test/manual-journal-entries.e2e-spec.ts`:
+  RBAC y no-escalamiento de `ACCOUNTANT`, CRUD de borrador, validaciones
+  de posteo, periodo faltante/CLOSED con auto-creación del mes en curso,
+  reversión y doble reversión, integración con Libro Diario/Balance de
+  comprobación, y concurrencia real) en dos ejecuciones consecutivas
+  (exit code 0 ambas, sin reset entre ellas); regresión completa de A0-A3
+  sin romper ningún comportamiento previo (dos hallazgos preexistentes
+  actualizados a propósito, no regresiones: la lista fija de
+  `AccountingSourceType` en `accounting.e2e-spec.ts` y las listas fijas de
+  `@Roles(ADMIN, MANAGEMENT)` en los controllers de lectura contable,
+  ambas ahora incluyen legítimamente `ACCOUNTANT`/`MANUAL`); `lint:check`
+  y `build` correctos.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
-descuentos en soles o porcentaje; asientos manuales; reportes contables
+descuentos en soles o porcentaje; reportes contables
 adicionales (flujo de caja, estados financieros); módulo de
 importaciones y proveedores; cualquier cambio futuro que amplíe los permisos
 de facturación/escritura de MANAGEMENT (su alcance actual —lectura global,
@@ -791,21 +947,21 @@ si el Libro Mayor/Balance de comprobación deberían ofrecer una vista
 CONSOLIDADA de cuenta padre + hijas además de la vista actual de saldo
 directo (decisión provisional vigente: solo saldo directo, nunca
 consolidado — ver §11 A3.2; cualquier vista consolidada es una capacidad
-nueva a diseñar explícitamente, nunca asumida); rol `ACCOUNTANT` dedicado
-(seguirá diferido hasta una fase posterior).
+nueva a diseñar explícitamente, nunca asumida).
 
 **Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
 `products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
 conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
-aislamiento global no está completamente resuelto); 11 errores preexistentes
+aislamiento global no está completamente resuelto); 18 errores preexistentes
 en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **19**, las 19 en `main` (A1 vía PR #31, A2 vía PR
-#32) y aplicadas tanto en `pos_db` como en `pos_db_test`. La Fase A3
-(reportes contables) no agrega ninguna migración: reutiliza por completo
-el esquema de A1/A2. Sin cambios de esquema por el requerimiento de
-propiedad por vendedor ni por la Fase A0: ambos son exclusivamente de
-autorización/lógica de servicio.
+Migraciones totales: **20**, las 19 anteriores en `main` (A1 vía PR #31,
+A2 vía PR #32) y aplicadas tanto en `pos_db` como en `pos_db_test`; la
+migración 20 de la Fase A4 (ver arriba) aplicada EXCLUSIVAMENTE en
+`pos_db_test`. La Fase A3 (reportes contables) no agregó ninguna
+migración: reutilizó por completo el esquema de A1/A2. Sin cambios de
+esquema por el requerimiento de propiedad por vendedor ni por la Fase A0:
+ambos son exclusivamente de autorización/lógica de servicio.
 
 ---
 

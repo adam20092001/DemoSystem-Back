@@ -12,4 +12,7 @@ export interface PostedAccountingEntry {
   sourceType: AccountingSourceType;
   sourceId: string;
   eventType: AccountingEventType;
+  /** Fase A4.8: usados por ManualJournalEntriesService para su propio audit metadata (draftId/entryId por sí solos no bastan para journalNumber/accountingDate). */
+  journalNumber: number;
+  accountingDate: Date;
 }
