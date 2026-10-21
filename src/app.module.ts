@@ -17,6 +17,7 @@ import { ProductsModule } from './products/products.module';
 import { QuotesModule } from './quotes/quotes.module';
 import { ReportsModule } from './reports/reports.module';
 import { SalesModule } from './sales/sales.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
 import { UnitsModule } from './units/units.module';
 import { UsersModule } from './users/users.module';
 
@@ -37,6 +38,7 @@ import { UsersModule } from './users/users.module';
     ProductsModule,
     InventoryModule,
     CustomersModule,
+    SuppliersModule,
     QuotesModule,
     SalesModule,
     PaymentMethodsModule,

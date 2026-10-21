@@ -213,4 +213,11 @@ export enum AuditAction {
   MANUAL_JOURNAL_DRAFT_UPDATED = 'MANUAL_JOURNAL_DRAFT_UPDATED',
   MANUAL_JOURNAL_POSTED = 'MANUAL_JOURNAL_POSTED',
   MANUAL_JOURNAL_REVERSED = 'MANUAL_JOURNAL_REVERSED',
+  // Fase A5.1 (maestro de proveedores). SuppliersService es su único
+  // emisor. Sin ningún vínculo a Compras/Cuentas por Pagar/AccountingEngine
+  // todavía (esta fase es exclusivamente maestro de datos).
+  SUPPLIER_CREATED = 'SUPPLIER_CREATED',
+  SUPPLIER_UPDATED = 'SUPPLIER_UPDATED',
+  SUPPLIER_ACTIVATED = 'SUPPLIER_ACTIVATED',
+  SUPPLIER_DEACTIVATED = 'SUPPLIER_DEACTIVATED',
 }
