@@ -1,8 +1,11 @@
 import {
+  BadRequestException,
   ConflictException,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import {
+  AccountStatus,
   AccountType,
   AccountingEventType,
   AccountingSourceType,
@@ -14,6 +17,7 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { AccountingEngine } from './accounting.engine';
 import {
+  PostManualEntryCommand,
   PostPaymentCollectionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
@@ -87,6 +91,57 @@ function makeAccountRow(
 const ALL_ACCOUNTS = Object.values(AccountingSystemKey).map((key) =>
   makeAccountRow(key),
 );
+
+const MANUAL_DRAFT_ID = '66666666-6666-4666-8666-666666666666';
+const MANUAL_ACCOUNT_DEBIT_ID = '77777777-7777-4777-8777-777777777777';
+const MANUAL_ACCOUNT_CREDIT_ID = '88888888-8888-4888-8888-888888888888';
+
+function makeManualAccountRow(
+  id: string,
+  overrides: Partial<Record<string, unknown>> = {},
+) {
+  return {
+    id,
+    code: `MAN-${id.slice(0, 4)}`,
+    name: `Cuenta manual ${id.slice(0, 4)}`,
+    type: AccountType.ASSET,
+    systemKey: null,
+    status: AccountStatus.ACTIVE,
+    isPostable: true,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+const MANUAL_ACCOUNTS = [
+  makeManualAccountRow(MANUAL_ACCOUNT_DEBIT_ID),
+  makeManualAccountRow(MANUAL_ACCOUNT_CREDIT_ID),
+];
+
+function makeManualCommand(
+  overrides: Partial<PostManualEntryCommand> = {},
+): PostManualEntryCommand {
+  return {
+    draftId: MANUAL_DRAFT_ID,
+    description: 'Ajuste de provisión de alquiler',
+    accountingDateOnly: '2026-03-15',
+    lines: [
+      {
+        accountId: MANUAL_ACCOUNT_DEBIT_ID,
+        debitAmount: d('100.00'),
+        creditAmount: d('0.00'),
+      },
+      {
+        accountId: MANUAL_ACCOUNT_CREDIT_ID,
+        debitAmount: d('0.00'),
+        creditAmount: d('100.00'),
+      },
+    ],
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+    ...overrides,
+  };
+}
 
 function makeSaleCommand(
   overrides: Partial<PostSaleRecognitionCommand> = {},
@@ -452,6 +507,216 @@ describe('AccountingEngine', () => {
   });
 
   // ====================================================================
+  // postManualEntry (Fase A4.4)
+  // ====================================================================
+  describe('postManualEntry', () => {
+    beforeEach(() => {
+      tx.account.findMany.mockResolvedValue(MANUAL_ACCOUNTS);
+      tx.accountingEntry.create.mockResolvedValue({
+        id: ENTRY_ID,
+        sourceType: AccountingSourceType.MANUAL,
+        sourceId: MANUAL_DRAFT_ID,
+        eventType: AccountingEventType.ORIGINAL,
+      });
+    });
+
+    it('crea ORIGINAL con sourceType=MANUAL, sourceId=draftId y las líneas por accountId', async () => {
+      await engine.postManualEntry(
+        tx as unknown as Prisma.TransactionClient,
+        makeManualCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          eventType: AccountingEventType;
+          description: string;
+          createdByUserId: string;
+          lines: {
+            create: {
+              accountId: string;
+              debitAmount: Prisma.Decimal;
+              creditAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.MANUAL);
+      expect(call.data.sourceId).toBe(MANUAL_DRAFT_ID);
+      expect(call.data.eventType).toBe(AccountingEventType.ORIGINAL);
+      expect(call.data.description).toBe('Ajuste de provisión de alquiler');
+      expect(call.data.createdByUserId).toBe(ACTOR_ID);
+      const byAccount = new Map(
+        call.data.lines.create.map((l) => [l.accountId, l]),
+      );
+      expect(
+        byAccount.get(MANUAL_ACCOUNT_DEBIT_ID)?.debitAmount.toFixed(2),
+      ).toBe('100.00');
+      expect(
+        byAccount.get(MANUAL_ACCOUNT_CREDIT_ID)?.creditAmount.toFixed(2),
+      ).toBe('100.00');
+    });
+
+    it('usa la fecha contable EXPLÍCITA del comando, nunca derivada de postedAt/new Date()', async () => {
+      await engine.postManualEntry(
+        tx as unknown as Prisma.TransactionClient,
+        makeManualCommand({ accountingDateOnly: '2026-03-20' }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-20T00:00:00.000Z',
+      );
+    });
+
+    it('fecha explícita inválida: BadRequestException, no consulta cuentas ni crea el asiento', async () => {
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          makeManualCommand({ accountingDateOnly: '2026-02-30' }),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('draft ya contabilizado (ya existe ORIGINAL con sourceType=MANUAL/sourceId=draftId): ConflictException', async () => {
+      tx.accountingEntry.findFirst.mockResolvedValue({ id: 'existing-entry' });
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          makeManualCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+      expect(tx.accountingEntry.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            sourceType: AccountingSourceType.MANUAL,
+            sourceId: MANUAL_DRAFT_ID,
+            eventType: AccountingEventType.ORIGINAL,
+          },
+        }),
+      );
+    });
+
+    it('cuenta referenciada inexistente/inactiva/no postable: BadRequestException (nunca 500 — error de entrada del ACCOUNTANT)', async () => {
+      tx.account.findMany.mockResolvedValue([
+        makeManualAccountRow(MANUAL_ACCOUNT_DEBIT_ID),
+        // MANUAL_ACCOUNT_CREDIT_ID queda excluido (inactiva/inexistente).
+      ]);
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          makeManualCommand(),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('resuelve cuentas por accountId (nunca por systemKey): el where usa id.in, filtrando ACTIVE+isPostable', async () => {
+      await engine.postManualEntry(
+        tx as unknown as Prisma.TransactionClient,
+        makeManualCommand(),
+      );
+      const call = tx.account.findMany.mock.calls[0][0] as {
+        where: { id: { in: string[] }; status: string; isPostable: boolean };
+      };
+      expect(call.where.id.in).toEqual(
+        expect.arrayContaining([
+          MANUAL_ACCOUNT_DEBIT_ID,
+          MANUAL_ACCOUNT_CREDIT_ID,
+        ]),
+      );
+      expect(call.where.status).toBe('ACTIVE');
+      expect(call.where.isPostable).toBe(true);
+    });
+
+    it('líneas desbalanceadas: la defensa en profundidad del motor también rechaza (InternalServerErrorException, el servicio ya debió filtrar esto con 400 antes)', async () => {
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          makeManualCommand({
+            lines: [
+              {
+                accountId: MANUAL_ACCOUNT_DEBIT_ID,
+                debitAmount: d('100.00'),
+                creditAmount: d('0.00'),
+              },
+              {
+                accountId: MANUAL_ACCOUNT_CREDIT_ID,
+                debitAmount: d('0.00'),
+                creditAmount: d('90.00'),
+              },
+            ],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('periodo del mes solicitado no existe y NO es el mes de negocio en curso: NotFoundException, nunca auto-crea un periodo histórico', async () => {
+      tx.accountingPeriod.findUnique.mockResolvedValue(null);
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          // "Hoy" para el motor es la fecha real del sistema; usamos una
+          // fecha explícita lejana en el pasado para garantizar que nunca
+          // coincide con el mes de negocio en curso.
+          makeManualCommand({ accountingDateOnly: '2020-01-15' }),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('periodo del mes solicitado existe pero está CERRADO: ConflictException vía el mismo UPDATE...RETURNING que el posteo comercial', async () => {
+      tx.accountingPeriod.findUnique.mockResolvedValue({ id: PERIOD_ID });
+      tx.$queryRaw.mockResolvedValue([]);
+      await expect(
+        engine.postManualEntry(
+          tx as unknown as Prisma.TransactionClient,
+          makeManualCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('asigna el journalNumber devuelto por el UPDATE...RETURNING, igual que el posteo comercial', async () => {
+      tx.$queryRaw.mockResolvedValue([{ lastJournalNumber: 5 }]);
+      await engine.postManualEntry(
+        tx as unknown as Prisma.TransactionClient,
+        makeManualCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { journalNumber: number };
+      };
+      expect(call.data.journalNumber).toBe(5);
+    });
+
+    it('audita ACCOUNTING_ENTRY_POSTED exactamente una vez, mismo tx', async () => {
+      await engine.postManualEntry(
+        tx as unknown as Prisma.TransactionClient,
+        makeManualCommand(),
+      );
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+      const call = auditService.record.mock.calls[0][0] as {
+        action: AuditAction;
+        metadata: Record<string, unknown>;
+        client: unknown;
+      };
+      expect(call.action).toBe(AuditAction.ACCOUNTING_ENTRY_POSTED);
+      expect(call.metadata).toEqual({
+        entryId: ENTRY_ID,
+        sourceType: AccountingSourceType.MANUAL,
+        sourceId: MANUAL_DRAFT_ID,
+        eventType: AccountingEventType.ORIGINAL,
+      });
+      expect(call.client).toBe(tx);
+    });
+  });
+
+  // ====================================================================
   // reverseOriginalForSource
   // ====================================================================
   describe('reverseOriginalForSource', () => {
@@ -579,6 +844,31 @@ describe('AccountingEngine', () => {
       };
       expect(call.data.description).toBe(
         `Reversión de cobro de venta ${SALE_NUMBER}`,
+      );
+    });
+
+    it('descripción de reversión MANUAL: reutiliza original.description (nunca sourceNumber, que no aplica) con el prefijo fijo', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          ...makeOriginalWithLines(),
+          sourceType: AccountingSourceType.MANUAL,
+          sourceId: MANUAL_DRAFT_ID,
+          description: 'Ajuste de provisión de alquiler',
+        })
+        .mockResolvedValueOnce(null);
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({
+          sourceType: AccountingSourceType.MANUAL,
+          sourceId: MANUAL_DRAFT_ID,
+          sourceNumber: '',
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { description: string };
+      };
+      expect(call.data.description).toBe(
+        'Reversión de asiento manual: Ajuste de provisión de alquiler',
       );
     });
 

@@ -10,6 +10,8 @@ import { AccountingService } from './accounting.service';
 import { AccountsController } from './accounts.controller';
 import { ChartOfAccountsController } from './chart-of-accounts.controller';
 import { ChartOfAccountsService } from './chart-of-accounts.service';
+import { ManualJournalEntriesController } from './manual-journal-entries.controller';
+import { ManualJournalEntriesService } from './manual-journal-entries.service';
 
 /**
  * PrismaService/AuditService llegan de módulos globales (Database, Audit).
@@ -44,6 +46,15 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
  * Products/AccountsReceivable, provider local sin dependencias). Nunca
  * escribe AccountingEntry/AccountingEntryLine ni invoca a AccountingEngine
  * para postear: deriva exclusivamente de lo ya persistido.
+ *
+ * Fase A4 (asientos manuales + rol ACCOUNTANT): agrega
+ * ManualJournalEntriesController/Service — ciclo de vida DRAFT -> POSTED
+ * de borradores de asiento manual y su reversión controlada.
+ * ManualJournalEntriesService NUNCA escribe AccountingEntry/
+ * AccountingEntryLine directamente: todo posteo/reversión definitivo pasa
+ * por AccountingEngine (postManualEntry()/reverseOriginalForSource()),
+ * que sigue siendo el único escritor de esas dos tablas. Tampoco se
+ * exporta: ningún otro módulo administra borradores manuales.
  */
 @Module({
   controllers: [
@@ -52,6 +63,7 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
     ChartOfAccountsController,
     AccountingPeriodsController,
     AccountingReportsController,
+    ManualJournalEntriesController,
   ],
   providers: [
     AccountingEngine,
@@ -60,6 +72,7 @@ import { ChartOfAccountsService } from './chart-of-accounts.service';
     AccountingPeriodsService,
     AccountingReportsService,
     ExcelExportService,
+    ManualJournalEntriesService,
   ],
   exports: [AccountingEngine],
 })

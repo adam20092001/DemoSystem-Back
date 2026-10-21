@@ -7,6 +7,7 @@ import {
 import {
   assertLinesBalanced,
   assertValidAccountingDescription,
+  buildManualReversalDescription,
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
   buildPaymentReversalDescription,
@@ -16,6 +17,7 @@ import {
   hasSaleEconomicActivity,
   invertResolvedLines,
 } from './accounting-calculator';
+import { ACCOUNTING_DESCRIPTION_MAX_LENGTH } from './constants/accounting.constants';
 
 function d(value: string): Prisma.Decimal {
   return new Prisma.Decimal(value);
@@ -327,5 +329,30 @@ describe('descripciones de asiento', () => {
     expect(() =>
       assertValidAccountingDescription('Venta NV-000001'),
     ).not.toThrow();
+  });
+});
+
+describe('buildManualReversalDescription', () => {
+  it('antepone el prefijo fijo a la descripción original', () => {
+    expect(
+      buildManualReversalDescription('Ajuste de provisión de alquiler'),
+    ).toBe('Reversión de asiento manual: Ajuste de provisión de alquiler');
+  });
+
+  it('recorta a ACCOUNTING_DESCRIPTION_MAX_LENGTH cuando el combinado excede el límite', () => {
+    const longOriginal = 'x'.repeat(ACCOUNTING_DESCRIPTION_MAX_LENGTH);
+    const result = buildManualReversalDescription(longOriginal);
+    expect(result.length).toBe(ACCOUNTING_DESCRIPTION_MAX_LENGTH);
+    expect(result.startsWith('Reversión de asiento manual: ')).toBe(true);
+  });
+
+  it('no recorta cuando el combinado cabe exactamente en el límite', () => {
+    const prefixLength = 'Reversión de asiento manual: '.length;
+    const originalAtLimit = 'y'.repeat(
+      ACCOUNTING_DESCRIPTION_MAX_LENGTH - prefixLength,
+    );
+    const result = buildManualReversalDescription(originalAtLimit);
+    expect(result.length).toBe(ACCOUNTING_DESCRIPTION_MAX_LENGTH);
+    expect(result).toBe(`Reversión de asiento manual: ${originalAtLimit}`);
   });
 });

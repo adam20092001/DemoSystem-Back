@@ -217,6 +217,26 @@ export function buildPaymentReversalDescription(saleNumber: string): string {
   return `Reversión de cobro de venta ${saleNumber}`;
 }
 
+const MANUAL_REVERSAL_PREFIX = 'Reversión de asiento manual: ';
+
+/**
+ * Fase A4.5: a diferencia de las tres anteriores (siempre interpolan un
+ * número de documento), un asiento manual no tiene número de documento —
+ * reutiliza la propia descripción (ya elegida por el ACCOUNTANT/ADMIN) del
+ * asiento ORIGINAL que revierte. Recortada de forma segura a 200
+ * caracteres (límite de columna/CHECK ya existente de
+ * accounting_entries.description): el prefijo nunca debe convertir una
+ * descripción original válida en una inválida por longitud.
+ */
+export function buildManualReversalDescription(
+  originalDescription: string,
+): string {
+  const combined = `${MANUAL_REVERSAL_PREFIX}${originalDescription}`;
+  return combined.length > ACCOUNTING_DESCRIPTION_MAX_LENGTH
+    ? combined.slice(0, ACCOUNTING_DESCRIPTION_MAX_LENGTH)
+    : combined;
+}
+
 /**
  * Defensa en profundidad (mismo criterio que StockMovementEngine con
  * reason/notes): aunque la descripción SIEMPRE la genera el backend a

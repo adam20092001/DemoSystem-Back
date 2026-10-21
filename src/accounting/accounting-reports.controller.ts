@@ -30,7 +30,11 @@ import { JournalReportResult } from './types/journal-report.types';
 import { LedgerReportResult } from './types/ledger-report.types';
 import { TrialBalanceReportResult } from './types/trial-balance-report.types';
 
-const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+] as const;
 
 /**
  * Reportes contables de SOLO LECTURA (Fase A3): Libro Diario, Libro Mayor

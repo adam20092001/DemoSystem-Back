@@ -48,6 +48,12 @@ enum RoleName {
   SELLER
   WAREHOUSE
   MANAGEMENT
+  // Fase A4: lectura global del dominio contable (plan de cuentas,
+  // periodos, asientos, reportes) + ciclo de vida completo de asientos
+  // manuales (crear/editar borrador, contabilizar, revertir) — nunca
+  // administración de ventas/inventario/usuarios/configuración, que
+  // siguen exigiendo ADMIN explícitamente en cada guard propio.
+  ACCOUNTANT
 }
 
 enum UserStatus {
@@ -132,59 +138,61 @@ model UserRole {
 }
 
 model User {
-  id                        String              @id @default(uuid()) @db.Uuid
-  firstName                 String              @map("first_name") @db.VarChar(80)
-  lastName                  String              @map("last_name") @db.VarChar(80)
-  username                  String              @unique @db.VarChar(50)
-  email                     String              @unique @db.VarChar(150)
-  passwordHash              String              @map("password_hash") @db.VarChar(255)
+  id                         String               @id @default(uuid()) @db.Uuid
+  firstName                  String               @map("first_name") @db.VarChar(80)
+  lastName                   String               @map("last_name") @db.VarChar(80)
+  username                   String               @unique @db.VarChar(50)
+  email                      String               @unique @db.VarChar(150)
+  passwordHash               String               @map("password_hash") @db.VarChar(255)
   // KAN-18: roleId/role (relación singular) se reemplazan por roles
   // (UserRole[]) — autorización persistente de uno o más roles. El rol
   // ACTIVO de una sesión nunca se persiste aquí (ver TokenService.sign()/
   // JwtAuthGuard): solo vive en el JWT firmado, validado en vivo contra
   // esta colección en cada petición.
-  roles                     UserRole[]
-  status                    UserStatus          @default(ACTIVE)
-  mustChangePassword        Boolean             @default(true) @map("must_change_password")
-  failedLoginAttempts       Int                 @default(0) @map("failed_login_attempts")
-  blockedAt                 DateTime?           @map("blocked_at")
-  lastLoginAt               DateTime?           @map("last_login_at")
-  createdAt                 DateTime            @default(now()) @map("created_at")
-  updatedAt                 DateTime            @updatedAt @map("updated_at")
-  auditLogs                 AuditLog[]
-  inventoryMovements        InventoryMovement[]
+  roles                      UserRole[]
+  status                     UserStatus           @default(ACTIVE)
+  mustChangePassword         Boolean              @default(true) @map("must_change_password")
+  failedLoginAttempts        Int                  @default(0) @map("failed_login_attempts")
+  blockedAt                  DateTime?            @map("blocked_at")
+  lastLoginAt                DateTime?            @map("last_login_at")
+  createdAt                  DateTime             @default(now()) @map("created_at")
+  updatedAt                  DateTime             @updatedAt @map("updated_at")
+  auditLogs                  AuditLog[]
+  inventoryMovements         InventoryMovement[]
   // Cotizaciones donde este usuario es el emisor comercial (sellerId =
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
-  issuedQuotes              Quote[]
+  issuedQuotes               Quote[]
   // Ventas donde este usuario es el vendedor (D10, Fase 6): directa = actor
   // autenticado; desde cotización = Quote.sellerId (no necesariamente quien
   // ejecuta la conversión). Dos relaciones nombradas porque Sale referencia
   // User dos veces (vendedor y quien anula).
-  soldSales                 Sale[]              @relation("SaleSeller")
-  cancelledSales            Sale[]              @relation("SaleCancelledBy")
+  soldSales                  Sale[]               @relation("SaleSeller")
+  cancelledSales             Sale[]               @relation("SaleCancelledBy")
   // Pagos (Fase 7, Bloque A): dos relaciones nombradas porque Payment
   // referencia User dos veces (quien registra y quien anula), mismo
   // criterio que soldSales/cancelledSales arriba.
-  createdPayments           Payment[]           @relation("PaymentCreatedBy")
-  cancelledPayments         Payment[]           @relation("PaymentCancelledBy")
+  createdPayments            Payment[]            @relation("PaymentCreatedBy")
+  cancelledPayments          Payment[]            @relation("PaymentCancelledBy")
   // Arqueos de caja (Ticket B post-MVP, Bloque B1: solo persistencia, sin
   // reglas de negocio todavía). Dos relaciones nombradas por el mismo
   // motivo que Sale/Payment arriba: CashSession referencia User dos veces
   // (el cobrador dueño de la caja y, opcionalmente, quien aprueba un cierre
   // con descuadre).
-  cashSessions              CashSession[]       @relation("CashSessionOwner")
-  approvedCashSessions      CashSession[]       @relation("CashSessionApprovedBy")
+  cashSessions               CashSession[]        @relation("CashSessionOwner")
+  approvedCashSessions       CashSession[]        @relation("CashSessionApprovedBy")
   // Asientos contables (Fase 8, Bloque A): un único actor por asiento (quien
   // ejecutó la operación de negocio que lo generó); a diferencia de
   // Sale/Payment, un AccountingEntry nunca se "anula" con el mismo actor
   // relation — su reversión es una fila nueva con su propio createdBy.
-  createdAccountingEntries  AccountingEntry[]   @relation("AccountingEntryCreatedBy")
+  createdAccountingEntries   AccountingEntry[]    @relation("AccountingEntryCreatedBy")
   // Periodos contables (Fase A2.1): dos relaciones nombradas porque
   // AccountingPeriod referencia User dos veces (quien cierra y, si aplica,
   // quien reabre), mismo criterio que Sale/Payment arriba.
-  closedAccountingPeriods   AccountingPeriod[]  @relation("AccountingPeriodClosedBy")
-  reopenedAccountingPeriods AccountingPeriod[]  @relation("AccountingPeriodReopenedBy")
+  closedAccountingPeriods    AccountingPeriod[]   @relation("AccountingPeriodClosedBy")
+  reopenedAccountingPeriods  AccountingPeriod[]   @relation("AccountingPeriodReopenedBy")
+  // Borradores de asiento manual creados por este usuario (Fase A4.2).
+  createdManualJournalDrafts ManualJournalDraft[] @relation("ManualJournalDraftCreatedBy")
 
   @@index([status])
   @@map("users")
@@ -1092,16 +1100,25 @@ enum AccountingSystemKey {
 // Qué evento de negocio origina un AccountingEntry. Sin FK real hacia
 // Sale/Payment (ver comentario en AccountingEntry.sourceId): es un
 // polimorfismo deliberado, mismo criterio que AuditLog.entityType/entityId
-// e InventoryMovement.referenceType/referenceId.
+// e InventoryMovement.referenceType/referenceId. MANUAL (Fase A4): el
+// asiento DEFINITIVO de un borrador contabilizado — sourceId es el id del
+// propio ManualJournalDraft, nunca un valor inventado; el índice único
+// parcial accounting_entries_one_original_per_source (migration.sql) ya
+// garantiza, sin código nuevo, que un mismo borrador nunca se contabilice
+// dos veces.
 enum AccountingSourceType {
   SALE
   PAYMENT
+  MANUAL
 }
 
-// ORIGINAL: primer asiento de un evento de negocio. REVERSAL: asiento de
-// reversión (Bloque B), vinculado mediante AccountingEntry.reversesEntryId.
-// No existe un tercer valor ni un estado DRAFT: no hay asientos manuales en
-// el MVP (Documento Maestro §17).
+// ORIGINAL: primer asiento de un evento de negocio (de venta/pago
+// automático, o de un asiento manual ya contabilizado). REVERSAL: asiento
+// de reversión (Bloque B), vinculado mediante AccountingEntry.
+// reversesEntryId. Sigue sin existir un tercer valor: un asiento manual
+// mientras es borrador NUNCA es una fila de AccountingEntry (ver
+// ManualJournalDraft más abajo, Fase A4) — solo se convierte en una fila
+// ORIGINAL real al contabilizarse.
 enum AccountingEventType {
   ORIGINAL
   REVERSAL
@@ -1198,7 +1215,11 @@ model Account {
   // backfill y el INSERT inicial.
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  lines AccountingEntryLine[]
+  lines            AccountingEntryLine[]
+  // Fase A4: líneas de borradores de asiento manual que referencian esta
+  // cuenta — nunca el historial definitivo (eso sigue siendo
+  // exclusivamente `lines` arriba).
+  manualDraftLines ManualJournalDraftLine[]
 
   // Los 2 CHECK de code/name no en blanco (Fase 8) más los 2 nuevos de la
   // Fase A1 (level >= 1, no auto-padre) se agregan a mano en
@@ -1282,6 +1303,12 @@ model AccountingEntry {
 
   lines AccountingEntryLine[]
 
+  // Fase A4: lado inverso de ManualJournalDraft.postedEntryId — SOLO
+  // presente cuando sourceType=MANUAL (una venta/pago nunca tiene un
+  // borrador asociado). Puramente informativo para trazabilidad; ningún
+  // código de AccountingEngine lo consulta para decidir nada.
+  postedByDraft ManualJournalDraft?
+
   // Los 3 CHECK (description no en blanco, consistencia ORIGINAL/REVERSAL,
   // no auto-reversión) y el índice único parcial
   // accounting_entries_one_original_per_source se agregan a mano en
@@ -1346,6 +1373,90 @@ model AccountingPeriod {
   @@unique([year, month])
   @@index([status])
   @@map("accounting_periods")
+}
+
+// Ciclo de vida de un borrador de asiento manual (Fase A4.2). Solo dos
+// estados: DRAFT (editable) -> POSTED (definitivo e inmutable). Nunca un
+// tercer estado de aprobación — A4 no incluye ningún flujo de aprobación
+// de supervisor (explícitamente fuera de alcance).
+enum ManualJournalDraftStatus {
+  DRAFT
+  POSTED
+}
+
+/**
+ * Borrador de asiento contable manual (Fase A4.2). Modelo DELIBERADAMENTE
+ * separado de AccountingEntry — nunca una fila de AccountingEntry con un
+ * eventType/estado "borrador": si así fuera, los reportes de A3 (que
+ * leen AccountingEntry/AccountingEntryLine directamente, sin ningún
+ * filtro de "solo definitivos") incluirían por error montos todavía no
+ * contabilizados. Mientras `status=DRAFT`, sus líneas pueden estar
+ * incompletas o desbalanceadas (A4.3: toda validación financiera se
+ * exige recién al contabilizar, nunca mientras se edita). `postedEntryId`
+ * es la trazabilidad explícita hacia el AccountingEntry definitivo una
+ * vez contabilizado — nunca se reescribe después; la reversión posterior
+ * (A4.5) crea un AccountingEntry REVERSAL aparte, enlazado por
+ * AccountingEntry.reversesEntryId como cualquier otra reversión, sin
+ * tocar este borrador en absoluto.
+ */
+model ManualJournalDraft {
+  id String @id @default(uuid()) @db.Uuid
+
+  accountingDate DateTime @map("accounting_date") @db.Date
+  description    String   @db.VarChar(200)
+
+  status ManualJournalDraftStatus @default(DRAFT)
+
+  // NULL mientras DRAFT; se fija UNA sola vez, en la misma transacción
+  // que AccountingEngine.postManualEntry() crea el AccountingEntry
+  // definitivo (Fase A4.4) — nunca editable después.
+  postedEntryId String?          @unique @map("posted_entry_id") @db.Uuid
+  postedEntry   AccountingEntry? @relation(fields: [postedEntryId], references: [id], onDelete: Restrict)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("ManualJournalDraftCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  lines ManualJournalDraftLine[]
+
+  // El CHECK de description no en blanco se agrega a mano en
+  // migration.sql, mismo criterio que accounting_entries.description.
+  @@index([status])
+  @@map("manual_journal_drafts")
+}
+
+/**
+ * Línea de un borrador de asiento manual (Fase A4.2). A diferencia de
+ * AccountingEntryLine (inmutable, exactamente un lado positivo, CHECK de
+ * base de datos estricto desde la Fase 8), una línea de BORRADOR tolera
+ * un estado incompleto mientras se edita: debit=credit=0 es válido aquí
+ * (línea todavía sin llenar), y nunca lleva su propio CHECK de cuadre
+ * cruzado (eso es responsabilidad de AccountingEngine.postManualEntry(),
+ * A4.3/A4.4, en el momento de contabilizar — nunca antes). Los únicos
+ * invariantes que SÍ se protegen aquí a nivel de base de datos, incluso
+ * en estado borrador, son los que nunca tienen una razón de negocio
+ * legítima para violarse: ningún monto negativo, y nunca ambos lados
+ * positivos a la vez (ver CHECK en migration.sql).
+ */
+model ManualJournalDraftLine {
+  id String @id @default(uuid()) @db.Uuid
+
+  draftId String             @map("draft_id") @db.Uuid
+  draft   ManualJournalDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  accountId String  @map("account_id") @db.Uuid
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  debitAmount  Decimal @default(0) @map("debit_amount") @db.Decimal(14, 2)
+  creditAmount Decimal @default(0) @map("credit_amount") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([draftId])
+  @@index([accountId])
+  @@map("manual_journal_draft_lines")
 }
 
 /**

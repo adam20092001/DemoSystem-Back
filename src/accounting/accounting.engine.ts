@@ -1,7 +1,9 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import {
   Account,
@@ -14,10 +16,14 @@ import {
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
-import { resolveAccountingDateParts } from './accounting-period.utils';
+import {
+  parseAccountingDateOnly,
+  resolveAccountingDateParts,
+} from './accounting-period.utils';
 import {
   assertLinesBalanced,
   assertValidAccountingDescription,
+  buildManualReversalDescription,
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
   buildPaymentReversalDescription,
@@ -28,6 +34,7 @@ import {
   invertResolvedLines,
 } from './accounting-calculator';
 import {
+  PostManualEntryCommand,
   PostPaymentCollectionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
@@ -43,6 +50,8 @@ const ACCOUNTING_ENTRY_RESULT_SELECT = {
   sourceType: true,
   sourceId: true,
   eventType: true,
+  journalNumber: true,
+  accountingDate: true,
 } satisfies Prisma.AccountingEntrySelect;
 
 /**
@@ -129,6 +138,125 @@ export class AccountingEngine {
   }
 
   /**
+   * Contabiliza DEFINITIVAMENTE un borrador de asiento manual (Fase
+   * A4.4) — único punto donde un ManualJournalDraft se convierte en una
+   * fila real de AccountingEntry. A diferencia de postSaleRecognition/
+   * postPaymentCollection:
+   *   - Las cuentas se resuelven por `accountId` real (A4.3: el
+   *     ACCOUNTANT elige la cuenta directamente del plan de cuentas),
+   *     nunca por `systemKey` — ver resolveManualAccounts().
+   *   - La fecha contable es la EXPLÍCITA del borrador (A4.4: "use the
+   *     explicitly selected accounting date"), nunca derivada de
+   *     `postedAt` — ver parseAccountingDateOnly().
+   *   - El periodo debe existir y estar OPEN de antemano, salvo que sea
+   *     el mes de negocio EN CURSO (mismo criterio de auto-creación ya
+   *     usado por el posteo comercial) — ver
+   *     resolveOpenPeriodIdForManualEntry(): nunca se crea un periodo
+   *     histórico arbitrario a partir de una fecha manual.
+   * `sourceId` = `command.draftId`: el índice único parcial
+   * accounting_entries_one_original_per_source (migration.sql, sin
+   * código nuevo) ya impide por sí solo que un mismo borrador se
+   * contabilice dos veces, incluso bajo una carrera que lograra evadir
+   * el lock de fila que ManualJournalEntriesService sostiene sobre el
+   * borrador.
+   */
+  async postManualEntry(
+    tx: Prisma.TransactionClient,
+    command: PostManualEntryCommand,
+  ): Promise<PostedAccountingEntry> {
+    assertValidAccountingDescription(command.description);
+
+    const existing = await tx.accountingEntry.findFirst({
+      where: {
+        sourceType: AccountingSourceType.MANUAL,
+        sourceId: command.draftId,
+        eventType: AccountingEventType.ORIGINAL,
+      },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'Este borrador ya fue contabilizado anteriormente',
+      );
+    }
+
+    const accountsById = await this.resolveManualAccounts(
+      tx,
+      command.lines.map((line) => line.accountId),
+    );
+    const resolvedLines: ResolvedAccountingLine[] = command.lines.map(
+      (line) => ({
+        accountId: this.requireManualAccount(accountsById, line.accountId).id,
+        debitAmount: line.debitAmount,
+        creditAmount: line.creditAmount,
+      }),
+    );
+    // Defensa en profundidad: el servicio llamador (ManualJournalEntriesService)
+    // ya valida este mismo cuadre con la misma función, traducido a
+    // BadRequestException (400, un error de negocio del ACCOUNTANT) —
+    // esto nunca debería fallar aquí; si lo hace, es un invariante
+    // interno roto (500), no una entrada de usuario malformada que ya
+    // debió rechazarse antes de llegar al motor.
+    assertLinesBalanced(resolvedLines);
+
+    const { accountingDate, year, month } = parseAccountingDateOnly(
+      command.accountingDateOnly,
+    );
+    const periodId = await this.resolveOpenPeriodIdForManualEntry(
+      tx,
+      year,
+      month,
+    );
+    const journalNumber = await this.incrementJournalNumber(
+      tx,
+      periodId,
+      year,
+      month,
+    );
+
+    const created = await tx.accountingEntry.create({
+      data: {
+        sourceType: AccountingSourceType.MANUAL,
+        sourceId: command.draftId,
+        eventType: AccountingEventType.ORIGINAL,
+        description: command.description,
+        postedAt: new Date(),
+        accountingDate,
+        periodId,
+        journalNumber,
+        createdByUserId: command.actorUserId,
+        lines: {
+          create: resolvedLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: line.debitAmount,
+            creditAmount: line.creditAmount,
+          })),
+        },
+      },
+      select: ACCOUNTING_ENTRY_RESULT_SELECT,
+    });
+
+    await this.auditService.record({
+      userId: command.actorUserId,
+      module: 'ACCOUNTING',
+      action: AuditAction.ACCOUNTING_ENTRY_POSTED,
+      entityType: 'AccountingEntry',
+      entityId: created.id,
+      description: command.description,
+      metadata: {
+        entryId: created.id,
+        sourceType: created.sourceType,
+        sourceId: created.sourceId,
+        eventType: created.eventType,
+      },
+      ipAddress: command.ipAddress,
+      client: tx,
+    });
+
+    return created;
+  }
+
+  /**
    * Revierte el asiento ORIGINAL de un evento de negocio (Sale o Payment),
    * identificado por su fuente (sourceType/sourceId) — API orientada a la
    * fuente (plan final aprobado, §22): el llamador nunca necesita conocer
@@ -175,10 +303,16 @@ export class AccountingEngine {
     const invertedLines = invertResolvedLines(originalLines);
     assertLinesBalanced(invertedLines);
 
+    // Fase A4.5: MANUAL nunca tiene número de documento — reutiliza la
+    // propia descripción del ORIGINAL ya cargado arriba, nunca
+    // `command.sourceNumber` (que ManualJournalEntriesService envía
+    // vacío para esta rama, al no aplicar).
     const description =
       command.sourceType === AccountingSourceType.SALE
         ? buildSaleReversalDescription(command.sourceNumber)
-        : buildPaymentReversalDescription(command.sourceNumber);
+        : command.sourceType === AccountingSourceType.PAYMENT
+          ? buildPaymentReversalDescription(command.sourceNumber)
+          : buildManualReversalDescription(original.description);
     assertValidAccountingDescription(description);
 
     // A2.2: el asiento REVERSAL usa la fecha contable de SU PROPIO
@@ -434,7 +568,33 @@ export class AccountingEngine {
     const { accountingDate, year, month } =
       resolveAccountingDateParts(postedAt);
     const periodId = await this.resolveOrCreateOpenPeriodId(tx, year, month);
+    const journalNumber = await this.incrementJournalNumber(
+      tx,
+      periodId,
+      year,
+      month,
+    );
 
+    return { accountingDate, periodId, journalNumber };
+  }
+
+  /**
+   * Paso atómico compartido (A2.4/A4.4) de "avanzar el contador de
+   * asientos de un periodo ya resuelto, validando que esté OPEN" — único
+   * UPDATE ... RETURNING, extraído de resolvePeriodAndAssignNumber() para
+   * que postManualEntry() (Fase A4.4) lo reutilice exactamente igual tras
+   * resolver su periodo con una regla distinta
+   * (resolveOpenPeriodIdForManualEntry(), nunca auto-creación arbitraria
+   * de un periodo histórico). Ver el docblock de
+   * resolvePeriodAndAssignNumber() para el análisis completo de
+   * concurrencia: sigue aplicando sin cambios, el UPDATE es el mismo.
+   */
+  private async incrementJournalNumber(
+    tx: Prisma.TransactionClient,
+    periodId: string,
+    year: number,
+    month: number,
+  ): Promise<number> {
     const rows = await tx.$queryRaw<{ lastJournalNumber: number }[]>(Prisma.sql`
       UPDATE accounting_periods
       SET last_journal_number = last_journal_number + 1,
@@ -448,8 +608,87 @@ export class AccountingEngine {
         `No se puede contabilizar: el periodo contable ${year}-${String(month).padStart(2, '0')} está cerrado`,
       );
     }
+    return row.lastJournalNumber;
+  }
 
-    return { accountingDate, periodId, journalNumber: row.lastJournalNumber };
+  /**
+   * Resuelve el periodo de un asiento MANUAL (Fase A4.4): si ya existe,
+   * se usa tal cual (OPEN o CLOSED — es incrementJournalNumber() quien
+   * decide si se puede postear). Si NO existe, solo se auto-crea cuando
+   * la fecha solicitada cae en el mes de negocio EN CURSO (reutilizando
+   * resolveOrCreateOpenPeriodId(), idéntico criterio que un posteo
+   * comercial de hoy — nunca una regla paralela). Para cualquier OTRO mes
+   * sin periodo todavía, se rechaza explícitamente: A4.4 prohíbe crear
+   * automáticamente un periodo histórico arbitrario a partir de una fecha
+   * manual; ADMIN debe abrirlo primero (POST /accounting/periods, A2.6).
+   */
+  private async resolveOpenPeriodIdForManualEntry(
+    tx: Prisma.TransactionClient,
+    year: number,
+    month: number,
+  ): Promise<string> {
+    const existing = await tx.accountingPeriod.findUnique({
+      where: { year_month: { year, month } },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      return existing.id;
+    }
+
+    const current = resolveAccountingDateParts(new Date());
+    if (year === current.year && month === current.month) {
+      return this.resolveOrCreateOpenPeriodId(tx, year, month);
+    }
+
+    throw new NotFoundException(
+      `No existe el periodo contable ${year}-${String(month).padStart(2, '0')}; cree el periodo primero (POST /api/v1/accounting/periods) antes de contabilizar un asiento manual con esa fecha`,
+    );
+  }
+
+  /**
+   * Resuelve cuentas por `accountId` REAL (Fase A4.3/A4.4) — nunca por
+   * `systemKey`: un asiento manual referencia la cuenta que el
+   * ACCOUNTANT/ADMIN eligió directamente del plan de cuentas. A
+   * diferencia de resolveAccounts() (cuentas de SISTEMA, cuya ausencia es
+   * corrupción de configuración del servidor, 500), aquí una cuenta
+   * inexistente/inactiva/no postable es un error de ENTRADA del usuario:
+   * BadRequestException (400), nunca 500.
+   */
+  private async resolveManualAccounts(
+    tx: Prisma.TransactionClient,
+    accountIds: string[],
+  ): Promise<Map<string, Account>> {
+    const uniqueIds = Array.from(new Set(accountIds));
+    const rows = await tx.account.findMany({
+      where: {
+        id: { in: uniqueIds },
+        status: AccountStatus.ACTIVE,
+        isPostable: true,
+      },
+    });
+
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const id of uniqueIds) {
+      if (!byId.has(id)) {
+        throw new BadRequestException(
+          `La cuenta ${id} no existe, no está activa o no es postable`,
+        );
+      }
+    }
+    return byId;
+  }
+
+  private requireManualAccount(
+    accounts: Map<string, Account>,
+    accountId: string,
+  ): Account {
+    const account = accounts.get(accountId);
+    if (account === undefined) {
+      throw new BadRequestException(
+        `La cuenta ${accountId} no existe, no está activa o no es postable`,
+      );
+    }
+    return account;
   }
 
   /**

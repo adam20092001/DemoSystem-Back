@@ -130,13 +130,17 @@ describe('ChartOfAccountsController', () => {
     ];
 
     it.each(readRoutes)(
-      '%s expone @Roles(ADMIN, MANAGEMENT) exactamente',
+      '%s expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) exactamente (A4.1: ACCOUNTANT lee el plan de cuentas igual que MANAGEMENT)',
       (name) => {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
           controllerPrototype[name],
         ) as RoleName[];
-        expect(metadata).toEqual([RoleName.ADMIN, RoleName.MANAGEMENT]);
+        expect(metadata).toEqual([
+          RoleName.ADMIN,
+          RoleName.MANAGEMENT,
+          RoleName.ACCOUNTANT,
+        ]);
       },
     );
 

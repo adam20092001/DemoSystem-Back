@@ -27,7 +27,11 @@ import {
   SafeAccountingEntryListItem,
 } from './types/safe-accounting-entry';
 
-const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+] as const;
 
 @ApiTags('Basic Accounting')
 @ApiCookieAuth(COOKIE_AUTH_NAME)

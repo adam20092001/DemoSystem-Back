@@ -16,6 +16,12 @@ const DEFAULT_ACTIVE_ROLE_ORDER: readonly RoleName[] = [
   RoleName.SELLER,
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
+  // Fase A4.1: ACCOUNTANT es un rol de oficina especializado (lectura
+  // contable global + ciclo de vida de asientos manuales), nunca un rol
+  // operativo de campo (SELLER/WAREHOUSE) — se ubica junto a MANAGEMENT,
+  // antes de ADMIN, para preservar el mismo sesgo "menos privilegiado
+  // primero" ya documentado arriba.
+  RoleName.ACCOUNTANT,
   RoleName.ADMIN,
 ];
 

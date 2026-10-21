@@ -202,4 +202,15 @@ export enum AuditAction {
   ACCOUNTING_PERIOD_OPENED = 'ACCOUNTING_PERIOD_OPENED',
   ACCOUNTING_PERIOD_CLOSED = 'ACCOUNTING_PERIOD_CLOSED',
   ACCOUNTING_PERIOD_REOPENED = 'ACCOUNTING_PERIOD_REOPENED',
+  // Fase A4.8. ManualJournalEntriesService es su único emisor. CREATED/
+  // UPDATED son eventos del propio BORRADOR (nunca tocan AccountingEntry);
+  // POSTED/REVERSED se auditan ADEMÁS del ACCOUNTING_ENTRY_POSTED/
+  // ACCOUNTING_ENTRY_REVERSED genérico que AccountingEngine ya emite por
+  // su cuenta (mismo criterio dual que PAYMENT_REGISTERED/
+  // PAYMENT_CANCELLED junto a su propio asiento) — capturan el id del
+  // BORRADOR, que el evento genérico del motor nunca conoce.
+  MANUAL_JOURNAL_DRAFT_CREATED = 'MANUAL_JOURNAL_DRAFT_CREATED',
+  MANUAL_JOURNAL_DRAFT_UPDATED = 'MANUAL_JOURNAL_DRAFT_UPDATED',
+  MANUAL_JOURNAL_POSTED = 'MANUAL_JOURNAL_POSTED',
+  MANUAL_JOURNAL_REVERSED = 'MANUAL_JOURNAL_REVERSED',
 }

@@ -51,6 +51,7 @@ const MAX_LIMIT = 100;
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
 ]);
 
 function assertCanReadReports(requesterRole: RoleName): void {

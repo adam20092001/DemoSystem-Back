@@ -16,7 +16,11 @@ import { AccountingService } from './accounting.service';
 import { AccountResponseDto } from './dto/account-response.dto';
 import { SafeAccount } from './types/safe-account';
 
-const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const READ_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+] as const;
 
 @ApiTags('Basic Accounting')
 @ApiCookieAuth(COOKIE_AUTH_NAME)

@@ -46,6 +46,7 @@ const AUDIT_ENTITY_TYPE = 'Account';
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
 ]);
 
 function assertCanReadChartOfAccounts(requesterRole: RoleName): void {
