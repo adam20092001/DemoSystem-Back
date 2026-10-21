@@ -45,9 +45,37 @@ const ALLOWED_ORIGIN_MOVEMENT_TYPES: Record<
   [InventoryMovementOrigin.INITIAL_BALANCE]: [InventoryMovementType.ENTRY],
   [InventoryMovementOrigin.SALE]: [InventoryMovementType.EXIT],
   [InventoryMovementOrigin.SALE_CANCELLATION]: [InventoryMovementType.ENTRY],
+  // Fase A5.2b: una recepción física SIEMPRE entra stock; su cancelación
+  // SIEMPRE lo compensa con una salida — mismo par exacto ENTRY/EXIT que
+  // SALE/SALE_CANCELLATION, invertido porque la compra entra donde la
+  // venta sale.
+  [InventoryMovementOrigin.PURCHASE_RECEIPT]: [InventoryMovementType.ENTRY],
+  [InventoryMovementOrigin.PURCHASE_RECEIPT_CANCELLATION]: [
+    InventoryMovementType.EXIT,
+  ],
   [InventoryMovementOrigin.MANUAL]: null,
   [InventoryMovementOrigin.OTHER]: null,
 };
+
+/**
+ * Orígenes "históricos, autoritativos por sí mismos" (Fase A5.2b amplía el
+ * precedente de SALE_CANCELLATION, antes exclusivo): la decisión de negocio
+ * que legitima el movimiento ya se tomó y quedó CONGELADA en otro momento
+ * — nunca se reinterpreta contra el estado VIGENTE del catálogo.
+ * SALE_CANCELLATION reversa un EXIT que ya demostró ser legítimo.
+ * PURCHASE_RECEIPT se respalda en `PurchaseInvoiceLine.isReceiptEligible`,
+ * congelado exactamente una vez al confirmar la factura (A5.2a) — nunca en
+ * `Product.isInventoryTracked` actual, que pudo cambiar desde entonces.
+ * PURCHASE_RECEIPT_CANCELLATION reversa, a su vez, un ENTRY que ya aplicó
+ * ese mismo criterio. Ningún otro origen actual o futuro debe agregarse
+ * aquí sin la misma justificación explícita.
+ */
+const AUTHORITATIVE_HISTORICAL_ORIGINS: ReadonlySet<InventoryMovementOrigin> =
+  new Set([
+    InventoryMovementOrigin.SALE_CANCELLATION,
+    InventoryMovementOrigin.PURCHASE_RECEIPT,
+    InventoryMovementOrigin.PURCHASE_RECEIPT_CANCELLATION,
+  ]);
 
 /** Fila devuelta por la única consulta de lock del motor. */
 interface LockedProductRow {
@@ -133,14 +161,20 @@ export class StockMovementEngine {
     // que ese producto/cantidad se descontó legítimamente en su momento. El
     // estado comercial VIGENTE del catálogo (activo/categoría/unidad/tipo
     // SERVICE/seguimiento de inventario, incluida allowDecimal) no es motivo
-    // válido para impedir una reversa histórica. Bypass exclusivo de
-    // SALE_CANCELLATION: ningún otro origen actual o futuro (ni siquiera
-    // SALE, que sigue exigiendo catálogo vigente activo) omite estas dos
-    // validaciones. Todo lo demás del método (forma/rango de quantity,
-    // combinación origin/movementType, par de referencia, aritmética y
-    // límites de stock) se sigue evaluando exactamente igual para
-    // SALE_CANCELLATION que para cualquier otro origen.
-    if (command.origin !== InventoryMovementOrigin.SALE_CANCELLATION) {
+    // válido para impedir una reversa histórica. Fase A5.2b amplía este
+    // bypass a PURCHASE_RECEIPT/PURCHASE_RECEIPT_CANCELLATION por el mismo
+    // motivo exacto: la elegibilidad de recepción ya quedó CONGELADA en
+    // PurchaseInvoiceLine.isReceiptEligible al confirmar la factura (A5.2a)
+    // — reinterpretarla contra Product.isInventoryTracked/estado vigente en
+    // el momento de recibir físicamente violaría esa congelación. Bypass
+    // exclusivo de AUTHORITATIVE_HISTORICAL_ORIGINS: ningún otro origen
+    // actual o futuro (ni siquiera SALE, que sigue exigiendo catálogo
+    // vigente activo) omite estas dos validaciones sin la misma
+    // justificación explícita. Todo lo demás del método (forma/rango de
+    // quantity, combinación origin/movementType, par de referencia,
+    // aritmética y límites de stock) se sigue evaluando exactamente igual
+    // para estos orígenes que para cualquier otro.
+    if (!AUTHORITATIVE_HISTORICAL_ORIGINS.has(command.origin)) {
       this.validateLockedProduct(locked);
       this.validateQuantityAgainstUnit(command.quantity, locked.allowDecimal);
     }

@@ -574,6 +574,22 @@ export class PurchaseInvoicesService {
         );
       }
 
+      // Fase A5.2b: una factura con recepciones ACTIVE nunca se anula
+      // automáticamente en cascada — el usuario debe anular primero cada
+      // recepción. Verificado DESPUÉS del lock de fila de arriba (mismo
+      // `purchase_invoices` FOR UPDATE que PurchaseReceiptsService.create()
+      // toma antes de crear una recepción nueva): ambas rutas quedan
+      // serializadas entre sí sin lock adicional ni riesgo de deadlock
+      // (mismo orden de locks siempre — la factura primero).
+      const activeReceiptsCount = await tx.purchaseReceipt.count({
+        where: { purchaseInvoiceId: locked.id, status: 'ACTIVE' },
+      });
+      if (activeReceiptsCount > 0) {
+        throw new ConflictException(
+          'No se puede anular: existen recepciones activas para esta factura. Anule primero cada recepción.',
+        );
+      }
+
       const documentLabel = this.formatDocumentLabel(
         locked.documentType,
         locked.documentSeries,

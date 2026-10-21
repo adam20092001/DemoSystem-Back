@@ -27,6 +27,7 @@ import {
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
   buildPaymentReversalDescription,
+  buildPurchaseReceiptReclassificationReversalDescription,
   buildPurchaseReversalDescription,
   buildSaleOriginalDescription,
   buildSaleRecognitionLines,
@@ -37,6 +38,7 @@ import {
 import {
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
+  PostPurchaseReceiptReclassificationCommand,
   PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
@@ -388,13 +390,139 @@ export class AccountingEngine {
   }
 
   /**
+   * Contabiliza DEFINITIVAMENTE una reclasificación por recepción física de
+   * compra (Fase A5.2b) — ÚNICO punto donde una PurchaseReceipt produce una
+   * fila real de AccountingEntry (sourceType=PURCHASE_RECEIPT). Siempre
+   * OPCIONAL: PurchaseReceiptsService solo llama a este método cuando al
+   * menos una línea recibida referencia una cuenta de destino configurada
+   * como tránsito (Account.receiptReclassificationTargetAccountId); cuando
+   * ninguna lo está (el caso predeterminado y seguro mientras no exista una
+   * decisión del contador), este método nunca se invoca y la recepción no
+   * tiene ningún efecto contable.
+   *
+   * A diferencia de postPurchaseRecognition() (sistemático, resuelto por
+   * AccountingSystemKey): `lines` llega YA resuelto por `accountId` real,
+   * mismo criterio que postManualEntry() — PurchaseReceiptsService ya
+   * decidió, cuenta por cuenta, el par origen/destino exacto y ya verificó
+   * que la cuenta de origen coincide con la que el asiento PURCHASE
+   * original de la factura realmente debitó (nunca una resolución nueva
+   * por systemKey aquí, que podría apuntar a una cuenta distinta si el
+   * mapeo se reasignó después de confirmar la factura).
+   *
+   * `sourceId` = `command.purchaseReceiptId`, nunca el de la factura: el
+   * mismo índice único parcial accounting_entries_one_original_per_source
+   * (sin código nuevo) impide por sí solo una doble reclasificación de la
+   * misma recepción, y cancelar una recepción revierte EXCLUSIVAMENTE este
+   * asiento — jamás el PURCHASE original de la factura.
+   */
+  async postPurchaseReceiptReclassification(
+    tx: Prisma.TransactionClient,
+    command: PostPurchaseReceiptReclassificationCommand,
+  ): Promise<PostedAccountingEntry> {
+    assertValidAccountingDescription(command.description);
+
+    const existing = await tx.accountingEntry.findFirst({
+      where: {
+        sourceType: AccountingSourceType.PURCHASE_RECEIPT,
+        sourceId: command.purchaseReceiptId,
+        eventType: AccountingEventType.ORIGINAL,
+      },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'Esta recepción ya fue reclasificada contablemente antes',
+      );
+    }
+
+    const accountsById = await this.resolveManualAccounts(
+      tx,
+      command.lines.map((line) => line.accountId),
+    );
+    const resolvedLines: ResolvedAccountingLine[] = command.lines.map(
+      (line) => ({
+        accountId: this.requireManualAccount(accountsById, line.accountId).id,
+        debitAmount: line.debitAmount,
+        creditAmount: line.creditAmount,
+      }),
+    );
+    // Defensa en profundidad: PurchaseReceiptsService ya construye estas
+    // líneas balanceadas por pares origen/destino de igual monto — esto
+    // nunca debería fallar aquí; si lo hace, es un invariante interno roto
+    // (500), no una entrada de usuario malformada.
+    assertLinesBalanced(resolvedLines);
+
+    const { accountingDate, year, month } = parseAccountingDateOnly(
+      command.accountingDateOnly,
+    );
+    const periodId = await this.resolveOpenPeriodIdForExplicitDate(
+      tx,
+      year,
+      month,
+    );
+    const journalNumber = await this.incrementJournalNumber(
+      tx,
+      periodId,
+      year,
+      month,
+    );
+
+    const created = await tx.accountingEntry.create({
+      data: {
+        sourceType: AccountingSourceType.PURCHASE_RECEIPT,
+        sourceId: command.purchaseReceiptId,
+        eventType: AccountingEventType.ORIGINAL,
+        description: command.description,
+        postedAt: new Date(),
+        accountingDate,
+        periodId,
+        journalNumber,
+        createdByUserId: command.actorUserId,
+        lines: {
+          create: resolvedLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: line.debitAmount,
+            creditAmount: line.creditAmount,
+          })),
+        },
+      },
+      select: ACCOUNTING_ENTRY_RESULT_SELECT,
+    });
+
+    await this.auditService.record({
+      userId: command.actorUserId,
+      module: 'ACCOUNTING',
+      action: AuditAction.ACCOUNTING_ENTRY_POSTED,
+      entityType: 'AccountingEntry',
+      entityId: created.id,
+      description: command.description,
+      metadata: {
+        entryId: created.id,
+        sourceType: created.sourceType,
+        sourceId: created.sourceId,
+        eventType: created.eventType,
+      },
+      ipAddress: command.ipAddress,
+      client: tx,
+    });
+
+    return created;
+  }
+
+  /**
    * Revierte el asiento ORIGINAL de un evento de negocio (Sale o Payment),
    * identificado por su fuente (sourceType/sourceId) — API orientada a la
    * fuente (plan final aprobado, §22): el llamador nunca necesita conocer
    * ni consultar el id del AccountingEntry de antemano. Si no existe un
    * ORIGINAL para esa fuente, es corrupción de invariante interna (nunca
    * "no hay nada que hacer"): en operación normal prospectiva de la Fase 8
-   * todo Payment/Sale con actividad económica tiene su ORIGINAL.
+   * todo Payment/Sale con actividad económica tiene su ORIGINAL. Única
+   * excepción deliberada (Fase A5.2b): PURCHASE_RECEIPT puede legítimamente
+   * no tener NUNCA un ORIGINAL (la reclasificación es opcional — ver
+   * postPurchaseReceiptReclassification()); por eso
+   * PurchaseReceiptsService.cancel() solo llama a este método cuando
+   * `PurchaseReceipt.reclassificationEntryId` no es null, nunca
+   * incondicionalmente como SalesService/PaymentEngine.
    */
   async reverseOriginalForSource(
     tx: Prisma.TransactionClient,
@@ -434,12 +562,12 @@ export class AccountingEngine {
     const invertedLines = invertResolvedLines(originalLines);
     assertLinesBalanced(invertedLines);
 
-    // Fase A4.5/A5.2a: MANUAL/PURCHASE nunca tienen número de documento
-    // comercial propio — MANUAL reutiliza la propia descripción del
-    // ORIGINAL ya cargado arriba; PURCHASE SÍ tiene un identificador de
-    // documento (serie-número del proveedor), que PurchaseInvoicesService
-    // envía en `command.sourceNumber` (a diferencia de MANUAL, que envía
-    // vacío al no aplicar).
+    // Fase A4.5/A5.2a/A5.2b: MANUAL nunca tiene número de documento
+    // comercial propio y reutiliza la propia descripción del ORIGINAL ya
+    // cargado arriba; SALE/PAYMENT/PURCHASE/PURCHASE_RECEIPT sí tienen un
+    // identificador propio (número NV, serie-número de proveedor, o el id
+    // de recepción formateado por el llamador), que viaja en
+    // `command.sourceNumber`.
     let description: string;
     switch (command.sourceType) {
       case AccountingSourceType.SALE:
@@ -450,6 +578,11 @@ export class AccountingEngine {
         break;
       case AccountingSourceType.PURCHASE:
         description = buildPurchaseReversalDescription(command.sourceNumber);
+        break;
+      case AccountingSourceType.PURCHASE_RECEIPT:
+        description = buildPurchaseReceiptReclassificationReversalDescription(
+          command.sourceNumber,
+        );
         break;
       case AccountingSourceType.MANUAL:
         description = buildManualReversalDescription(original.description);

@@ -250,6 +250,19 @@ export function buildPurchaseReversalDescription(
   return `Reversión de compra ${documentLabel}`;
 }
 
+/** Backend-only, determinista, sin datos del cliente ni PII (Fase A5.2b). */
+export function buildPurchaseReceiptReclassificationDescription(
+  documentLabel: string,
+): string {
+  return `Reclasificación por recepción de compra ${documentLabel}`;
+}
+
+export function buildPurchaseReceiptReclassificationReversalDescription(
+  documentLabel: string,
+): string {
+  return `Reversión de reclasificación por recepción de compra ${documentLabel}`;
+}
+
 /**
  * Defensa en profundidad (mismo criterio que StockMovementEngine con
  * reason/notes): aunque la descripción SIEMPRE la genera el backend a

@@ -117,3 +117,34 @@ export interface PostPurchaseRecognitionCommand {
   actorUserId: string;
   ipAddress: string | null;
 }
+
+/**
+ * Comando interno de AccountingEngine.postPurchaseReceiptReclassification()
+ * (Fase A5.2b). `purchaseReceiptId` es el `PurchaseReceipt.id` — se usa tal
+ * cual como `AccountingEntry.sourceId` (sourceType=PURCHASE_RECEIPT), mismo
+ * polimorfismo sin FK que el resto del dominio. A diferencia de
+ * PostPurchaseRecognitionCommand (sistemático, resuelto por
+ * AccountingSystemKey), `lines` llega YA resuelto por `accountId` real —
+ * mismo criterio que PostManualEntryCommand: PurchaseReceiptsService ya
+ * decidió, cuenta por cuenta, cuál es de tránsito
+ * (Account.receiptReclassificationTargetAccountId) y verificó que esa
+ * cuenta de origen coincide exactamente con la que el asiento ORIGINAL de
+ * la factura realmente debitó — AccountingEngine nunca vuelve a resolver
+ * por systemKey aquí, para no reclasificar desde una cuenta que el
+ * systemKey pueda haber reasignado después de confirmar la factura.
+ * Opcional por diseño: este comando SOLO se construye y envía cuando al
+ * menos una línea recibida requiere reclasificación; si ninguna la
+ * requiere, PurchaseReceiptsService simplemente nunca llama a este método.
+ */
+export interface PostPurchaseReceiptReclassificationCommand {
+  purchaseReceiptId: string;
+  description: string;
+  accountingDateOnly: string;
+  lines: {
+    accountId: string;
+    debitAmount: Prisma.Decimal;
+    creditAmount: Prisma.Decimal;
+  }[];
+  actorUserId: string;
+  ipAddress: string | null;
+}
