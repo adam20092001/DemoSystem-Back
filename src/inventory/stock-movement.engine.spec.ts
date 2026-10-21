@@ -420,6 +420,26 @@ describe('StockMovementEngine', () => {
         }),
         'BadRequest',
       ],
+      [
+        'PURCHASE_RECEIPT con EXIT',
+        makeCommand({
+          origin: InventoryMovementOrigin.PURCHASE_RECEIPT,
+          movementType: InventoryMovementType.EXIT,
+          referenceType: 'PurchaseReceipt',
+          referenceId: 'receipt-1',
+        }),
+        'BadRequest',
+      ],
+      [
+        'PURCHASE_RECEIPT_CANCELLATION con ENTRY',
+        makeCommand({
+          origin: InventoryMovementOrigin.PURCHASE_RECEIPT_CANCELLATION,
+          movementType: InventoryMovementType.ENTRY,
+          referenceType: 'PurchaseReceipt',
+          referenceId: 'receipt-1',
+        }),
+        'BadRequest',
+      ],
     ])('%s → 400 sin ejecutar el lock', async (_name, command, expected) => {
       const error = await captureError(command);
       expect(error).toBeDefined();
@@ -568,9 +588,11 @@ describe('StockMovementEngine', () => {
    * D22 aprobado (Fase 6, Bloque B): la reversa histórica de una venta
    * anulada (SALE_CANCELLATION) debe restituir stock a pesar del estado
    * comercial VIGENTE del catálogo, porque el movimiento SALE original ya
-   * demostró la legitimidad histórica. El bypass es EXCLUSIVO de este
-   * origen; el bloque anterior ya prueba que SALE (venta normal) sigue
-   * exigiendo catálogo activo.
+   * demostró la legitimidad histórica. Fase A5.2b amplía este mismo
+   * bypass a PURCHASE_RECEIPT/PURCHASE_RECEIPT_CANCELLATION (ver bloque
+   * dedicado más abajo) por el motivo exacto documentado en
+   * AUTHORITATIVE_HISTORICAL_ORIGINS; el bloque anterior ya prueba que
+   * SALE (venta normal) sigue exigiendo catálogo activo.
    */
   describe('reversa histórica de venta anulada (SALE_CANCELLATION)', () => {
     function reversalCommand(
@@ -725,6 +747,116 @@ describe('StockMovementEngine', () => {
       expect(auditService.record.mock.calls[0][0].action).toBe(
         AuditAction.INVENTORY_ENTRY_CREATED,
       );
+    });
+  });
+
+  /**
+   * Fase A5.2b: la elegibilidad de recepción ya quedó CONGELADA en
+   * PurchaseInvoiceLine.isReceiptEligible al confirmar la factura (A5.2a)
+   * — ni PURCHASE_RECEIPT (recibir físicamente) ni
+   * PURCHASE_RECEIPT_CANCELLATION (su reversa) deben reinterpretar esa
+   * decisión contra el estado VIGENTE del catálogo (p. ej.
+   * Product.isInventoryTracked cambiado después). Mismo bypass exacto que
+   * SALE_CANCELLATION arriba, ahora sobre AUTHORITATIVE_HISTORICAL_ORIGINS.
+   */
+  describe('recepción física de compra (PURCHASE_RECEIPT/PURCHASE_RECEIPT_CANCELLATION)', () => {
+    function receiptCommand(
+      overrides: Partial<StockMovementCommand> = {},
+    ): StockMovementCommand {
+      return makeCommand({
+        origin: InventoryMovementOrigin.PURCHASE_RECEIPT,
+        movementType: InventoryMovementType.ENTRY,
+        referenceType: 'PurchaseReceipt',
+        referenceId: 'receipt-1',
+        ...overrides,
+      });
+    }
+
+    function cancellationCommand(
+      overrides: Partial<StockMovementCommand> = {},
+    ): StockMovementCommand {
+      return makeCommand({
+        origin: InventoryMovementOrigin.PURCHASE_RECEIPT_CANCELLATION,
+        movementType: InventoryMovementType.EXIT,
+        referenceType: 'PurchaseReceipt',
+        referenceId: 'receipt-1',
+        ...overrides,
+      });
+    }
+
+    it('PURCHASE_RECEIPT permite recibir aunque el producto ahora esté INACTIVE', async () => {
+      setupLock(makeLockedRow({ productStatus: ProductStatus.INACTIVE }));
+      tx.inventoryMovement.create.mockResolvedValue(
+        makeMovementRow({ origin: InventoryMovementOrigin.PURCHASE_RECEIPT }),
+      );
+
+      await expect(
+        engine.apply(txClient, receiptCommand()),
+      ).resolves.toBeDefined();
+      expect(tx.product.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('PURCHASE_RECEIPT permite recibir aunque isInventoryTracked ahora sea false', async () => {
+      setupLock(makeLockedRow({ isInventoryTracked: false }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, receiptCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('PURCHASE_RECEIPT permite recibir una cantidad fraccionaria aunque allowDecimal ahora sea false', async () => {
+      setupLock(makeLockedRow({ allowDecimal: false }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(
+          txClient,
+          receiptCommand({ quantity: new Prisma.Decimal('1.500') }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    it('PURCHASE_RECEIPT_CANCELLATION permite la reversa aunque el producto ahora esté INACTIVE', async () => {
+      setupLock(makeLockedRow({ productStatus: ProductStatus.INACTIVE }));
+      tx.inventoryMovement.create.mockResolvedValue(
+        makeMovementRow({
+          origin: InventoryMovementOrigin.PURCHASE_RECEIPT_CANCELLATION,
+          movementType: InventoryMovementType.EXIT,
+        }),
+      );
+
+      await expect(
+        engine.apply(txClient, cancellationCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('PURCHASE_RECEIPT_CANCELLATION permite la reversa aunque isInventoryTracked ahora sea false', async () => {
+      setupLock(makeLockedRow({ isInventoryTracked: false }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await expect(
+        engine.apply(txClient, cancellationCommand()),
+      ).resolves.toBeDefined();
+    });
+
+    it('PURCHASE_RECEIPT_CANCELLATION sigue bloqueando stock negativo (nunca se omite esa protección)', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('2.000') }));
+
+      const error = await captureError(
+        cancellationCommand({ quantity: new Prisma.Decimal('5.000') }),
+      );
+
+      assertErrorType(error, 'Conflict');
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('producto inexistente sigue siendo 404 incluso con el bypass histórico', async () => {
+      tx.$queryRaw.mockResolvedValue([]);
+
+      const error = await captureError(receiptCommand());
+
+      assertErrorType(error, 'NotFound');
     });
   });
 

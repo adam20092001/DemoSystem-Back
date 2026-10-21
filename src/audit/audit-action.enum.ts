@@ -228,4 +228,10 @@ export enum AuditAction {
   PURCHASE_INVOICE_UPDATED = 'PURCHASE_INVOICE_UPDATED',
   PURCHASE_INVOICE_CONFIRMED = 'PURCHASE_INVOICE_CONFIRMED',
   PURCHASE_INVOICE_CANCELLED = 'PURCHASE_INVOICE_CANCELLED',
+  // Fase A5.2b (recepciones físicas de mercadería). PurchaseReceiptsService
+  // es su único emisor. Nunca audita costo/monto de factura — solo
+  // identificadores, cantidad de líneas y si disparó reclasificación
+  // contable (booleano), mismo criterio que el resto del dominio.
+  PURCHASE_RECEIPT_CREATED = 'PURCHASE_RECEIPT_CREATED',
+  PURCHASE_RECEIPT_CANCELLED = 'PURCHASE_RECEIPT_CANCELLED',
 }

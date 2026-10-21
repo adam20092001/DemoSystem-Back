@@ -19,6 +19,7 @@ import { AccountingEngine } from './accounting.engine';
 import {
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
+  PostPurchaseReceiptReclassificationCommand,
   PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
   ReverseOriginalForSourceCommand,
@@ -265,6 +266,38 @@ function makePurchaseCommand(
         systemKey: AccountingSystemKey.ACCOUNTS_PAYABLE,
         debitAmount: d('0.00'),
         creditAmount: d('118.00'),
+      },
+    ],
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+    ...overrides,
+  };
+}
+
+const PURCHASE_RECEIPT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+/**
+ * Fase A5.2b: reclasificación resuelta por accountId real (igual criterio
+ * que PostManualEntryCommand) — reutiliza las mismas MANUAL_ACCOUNTS
+ * fixture (ACTIVE+isPostable) ya usadas por postManualEntry().
+ */
+function makePurchaseReceiptReclassificationCommand(
+  overrides: Partial<PostPurchaseReceiptReclassificationCommand> = {},
+): PostPurchaseReceiptReclassificationCommand {
+  return {
+    purchaseReceiptId: PURCHASE_RECEIPT_ID,
+    description: 'Reclasificación por recepción de compra FACTURA F001-123',
+    accountingDateOnly: '2026-03-20',
+    lines: [
+      {
+        accountId: MANUAL_ACCOUNT_DEBIT_ID,
+        debitAmount: d('40.00'),
+        creditAmount: d('0.00'),
+      },
+      {
+        accountId: MANUAL_ACCOUNT_CREDIT_ID,
+        debitAmount: d('0.00'),
+        creditAmount: d('40.00'),
       },
     ],
     actorUserId: ACTOR_ID,
@@ -980,6 +1013,116 @@ describe('AccountingEngine', () => {
   });
 
   // ====================================================================
+  // postPurchaseReceiptReclassification (Fase A5.2b)
+  // ====================================================================
+  describe('postPurchaseReceiptReclassification', () => {
+    beforeEach(() => {
+      tx.account.findMany.mockResolvedValue(MANUAL_ACCOUNTS);
+      tx.accountingEntry.create.mockResolvedValue({
+        id: ENTRY_ID,
+        sourceType: AccountingSourceType.PURCHASE_RECEIPT,
+        sourceId: PURCHASE_RECEIPT_ID,
+        eventType: AccountingEventType.ORIGINAL,
+        journalNumber: 1,
+        accountingDate: new Date('2026-03-20T00:00:00.000Z'),
+      });
+    });
+
+    it('crea ORIGINAL con sourceType=PURCHASE_RECEIPT, sourceId=purchaseReceiptId y las líneas por accountId', async () => {
+      await engine.postPurchaseReceiptReclassification(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseReceiptReclassificationCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          eventType: AccountingEventType;
+          lines: { create: { accountId: string }[] };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.PURCHASE_RECEIPT);
+      expect(call.data.sourceId).toBe(PURCHASE_RECEIPT_ID);
+      expect(call.data.eventType).toBe(AccountingEventType.ORIGINAL);
+      expect(call.data.lines.create).toHaveLength(2);
+    });
+
+    it('recepción ya reclasificada (ya existe ORIGINAL con ese sourceType/sourceId): ConflictException', async () => {
+      tx.accountingEntry.findFirst.mockResolvedValue({ id: 'existing-entry' });
+      await expect(
+        engine.postPurchaseReceiptReclassification(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseReceiptReclassificationCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('cuenta inexistente/inactiva/no postable: BadRequestException (error de entrada del llamador, no 500)', async () => {
+      tx.account.findMany.mockResolvedValue([
+        makeManualAccountRow(MANUAL_ACCOUNT_DEBIT_ID),
+      ]);
+      await expect(
+        engine.postPurchaseReceiptReclassification(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseReceiptReclassificationCommand(),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('líneas desbalanceadas: defensa en profundidad del motor (InternalServerErrorException)', async () => {
+      await expect(
+        engine.postPurchaseReceiptReclassification(
+          tx as unknown as Prisma.TransactionClient,
+          makePurchaseReceiptReclassificationCommand({
+            lines: [
+              {
+                accountId: MANUAL_ACCOUNT_DEBIT_ID,
+                debitAmount: d('40.00'),
+                creditAmount: d('0.00'),
+              },
+              {
+                accountId: MANUAL_ACCOUNT_CREDIT_ID,
+                debitAmount: d('0.00'),
+                creditAmount: d('30.00'),
+              },
+            ],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+
+    it('usa la fecha contable EXPLÍCITA del comando (la del recibo), nunca derivada de un instante', async () => {
+      await engine.postPurchaseReceiptReclassification(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseReceiptReclassificationCommand({
+          accountingDateOnly: '2026-03-22',
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-22T00:00:00.000Z',
+      );
+    });
+
+    it('audita ACCOUNTING_ENTRY_POSTED exactamente una vez, mismo tx', async () => {
+      await engine.postPurchaseReceiptReclassification(
+        tx as unknown as Prisma.TransactionClient,
+        makePurchaseReceiptReclassificationCommand(),
+      );
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+      const call = auditService.record.mock.calls[0][0] as {
+        action: AuditAction;
+        client: unknown;
+      };
+      expect(call.action).toBe(AuditAction.ACCOUNTING_ENTRY_POSTED);
+      expect(call.client).toBe(tx);
+    });
+  });
+
+  // ====================================================================
   // reverseOriginalForSource
   // ====================================================================
   describe('reverseOriginalForSource', () => {
@@ -1157,6 +1300,32 @@ describe('AccountingEngine', () => {
       };
       expect(call.data.description).toBe(
         'Reversión de compra FACTURA F001-123',
+      );
+    });
+
+    it('descripción de reversión PURCHASE_RECEIPT: usa sourceNumber, nunca original.description', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          ...makeOriginalWithLines(),
+          sourceType: AccountingSourceType.PURCHASE_RECEIPT,
+          sourceId: PURCHASE_RECEIPT_ID,
+          description:
+            'Reclasificación por recepción de compra FACTURA F001-123',
+        })
+        .mockResolvedValueOnce(null);
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({
+          sourceType: AccountingSourceType.PURCHASE_RECEIPT,
+          sourceId: PURCHASE_RECEIPT_ID,
+          sourceNumber: PURCHASE_RECEIPT_ID,
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { description: string };
+      };
+      expect(call.data.description).toBe(
+        `Reversión de reclasificación por recepción de compra ${PURCHASE_RECEIPT_ID}`,
       );
     });
 

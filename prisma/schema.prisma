@@ -93,15 +93,19 @@ enum InventoryMovementType {
   ADJUSTMENT_OUT
 }
 
-// PURCHASE/RETURN quedan fuera: Compras y Proveedores están fuera del MVP
-// (CLAUDE.md §7). SALE/SALE_CANCELLATION se declaran para que la futura
-// Fase de Ventas no requiera migrar el enum, pero en la Fase 3 solo se
-// emiten MANUAL e INITIAL_BALANCE.
+// RETURN queda fuera: devoluciones a proveedor siguen fuera del MVP
+// (CLAUDE.md §7). SALE/SALE_CANCELLATION se declararon para que la Fase de
+// Ventas no requiriera migrar el enum; PURCHASE_RECEIPT/
+// PURCHASE_RECEIPT_CANCELLATION (Fase A5.2b) siguen el mismo criterio para
+// las recepciones físicas de compra — StockMovementEngine sigue siendo el
+// único escritor de InventoryMovement/Product.stockCurrent para ambos.
 enum InventoryMovementOrigin {
   MANUAL
   INITIAL_BALANCE
   SALE
   SALE_CANCELLATION
+  PURCHASE_RECEIPT
+  PURCHASE_RECEIPT_CANCELLATION
   OTHER
 }
 
@@ -198,6 +202,10 @@ model User {
   // quien la anula), mismo criterio que Sale/Payment/AccountingPeriod.
   createdPurchaseInvoices   PurchaseInvoice[]    @relation("PurchaseInvoiceCreatedBy")
   cancelledPurchaseInvoices PurchaseInvoice[]    @relation("PurchaseInvoiceCancelledBy")
+  // Recepciones de mercadería (Fase A5.2b): mismo criterio exacto que
+  // PurchaseInvoice arriba (quien la crea y, si aplica, quien la anula).
+  createdPurchaseReceipts   PurchaseReceipt[]    @relation("PurchaseReceiptCreatedBy")
+  cancelledPurchaseReceipts PurchaseReceipt[]    @relation("PurchaseReceiptCancelledBy")
 
   @@index([status])
   @@map("users")
@@ -689,6 +697,12 @@ model PurchaseInvoice {
 
   lines PurchaseInvoiceLine[]
 
+  // Recepciones físicas (Fase A5.2b): una factura CONFIRMED puede tener
+  // varias, cada una referenciando líneas isReceiptEligible=true de ESTA
+  // factura. Nunca presente mientras DRAFT (no se puede recibir contra un
+  // borrador).
+  receipts PurchaseReceipt[]
+
   // El índice único funcional (supplier_id, document_type,
   // UPPER(BTRIM(COALESCE(document_series,''))), UPPER(BTRIM(document_number)))
   // y los CHECK de cabecera se agregan a mano en migration.sql (mismo
@@ -750,6 +764,12 @@ model PurchaseInvoiceLine {
 
   isReceiptEligible Boolean? @map("is_receipt_eligible")
 
+  // Fase A5.2b: recepciones físicas registradas contra esta línea. La
+  // cantidad pendiente/parcial/completa se calcula SIEMPRE en tiempo de
+  // lectura a partir de la suma de PurchaseReceiptLine de recepciones
+  // ACTIVE — nunca una columna duplicada en esta tabla (riesgo de drift).
+  receiptLines PurchaseReceiptLine[]
+
   createdAt DateTime @default(now()) @map("created_at")
 
   // Sin updatedAt: igual que SaleItem, una factura CONFIRMED no edita sus
@@ -762,6 +782,111 @@ model PurchaseInvoiceLine {
   @@index([purchaseInvoiceId])
   @@index([productId])
   @@map("purchase_invoice_lines")
+}
+
+// Fase A5.2b: igual criterio de dos estados que ManualJournalDraftStatus/
+// CashSessionStatus anteriores — sin PENDING/DRAFT: una recepción nace
+// efectiva (mueve stock de inmediato, dentro de la misma transacción que
+// la crea) y solo puede pasar a CANCELLED después.
+enum PurchaseReceiptStatus {
+  ACTIVE
+  CANCELLED
+}
+
+/**
+ * Recepción física de mercadería (Fase A5.2b), independiente en el tiempo
+ * de la confirmación de la PurchaseInvoice (R2.2a ya reconoce contablemente
+ * la factura completa al confirmarse — ver §11, CLAUDE.md). Una factura
+ * puede tener múltiples recepciones (entregas parciales); cada una referencia
+ * líneas de UNA sola factura, nunca mezcla líneas de facturas distintas
+ * (PurchaseReceiptLine.purchaseInvoiceLineId siempre pertenece a
+ * purchaseInvoiceId de este mismo registro, validado por el servicio).
+ * Nunca se elimina físicamente: ACTIVE -> CANCELLED únicamente.
+ */
+model PurchaseReceipt {
+  id String @id @default(uuid()) @db.Uuid
+
+  purchaseInvoiceId String          @map("purchase_invoice_id") @db.Uuid
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
+
+  receivedDate DateTime @map("received_date") @db.Date
+
+  status PurchaseReceiptStatus @default(ACTIVE)
+
+  // Idempotencia (A5.2b §3): opcional, provisto por el cliente HTTP (p. ej.
+  // un UUID generado una vez por intento lógico de creación, reenviado tal
+  // cual en un reintento). NULL es el caso normal (sin protección de
+  // idempotencia solicitada) — Postgres permite múltiples NULL en un índice
+  // único multi-columna, así que esto nunca friega la unicidad entre
+  // recepciones sin clave. Único por factura (nunca global): dos facturas
+  // distintas pueden reusar la misma clave sin colisión real.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  notes String? @db.VarChar(500)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("PurchaseReceiptCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("PurchaseReceiptCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  // AccountingEntry de RECLASIFICACIÓN (sourceType=PURCHASE_RECEIPT), NULL
+  // cuando ninguna cuenta destino involucrada tiene tránsito configurado
+  // (el caso predeterminado y seguro — ver Account.
+  // receiptReclassificationTargetAccountId). Nunca presente para una línea
+  // de servicio/no elegible: esas nunca generan ningún asiento.
+  reclassificationEntryId String?          @unique @map("reclassification_entry_id") @db.Uuid
+  reclassificationEntry   AccountingEntry? @relation(fields: [reclassificationEntryId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lines PurchaseReceiptLine[]
+
+  // El CHECK de consistencia de cancelación (status/cancelledAt/
+  // cancelledByUserId/cancellationReason, mismo criterio exacto que
+  // purchase_invoices_cancellation_consistency) se agrega a mano en
+  // migration.sql.
+  @@unique([purchaseInvoiceId, idempotencyKey])
+  @@index([purchaseInvoiceId, createdAt])
+  @@index([status, createdAt])
+  @@map("purchase_receipts")
+}
+
+/**
+ * Línea de recepción: cuánto se recibió de UNA PurchaseInvoiceLine en ESTA
+ * PurchaseReceipt. Nunca expone costo/monto (CLAUDE.md A5.2b §6: "no
+ * exponer costos a roles sin autorización") — exclusivamente cantidad
+ * física. El monto de reclasificación contable (si aplica) se persiste
+ * aparte, en reclassifiedAmount, para que anular la recepción revierta
+ * EXACTAMENTE lo posteado, nunca un recálculo que pueda derivar por
+ * redondeo.
+ */
+model PurchaseReceiptLine {
+  id                String          @id @default(uuid()) @db.Uuid
+  purchaseReceiptId String          @map("purchase_receipt_id") @db.Uuid
+  purchaseReceipt   PurchaseReceipt @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+
+  purchaseInvoiceLineId String              @map("purchase_invoice_line_id") @db.Uuid
+  purchaseInvoiceLine   PurchaseInvoiceLine @relation(fields: [purchaseInvoiceLineId], references: [id], onDelete: Restrict)
+
+  quantity Decimal @db.Decimal(14, 3)
+
+  // NULL cuando esta línea no disparó reclasificación contable (caso
+  // predeterminado); monto exacto debitado/acreditado cuando sí la disparó
+  // — ver PurchaseReceipt.reclassificationEntryId. Nunca recalculado al
+  // anular: la reversión usa este valor tal cual.
+  reclassifiedAmount Decimal? @map("reclassified_amount") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // CHECK de cantidad positiva se agrega a mano en migration.sql.
+  @@unique([purchaseReceiptId, purchaseInvoiceLineId])
+  @@index([purchaseReceiptId])
+  @@index([purchaseInvoiceLineId])
+  @@map("purchase_receipt_lines")
 }
 
 // --- Secuencias de documentos y cotizaciones (Fase 5, Bloque A) ------------
@@ -1432,6 +1557,16 @@ enum AccountingSourceType {
   PAYMENT
   MANUAL
   PURCHASE
+  // Fase A5.2b: asiento de RECLASIFICACIÓN opcional posteado al recibir
+  // físicamente una PurchaseInvoiceLine cuya cuenta destino (resuelta en
+  // PURCHASE) está configurada como cuenta de tránsito
+  // (Account.receiptReclassificationTargetAccountId). sourceId =
+  // PurchaseReceipt.id — nunca el de la PurchaseInvoice: cancelar una
+  // recepción revierte EXCLUSIVAMENTE este asiento, jamás el PURCHASE
+  // original de la factura. Ausente (sin ningún AccountingEntry) cuando
+  // ninguna cuenta involucrada tiene tránsito configurado — el caso
+  // predeterminado y seguro mientras no exista una decisión del contador.
+  PURCHASE_RECEIPT
 }
 
 // ORIGINAL: primer asiento de un evento de negocio (de venta/pago
@@ -1502,6 +1637,21 @@ model Account {
   // NUNCA toca AccountingEntryLine.accountId de ningún asiento histórico.
   systemKey AccountingSystemKey? @unique @map("system_key")
 
+  // Fase A5.2b: decisión EXPLÍCITA y opcional del contador — NULL (default,
+  // en todas las cuentas de todas las fases anteriores y en toda cuenta
+  // nueva) significa "esta cuenta ya es el destino final al recibir
+  // mercadería: nunca generar una reclasificación artificial". Un valor NO
+  // NULL marca esta cuenta como de TRÁNSITO y designa a cuál cuenta
+  // reclasificar el monto proporcional recibido. Nunca se infiere del
+  // nombre/código/systemKey de la cuenta (revisión A5.2b): es exclusivamente
+  // este campo, configurado a mano, nunca sembrado ni activado por defecto.
+  // Self-relation de un solo nivel — un objetivo con su propio objetivo
+  // configurado es un estado inválido, rechazado por
+  // AccountingEngine/ChartOfAccountsService, nunca por un CHECK recursivo.
+  receiptReclassificationTargetAccountId String?  @map("receipt_reclassification_target_account_id") @db.Uuid
+  receiptReclassificationTargetAccount   Account? @relation("AccountReceiptReclassificationTarget", fields: [receiptReclassificationTargetAccountId], references: [id], onDelete: Restrict)
+  receiptReclassificationSourceAccounts  Account[] @relation("AccountReceiptReclassificationTarget")
+
   // Jerarquía (Fase A1 — PCGE §4), mismo patrón que Category
   // ("AccountHierarchy"). onDelete: Restrict: nunca se borra una cuenta
   // físicamente (ni este modelo expone un DELETE), así que esto es
@@ -1543,11 +1693,13 @@ model Account {
   // exclusivamente `lines` arriba).
   manualDraftLines ManualJournalDraftLine[]
 
-  // Los 2 CHECK de code/name no en blanco (Fase 8) más los 2 nuevos de la
-  // Fase A1 (level >= 1, no auto-padre) se agregan a mano en
-  // migration.sql, mismo criterio que Category/Unit/Product.
+  // Los 2 CHECK de code/name no en blanco (Fase 8), los 2 de la Fase A1
+  // (level >= 1, no auto-padre) y el nuevo de la Fase A5.2b (una cuenta
+  // nunca se designa su propio objetivo de reclasificación) se agregan a
+  // mano en migration.sql, mismo criterio que Category/Unit/Product.
   @@index([parentId])
   @@index([status])
+  @@index([receiptReclassificationTargetAccountId])
   @@map("chart_of_accounts")
 }
 
@@ -1636,6 +1788,11 @@ model AccountingEntry {
   // postedByDraft: puramente informativo, AccountingEngine nunca lo
   // consulta para decidir nada.
   postedByPurchaseInvoice PurchaseInvoice?
+
+  // Fase A5.2b: lado inverso de PurchaseReceipt.reclassificationEntryId —
+  // SOLO presente cuando sourceType=PURCHASE_RECEIPT. Mismo criterio
+  // informativo exacto que postedByDraft/postedByPurchaseInvoice.
+  postedByPurchaseReceiptReclassification PurchaseReceipt?
 
   // Los 3 CHECK (description no en blanco, consistencia ORIGINAL/REVERSAL,
   // no auto-reversión) y el índice único parcial

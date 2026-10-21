@@ -113,6 +113,10 @@ function createTxMock() {
       createMany: jest.fn<Promise<unknown>, [unknown]>(),
       update: jest.fn<Promise<unknown>, [unknown]>(),
     },
+    // Fase A5.2b: guardia de cancel() contra recepciones ACTIVE.
+    purchaseReceipt: {
+      count: jest.fn<Promise<number>, [unknown]>(),
+    },
     $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
   };
 }
@@ -177,6 +181,7 @@ describe('PurchaseInvoicesService', () => {
       status: SupplierStatus.ACTIVE,
     });
     prisma.tx.product.findMany.mockResolvedValue([]);
+    prisma.tx.purchaseReceipt.count.mockResolvedValue(0);
     prisma.tx.$queryRaw.mockResolvedValue([makeLockedRow()]);
     prisma.tx.purchaseInvoice.create.mockResolvedValue(makeSafeInvoiceRow());
     prisma.tx.purchaseInvoice.update.mockResolvedValue(makeSafeInvoiceRow());
@@ -638,6 +643,31 @@ describe('PurchaseInvoicesService', () => {
       expect(auditCall.metadata.reason).toBe(
         'Factura registrada con el proveedor incorrecto',
       );
+    });
+
+    it('Fase A5.2b: factura con recepciones ACTIVE: ConflictException, nunca anula en cascada', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        makeLockedRow({ status: PurchaseInvoiceStatus.CONFIRMED }),
+      ]);
+      prisma.tx.purchaseReceipt.count.mockResolvedValue(1);
+
+      await expect(service.cancel(cancelInput())).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(accountingEngine.reverseOriginalForSource).not.toHaveBeenCalled();
+      expect(prisma.tx.purchaseInvoice.update).not.toHaveBeenCalled();
+    });
+
+    it('Fase A5.2b: sin recepciones ACTIVE (0 o solo CANCELLED, ya filtradas por el where): anula con normalidad', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        makeLockedRow({ status: PurchaseInvoiceStatus.CONFIRMED }),
+      ]);
+      prisma.tx.purchaseReceipt.count.mockResolvedValue(0);
+
+      await expect(service.cancel(cancelInput())).resolves.toBeDefined();
+      expect(prisma.tx.purchaseReceipt.count).toHaveBeenCalledWith({
+        where: { purchaseInvoiceId: PURCHASE_INVOICE_ID, status: 'ACTIVE' },
+      });
     });
   });
 });

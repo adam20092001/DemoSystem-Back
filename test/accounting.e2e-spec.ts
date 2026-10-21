@@ -1981,14 +1981,17 @@ describe('Basic Accounting (e2e)', () => {
 
       // AccountingSourceType (Fase A4.4: ampliado con MANUAL para los
       // asientos manuales; Fase A5.2a: ampliado con PURCHASE para las
-      // facturas de compra universales — ninguna de las dos se origina en
-      // una conversión de cotización) nunca incluye un valor QUOTE: no
-      // existe ni puede existir en tiempo de compilación, garantía
-      // estática, no una comprobación en runtime.
+      // facturas de compra universales; Fase A5.2b: ampliado con
+      // PURCHASE_RECEIPT para la reclasificación opcional por recepción
+      // física — ninguno de los tres se origina en una conversión de
+      // cotización) nunca incluye un valor QUOTE: no existe ni puede
+      // existir en tiempo de compilación, garantía estática, no una
+      // comprobación en runtime.
       expect(Object.values(AccountingSourceType).sort()).toEqual([
         'MANUAL',
         'PAYMENT',
         'PURCHASE',
+        'PURCHASE_RECEIPT',
         'SALE',
       ]);
     });

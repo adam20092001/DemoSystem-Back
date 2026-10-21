@@ -484,6 +484,14 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.PURCHASE_INVOICE_UPDATED]: ['updatedFieldCount'],
   [AuditAction.PURCHASE_INVOICE_CONFIRMED]: ['entryId', 'journalNumber'],
   [AuditAction.PURCHASE_INVOICE_CANCELLED]: ['reversalEntryId', 'reason'],
+  // PURCHASE_RECEIPT_ (Fase A5.2b). PurchaseReceiptsService es su único
+  // emisor. Nunca costo/monto de factura — solo identificadores/conteos.
+  [AuditAction.PURCHASE_RECEIPT_CREATED]: [
+    'purchaseInvoiceId',
+    'lineCount',
+    'reclassified',
+  ],
+  [AuditAction.PURCHASE_RECEIPT_CANCELLED]: ['reason', 'reversalEntryId'],
 };
 
 function isPlainObject(
