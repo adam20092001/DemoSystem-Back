@@ -237,6 +237,19 @@ export function buildManualReversalDescription(
     : combined;
 }
 
+/** Backend-only, determinista, sin datos del cliente ni PII (Fase A5.2a). */
+export function buildPurchaseOriginalDescription(
+  documentLabel: string,
+): string {
+  return `Compra ${documentLabel}`;
+}
+
+export function buildPurchaseReversalDescription(
+  documentLabel: string,
+): string {
+  return `Reversión de compra ${documentLabel}`;
+}
+
 /**
  * Defensa en profundidad (mismo criterio que StockMovementEngine con
  * reason/notes): aunque la descripción SIEMPRE la genera el backend a

@@ -59,9 +59,13 @@ const WAREHOUSE_PASSWORD = 'WarehouseAccounting123';
 const NON_EXISTENT_UUID = '00000000-0000-0000-0000-000000000000';
 const INVALID_UUID = 'not-a-uuid';
 
-const CANONICAL_ACCOUNTS: Record<
-  AccountingSystemKey,
-  { code: string; name: string; type: AccountType }
+// Partial, no Record exhaustivo: representa únicamente las 6 cuentas
+// REALMENTE sembradas por prisma/seed.ts (SALE/PAYMENT). Los 7
+// AccountingSystemKey nuevos de la Fase A5.2a (ACCOUNTS_PAYABLE,
+// VAT_RECEIVABLE, PURCHASE_*) deliberadamente NO tienen mapeo sembrado
+// aquí tampoco — ningún seed los activa nunca (ver CLAUDE.md §11, A5.2a).
+const CANONICAL_ACCOUNTS: Partial<
+  Record<AccountingSystemKey, { code: string; name: string; type: AccountType }>
 > = {
   CASH: { code: 'CASH', name: 'Caja', type: AccountType.ASSET },
   BANK: { code: 'BANK', name: 'Bancos', type: AccountType.ASSET },
@@ -279,7 +283,22 @@ describe('Basic Accounting (e2e)', () => {
       })
     ).id;
 
-    for (const key of Object.values(AccountingSystemKey)) {
+    // Únicamente las 6 cuentas de sistema REALMENTE sembradas por
+    // prisma/seed.ts (SALE/PAYMENT) — nunca Object.values(AccountingSystemKey)
+    // completo: los 7 AccountingSystemKey nuevos de la Fase A5.2a
+    // (ACCOUNTS_PAYABLE, VAT_RECEIVABLE, PURCHASE_*) deliberadamente no
+    // tienen ninguna cuenta mapeada fuera de su propia suite dedicada (ver
+    // CLAUDE.md §11, A5.2a) — buscarlos aquí con findUniqueOrThrow()
+    // lanzaría siempre.
+    const SEEDED_SYSTEM_KEYS: AccountingSystemKey[] = [
+      AccountingSystemKey.CASH,
+      AccountingSystemKey.BANK,
+      AccountingSystemKey.ACCOUNTS_RECEIVABLE,
+      AccountingSystemKey.VAT_PAYABLE,
+      AccountingSystemKey.SALES_REVENUE,
+      AccountingSystemKey.DISCOUNTS,
+    ];
+    for (const key of SEEDED_SYSTEM_KEYS) {
       const row = await prisma.account.findUniqueOrThrow({
         where: { systemKey: key },
       });
@@ -939,8 +958,8 @@ describe('Basic Accounting (e2e)', () => {
       const restored = await prisma.account.findUniqueOrThrow({
         where: { systemKey: AccountingSystemKey.SALES_REVENUE },
       });
-      expect(restored.code).toBe(CANONICAL_ACCOUNTS.SALES_REVENUE.code);
-      expect(restored.name).toBe(CANONICAL_ACCOUNTS.SALES_REVENUE.name);
+      expect(restored.code).toBe(CANONICAL_ACCOUNTS.SALES_REVENUE!.code);
+      expect(restored.name).toBe(CANONICAL_ACCOUNTS.SALES_REVENUE!.name);
     });
   });
 
@@ -990,7 +1009,7 @@ describe('Basic Accounting (e2e)', () => {
       const restored = await prisma.account.findUniqueOrThrow({
         where: { systemKey: AccountingSystemKey.BANK },
       });
-      expect(restored.code).toBe(CANONICAL_ACCOUNTS.BANK.code);
+      expect(restored.code).toBe(CANONICAL_ACCOUNTS.BANK!.code);
     });
   });
 
@@ -1961,13 +1980,15 @@ describe('Basic Accounting (e2e)', () => {
       expect(quoteRow.status).toBe(QuoteStatus.CONVERTED);
 
       // AccountingSourceType (Fase A4.4: ampliado con MANUAL para los
-      // asientos manuales, que nunca se originan en una conversión de
-      // cotización) nunca incluye un valor QUOTE: no existe ni puede
-      // existir en tiempo de compilación, garantía estática, no una
-      // comprobación en runtime.
+      // asientos manuales; Fase A5.2a: ampliado con PURCHASE para las
+      // facturas de compra universales — ninguna de las dos se origina en
+      // una conversión de cotización) nunca incluye un valor QUOTE: no
+      // existe ni puede existir en tiempo de compilación, garantía
+      // estática, no una comprobación en runtime.
       expect(Object.values(AccountingSourceType).sort()).toEqual([
         'MANUAL',
         'PAYMENT',
+        'PURCHASE',
         'SALE',
       ]);
     });

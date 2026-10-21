@@ -14,6 +14,7 @@ import { InventoryModule } from './inventory/inventory.module';
 import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
 import { PaymentsModule } from './payments/payments.module';
 import { ProductsModule } from './products/products.module';
+import { PurchaseInvoicesModule } from './purchase-invoices/purchase-invoices.module';
 import { QuotesModule } from './quotes/quotes.module';
 import { ReportsModule } from './reports/reports.module';
 import { SalesModule } from './sales/sales.module';
@@ -44,6 +45,7 @@ import { UsersModule } from './users/users.module';
     PaymentMethodsModule,
     PaymentsModule,
     AccountingModule,
+    PurchaseInvoicesModule,
     ReportsModule,
     ConfigurationModule,
     ElectronicInvoicingModule,

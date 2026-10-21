@@ -85,6 +85,8 @@ Reglas de capas:
 15. **Auditoría** — registro de acciones críticas.
 16. **Facturación electrónica (demostración)** — emisión de FACTURA/BOLETA sobre ventas confirmadas mediante una abstracción de proveedor (`ElectronicInvoicingProvider`), con `MockElectronicInvoicingProvider` como única implementación existente. Un documento `ACCEPTED` por el proveedor MOCK no tiene validez fiscal ante SUNAT (ver §7). Series fiscales (`FiscalSeries`) separadas de los correlativos comerciales (`DocumentSequence`).
 17. **Caja / arqueo de caja — RETIRADO** (decisión del cliente, rama `feat/remove-cash-sessions`). El módulo operativo `CashSessionsModule` y sus 7 endpoints (`/api/v1/cash-sessions/*`) ya no existen: no hay apertura, cierre, arqueo ni aprobación/rechazo de descuadres. Los cobros se registran directamente (ver §6 "Cobros"). Se conservan en el esquema, solo por historial, las tablas `cash_sessions` y `cash_session_payment_method_summaries`, el enum `CashSessionStatus`, la columna nullable `Payment.cashSessionId` (vínculos antiguos intactos) y las acciones de auditoría `CASH_SESSION_*`.
+18. **Proveedores** (Fase A5.1) — maestro de datos de proveedor (`SuppliersModule`, `/api/v1/suppliers*`): alta, edición, activación/desactivación (borrado lógico), con prevención de duplicados reforzada en base de datos (documento normalizado mayúsculas/espacios). Sin ningún vínculo todavía a Compras/Cuentas por pagar más allá de la validación de existencia+estado `ACTIVE` que usa el módulo 19.
+19. **Facturas de compra** (Fase A5.2a) — documento universal de compra (`PurchaseInvoicesModule`, `/api/v1/purchase-invoices*`) con ciclo de vida DRAFT→CONFIRMED→CANCELLED, líneas mixtas (bienes de catálogo, bienes/servicios libres) y contabilización vía el mismo `AccountingEngine`. Ver §11 para el detalle completo — en particular, qué queda bloqueado mientras ADMIN no configure los mapeos contables correspondientes. **Nunca** mueve inventario ni registra pagos a proveedor en esta fase (eso depende de una futura Fase A5.2b/A5.3, no iniciada).
 
 ---
 
@@ -93,8 +95,8 @@ Reglas de capas:
 - `ADMIN` — acceso total, configuración y usuarios. Sin restricción de propiedad en ningún módulo.
 - `SELLER` — cotizaciones, ventas, pagos, clientes, comprobantes electrónicos y reportes/dashboard comerciales, pero **restringido a sus propios registros** (`Sale.sellerId`/`Quote.sellerId`) desde P1–P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11). No tiene acceso a Contabilidad básica ni a Auditoría.
 - `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes.
-- `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones (ver §11, cierre P6-E4).
-- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Sin acceso a ningún módulo fuera de Contabilidad (ventas, inventario, usuarios, configuración, etc. responden 403).
+- `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones, no crea/confirma/anula facturas de compra (ver §11, cierre P6-E4 y Fase A5.2a).
+- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura — nunca crea, edita, confirma ni anula una: esa escritura es exclusiva de ADMIN en esta fase). Sin acceso a ningún otro módulo fuera de estos (ventas, inventario, usuarios, configuración, etc. responden 403).
 
 La autorización se resuelve **siempre en el backend** mediante guards y decoradores de rol.
 El frontend puede ocultar opciones, pero eso **no** cuenta como control de acceso.
@@ -930,12 +932,169 @@ de SALE/PAYMENT.
   ambas ahora incluyen legítimamente `ACCOUNTANT`/`MANUAL`); `lint:check`
   y `build` correctos.
 
+**Fase A5.1 — Maestro de proveedores** (rama `feat/a5-1-suppliers`, fusionada
+a `main` vía PR #35 en el commit `1e0c235`). *Nota de mantenimiento de este
+archivo: esta sección nunca se agregó cuando A5.1 se fusionó; se agrega aquí
+de forma retroactiva y resumida, únicamente como contexto necesario para la
+Fase A5.2a que sigue — el detalle completo vive en el propio código
+(`src/suppliers/`) y en el historial de PR #35.* `SuppliersModule`
+(`/api/v1/suppliers*`, modelo `Supplier`, migración
+`20261021001032_add_suppliers`): alta, edición, activación/desactivación
+(borrado lógico, nunca físico) de proveedores, con el cliente especial
+implícito **no** aplicable aquí (eso es exclusivo de Clientes). Unicidad de
+documento DB-enforced vía índice funcional case/espacio-insensible
+(`suppliers_document_unique`, `UPPER(BTRIM(...))`, mismo criterio que
+`customers_document_unique`), segura bajo concurrencia real. RBAC: ADMIN
+administra el ciclo de vida completo; MANAGEMENT/ACCOUNTANT solo leen;
+SELLER/WAREHOUSE sin ningún acceso. Auditoría dedicada
+(`SUPPLIER_CREATED`/`UPDATED`/`ACTIVATED`/`DEACTIVATED`), nunca registra PII
+del proveedor (documentNumber/legalName/tradeName/contactName/email/phone/
+address) en sus metadatos. Sin ningún vínculo a Compras/Cuentas por
+Pagar/`AccountingEngine` en esta fase — eso es exactamente lo que agrega la
+Fase A5.2a, descrita a continuación.
+
+**Fase A5.2a — Facturas de compra universales** (rama
+`feat/a5-2a-universal-purchase-invoices`, base `main` en `4e31366`,
+**implementada y validada, sin commit/push/PR todavía** — pendiente de
+autorización explícita del cliente). Construye sobre A5.1 (`Supplier`) y
+sobre `AccountingEngine` (A0-A4, sin modificar su comportamiento existente
+de SALE/PAYMENT/MANUAL) el primer tramo de Compras: `PurchaseInvoice` +
+`PurchaseInvoiceLine` (modelo UNIVERSAL — nunca especializado a un rubro —
+con líneas mixtas: producto de catálogo, bien libre o servicio libre, en un
+mismo documento). Explícitamente FUERA de esta fase: recepción física
+(`PurchaseReceipt`, A5.2b, no iniciada), pagos a proveedor, reportes de
+cuentas por pagar, costeo/Kardex, activos fijos/depreciación, multimoneda
+real, SUNAT. **La factura de compra NUNCA mueve inventario** en esta fase —
+ningún endpoint de este módulo llama a `StockMovementEngine`.
+
+- **Modelo de línea, tres dimensiones independientes.** (A) `acquisitionKind`
+  — qué se adquiere (`GOOD`/`SERVICE`/`OTHER`). (B) `purchasePurpose` —
+  destino de negocio (`RESALE_INVENTORY`/`INTERNAL_CONSUMPTION`/
+  `FIXED_ASSET`/`OPERATING_EXPENSE`/`OTHER`), resuelto a una cuenta contable
+  CONFIGURABLE vía un mapeo fijo 1:1 a un nuevo `AccountingSystemKey`
+  (`PURCHASE_PURPOSE_TO_SYSTEM_KEY` en `purchase-invoice-calculator.ts`) —
+  el nombre de cada `AccountingSystemKey` identifica el PROPÓSITO de compra,
+  nunca si la cuenta real es de tránsito o destino final: esa es una
+  decisión de mapeo del contador, jamás codificada aquí. (C)
+  `isReceiptEligible` — elegibilidad de recepción física futura, derivada
+  (mientras `DRAFT`) de `acquisitionKind=GOOD` + `productId` presente +
+  `Product.isInventoryTracked=true`, y **congelada exactamente una vez al
+  confirmar**: una línea confirmada nunca cambia de elegibilidad aunque el
+  catálogo cambie después (protege contra la mutabilidad de
+  `Product.isInventoryTracked`).
+- **Tratamiento tributario, siempre por línea, nunca por documento.**
+  `taxCategory` (`TAXED`/`EXEMPT`/`UNAFFECTED`/`OTHER`) y, solo si `TAXED`,
+  `taxBasis` (`TAX_INCLUDED`/`TAX_EXCLUDED`) — una misma factura puede
+  mezclar líneas con tratamientos distintos; los totales de cabecera son
+  siempre la suma de líneas ya calculadas, nunca una tasa única aplicada al
+  documento completo (`purchase-invoice-calculator.ts`, HALF_UP a 2
+  decimales, misma técnica de redondeo que R2 pero copia propia del
+  dominio). `creditableTaxAmount` es un campo PROPIO, nunca inferido de
+  `taxCategory` (default `0.00` si se omite — nunca asumir deducibilidad); el
+  residuo no creditable (`taxAmount − creditableTaxAmount`) se absorbe en el
+  débito de destino de esa misma línea, nunca se postea como pérdida
+  separada ni se descarta.
+- **Contabilización (`confirm()`), siempre vía `AccountingEngine`.** Nuevo
+  método `postPurchaseRecognition()` — mismo patrón de periodo/fecha
+  contable/numeración que los asientos manuales de A4
+  (`accountingDate` EXPLÍCITA, elegida al crear/editar, nunca derivada de un
+  instante; periodo debe existir y estar `OPEN`, auto-creado solo si es el
+  mes de negocio en curso). Resuelve cuentas por `AccountingSystemKey` nuevo
+  (`ACCOUNTS_PAYABLE`, `VAT_RECEIVABLE`, `PURCHASE_RESALE_INVENTORY`,
+  `PURCHASE_INTERNAL_CONSUMPTION`, `PURCHASE_FIXED_ASSET`,
+  `PURCHASE_OPERATING_EXPENSE`, `PURCHASE_OTHER`) — **ninguno tiene mapeo
+  real en `pos_db`/`pos_db_test` fuera de la propia suite E2E de esta fase**:
+  `prisma/seed.ts` NO fue tocado a propósito (sembrar sería "crear un mapeo
+  contable real", explícitamente prohibido). Mientras ADMIN no mapee cada
+  `AccountingSystemKey` requerido por una factura concreta (vía el endpoint
+  YA EXISTENTE `PATCH /api/v1/chart-of-accounts/system-keys/:systemKey`,
+  sin cambios), `confirm()` **falla cerrado con 409** (`ConflictException`,
+  nunca 500): esto es resultado NORMAL y ESPERADO de "todavía no configurado
+  por el contador", a propósito distinto del 500 que sí lanza
+  `resolveAccounts()` para las 6 cuentas de sistema originales (esas sí son
+  un invariante de despliegue). `creditableTaxAmount=0` en todas las líneas
+  nunca exime este chequeo: `ACCOUNTS_PAYABLE` se exige siempre. Anulación
+  (`cancel()`) revierte vía el ya existente `reverseOriginalForSource()`
+  (nuevo caso `PURCHASE` en su switch de descripciones); no existe todavía
+  ninguna guardia de "recepciones activas" (A5.2b deberá agregarla antes de
+  permitir esta anulación una vez exista `PurchaseReceipt`).
+- **Unicidad de documento, DB-enforced, nunca `DocumentSequenceService`.**
+  Índice funcional `purchase_invoices_document_unique` sobre
+  `(supplier_id, document_type, UPPER(BTRIM(COALESCE(document_series,''))),
+  UPPER(BTRIM(document_number)))` — el `COALESCE` resuelve correctamente
+  documentos extranjeros sin serie (nunca dos NULL se consideran iguales sin
+  esta normalización). Sin ningún chequeo de aplicación previo a nivel de
+  servicio: el propio `P2002` de PostgreSQL, ya traducido globalmente a 409
+  por `AllExceptionsFilter`, es la única fuente de verdad — correcto incluso
+  bajo dos POST verdaderamente concurrentes con el mismo documento
+  (verificado con una prueba E2E real, nunca simulada).
+- **Inmutabilidad y snapshots.** `CONFIRMED` es terminal salvo anulación
+  (`PATCH` sobre una factura `CONFIRMED`/`CANCELLED` responde 409); edición
+  de líneas mientras `DRAFT` siempre reemplaza el arreglo completo (nunca un
+  parche línea a línea, mismo criterio que `ManualJournalDraft`, A4.2).
+  `descriptionSnapshot`/`unitCodeSnapshot`/`unitNameSnapshot` se copian del
+  producto al crear (o del texto libre del llamador si no hay `productId`):
+  un cambio posterior del catálogo nunca altera una línea ya creada.
+  `currencyCode` siempre `CompanySettings.currencyCode` vigente en el
+  instante de crear (bajo el mismo lock `FOR UPDATE` de A0.2), nunca
+  aceptado del cliente.
+- **RBAC.** ADMIN administra el ciclo de vida completo
+  (crear/editar/confirmar/anular); MANAGEMENT/ACCOUNTANT solo leen;
+  SELLER/WAREHOUSE sin ningún acceso. MANAGEMENT nunca adquiere escritura
+  aquí tampoco (mismo criterio que el resto del dominio, cierre P6-E4).
+- **Migración.** `20261021092817_add_universal_purchase_invoices` — 100%
+  aditiva: 7 valores nuevos de `AccountingSystemKey`, valor nuevo `PURCHASE`
+  de `AccountingSourceType`, 6 enums nuevos propios del dominio, tablas
+  nuevas `purchase_invoices`/`purchase_invoice_lines` con sus FK/índices/13
+  CHECK + el índice único funcional ya descrito. Ninguna tabla ni columna
+  existente se modifica. Aplicada y verificada (sin drift, `prisma migrate
+  diff`) únicamente en `pos_db_test`; `pos_db` queda intacta con esta
+  migración pendiente, confirmado con `prisma migrate status`.
+- **Validación:** 105 suites / 3419 pruebas unitarias; 37 suites / 1522
+  pruebas E2E (incluida la nueva `test/purchase-invoices.e2e-spec.ts`: RBAC,
+  bloqueo 409 por mapeo contable incompleto antes de activarlo, activación
+  de mapeos SINTÉTICOS reales vía el endpoint existente de ADMIN, líneas
+  mixtas producto/libre, documento extranjero sin serie, unicidad de
+  documento incluida una concurrencia real, los tres tratamientos
+  tributarios y su mezcla en un mismo documento, límite de
+  `creditableTaxAmount`, congelamiento de `isReceiptEligible`, posteo y
+  reversión contable real, periodo histórico sin crear, inmutabilidad tras
+  confirmar, y confirmación/anulación concurrentes) en dos ejecuciones
+  consecutivas (exit code 0 ambas); regresión completa de A0-A5.1 sin romper
+  ningún comportamiento previo (dos hallazgos preexistentes actualizados a
+  propósito, no regresiones: la lista fija de `AccountingSourceType` en
+  `accounting.e2e-spec.ts`, que ahora incluye legítimamente `PURCHASE`, y un
+  bucle de esa misma suite que resolvía TODOS los `AccountingSystemKey`
+  contra cuentas reales — corregido para iterar únicamente sobre los 6
+  `AccountingSystemKey` realmente sembrados, nunca sobre el enum completo
+  ahora que existen 7 más deliberadamente sin mapear); `lint:check` y
+  `build` correctos.
+- **Riesgo operativo detectado y ya mitigado dentro de la propia suite (no
+  un hallazgo de producción):** `pos_db_test` es compartida entre todos los
+  archivos E2E, y `CompanySettings.taxEnabled` puede quedar en cualquier
+  estado según qué suite corrió antes (se encontró en `false` al desarrollar
+  esta fase). `test/purchase-invoices.e2e-spec.ts` fija `taxEnabled=true`/
+  `taxRate=18.00` como fixture mediante escritura DIRECTA de Prisma en su
+  propio `beforeAll` (mismo criterio ya aprobado por
+  `configuration-tax.e2e-spec.ts`: sin restricción de A0.2, que es exclusiva
+  de `currencyCode`) y los restaura a su valor previo en `afterAll` —
+  ninguna otra suite necesita cambiar por esto.
+- **Bloqueado explícitamente, pendiente de decisión del contador (nunca
+  implementado por iniciativa propia):** qué cuenta real de `pos_db`
+  corresponde a cada uno de los 7 `AccountingSystemKey` nuevos — hasta que
+  ADMIN los mapee uno por uno vía `PATCH .../system-keys/:systemKey`, **toda
+  confirmación real de una factura de compra en `pos_db` fallará con 409**
+  (comportamiento correcto y deseado, no un defecto); si cada
+  `PURCHASE_*` debe mapear a una cuenta de tránsito o a una cuenta final
+  (decisión de mapeo contable, nunca de código); validación formal de las
+  reglas de crédito fiscal peruano aplicadas a `creditableTaxAmount`.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
 descuentos en soles o porcentaje; reportes contables
 adicionales (flujo de caja, estados financieros); módulo de
-importaciones y proveedores; cualquier cambio futuro que amplíe los permisos
+importaciones; cualquier cambio futuro que amplíe los permisos
 de facturación/escritura de MANAGEMENT (su alcance actual —lectura global,
 cero escritura— es la decisión vigente, confirmada en el cierre P6-E4);
 **(Fase A2)** si los periodos contables backfilleados a partir de
@@ -947,21 +1106,31 @@ si el Libro Mayor/Balance de comprobación deberían ofrecer una vista
 CONSOLIDADA de cuenta padre + hijas además de la vista actual de saldo
 directo (decisión provisional vigente: solo saldo directo, nunca
 consolidado — ver §11 A3.2; cualquier vista consolidada es una capacidad
-nueva a diseñar explícitamente, nunca asumida).
+nueva a diseñar explícitamente, nunca asumida); **(Fase A5.2a)** el mapeo
+contable real de los 7 `AccountingSystemKey` nuevos (ver arriba); recepción
+física de compras (`PurchaseReceipt`, A5.2b), pagos a proveedor, reportes de
+cuentas por pagar y cualquier capacidad del roadmap de Compras más allá de
+la factura misma.
 
 **Riesgos técnicos conocidos:** varias suites E2E dejan residuos en
 `products` y `audit_logs`, y el cliente genérico del seed de pruebas no se
 conserva al terminar (la suite pasa igualmente dos veces seguidas, pero el
-aislamiento global no está completamente resuelto); 18 errores preexistentes
-en `tsc --noEmit`; el frontend todavía depende de Caja; no hay CI en GitHub.
+aislamiento global no está completamente resuelto); `CompanySettings.
+taxEnabled`/`taxRate` quedan en el último valor que les dejó la suite E2E
+anterior (sin aislamiento por archivo) — una suite que necesite un valor
+específico debe fijarlo como fixture propio, nunca asumirlo (ver Fase
+A5.2a); 11 errores preexistentes en `tsc --noEmit`; el frontend todavía
+depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **20**, las 19 anteriores en `main` (A1 vía PR #31,
-A2 vía PR #32) y aplicadas tanto en `pos_db` como en `pos_db_test`; la
-migración 20 de la Fase A4 (ver arriba) aplicada EXCLUSIVAMENTE en
-`pos_db_test`. La Fase A3 (reportes contables) no agregó ninguna
-migración: reutilizó por completo el esquema de A1/A2. Sin cambios de
-esquema por el requerimiento de propiedad por vendedor ni por la Fase A0:
-ambos son exclusivamente de autorización/lógica de servicio.
+Migraciones totales: **22**, las 20 anteriores en `main` (A1 vía PR #31, A2
+vía PR #32, A4 vía su propio merge) aplicadas tanto en `pos_db` como en
+`pos_db_test`; la migración 21 (A5.1, Proveedores) está en `main` pero
+`CLAUDE.md` nunca se actualizó en ese momento (ver nota de arriba); la
+migración 22 (A5.2a, ver arriba) aplicada EXCLUSIVAMENTE en `pos_db_test`.
+La Fase A3 (reportes contables) no agregó ninguna migración: reutilizó por
+completo el esquema de A1/A2. Sin cambios de esquema por el requerimiento de
+propiedad por vendedor ni por la Fase A0: ambos son exclusivamente de
+autorización/lógica de servicio.
 
 ---
 

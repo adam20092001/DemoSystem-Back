@@ -11,6 +11,8 @@ import {
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
   buildPaymentReversalDescription,
+  buildPurchaseOriginalDescription,
+  buildPurchaseReversalDescription,
   buildSaleOriginalDescription,
   buildSaleRecognitionLines,
   buildSaleReversalDescription,
@@ -307,6 +309,12 @@ describe('descripciones de asiento', () => {
     );
     expect(buildPaymentReversalDescription('NV-000001')).toBe(
       'Reversión de cobro de venta NV-000001',
+    );
+    expect(buildPurchaseOriginalDescription('FACTURA F001-123')).toBe(
+      'Compra FACTURA F001-123',
+    );
+    expect(buildPurchaseReversalDescription('FACTURA F001-123')).toBe(
+      'Reversión de compra FACTURA F001-123',
     );
   });
 

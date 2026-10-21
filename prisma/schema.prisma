@@ -193,6 +193,11 @@ model User {
   reopenedAccountingPeriods  AccountingPeriod[]   @relation("AccountingPeriodReopenedBy")
   // Borradores de asiento manual creados por este usuario (Fase A4.2).
   createdManualJournalDrafts ManualJournalDraft[] @relation("ManualJournalDraftCreatedBy")
+  // Facturas de compra (Fase A5.2a): dos relaciones nombradas porque
+  // PurchaseInvoice referencia User dos veces (quien la crea y, si aplica,
+  // quien la anula), mismo criterio que Sale/Payment/AccountingPeriod.
+  createdPurchaseInvoices   PurchaseInvoice[]    @relation("PurchaseInvoiceCreatedBy")
+  cancelledPurchaseInvoices PurchaseInvoice[]    @relation("PurchaseInvoiceCancelledBy")
 
   @@index([status])
   @@map("users")
@@ -279,6 +284,12 @@ model Product {
   movements             InventoryMovement[]
   quoteItems            QuoteItem[]
   saleItems             SaleItem[]
+  // Fase A5.2a: líneas de compra que referencian este producto (opcional —
+  // a diferencia de SaleItem, una PurchaseInvoiceLine puede no tener
+  // producto). Nunca escribe stockCurrent desde aquí: A5.2a no modifica
+  // inventario (responsabilidad exclusiva de A5.2b, todavía no
+  // implementada).
+  purchaseInvoiceLines  PurchaseInvoiceLine[]
   createdAt             DateTime               @default(now()) @map("created_at")
   updatedAt             DateTime               @updatedAt @map("updated_at")
 
@@ -531,6 +542,13 @@ model Supplier {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  // Fase A5.2a: facturas de compra de este proveedor. La identidad del
+  // proveedor queda además snapshotada indirectamente en cada
+  // PurchaseInvoice vía supplierId (sin snapshot de nombre/documento en la
+  // factura misma — a diferencia de Sale/Quote con Customer, A5.2a no lo
+  // requirió; puede reconsiderarse en una fase posterior si se necesita).
+  purchaseInvoices PurchaseInvoice[]
+
   // Las 3 CHECK y el índice único funcional (documentType+countryCode+
   // UPPER(BTRIM(documentNumber))) se añaden a mano en migration.sql (mismo
   // motivo que Customer: el DSL de Prisma no expresa CHECK, UPPER() ni
@@ -538,6 +556,212 @@ model Supplier {
   // nunca es nulo aquí.
   @@index([createdAt, id])
   @@map("suppliers")
+}
+
+// --- Compras universales (Fase A5.2a) ---------------------------------------
+// PurchaseInvoice/PurchaseInvoiceLine son el modelo ÚNICO y universal: una
+// misma factura mezcla libremente bienes catalogados, bienes sin catálogo
+// y servicios (ver PurchaseAcquisitionKind/PurchasePurpose abajo). Nunca
+// modifica stock (StockMovementEngine/InventoryMovement no se tocan en
+// esta fase — eso es A5.2b, todavía no implementada). El reconocimiento
+// contable usa EXCLUSIVAMENTE AccountingEngine (postPurchaseRecognition(),
+// nuevo), nunca un motor paralelo.
+
+enum PurchaseInvoiceDocumentType {
+  FACTURA
+  BOLETA
+  RECIBO
+  OTHER
+}
+
+enum PurchaseInvoiceStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+// Dimensión A del blueprint de A5.2 (qué se adquiere). Determina si la
+// línea puede ser elegible para recepción física (solo GOOD) — nunca por
+// sí sola: también exige productId + Product.isInventoryTracked=true,
+// evaluado y CONGELADO en PurchaseInvoiceLine.isReceiptEligible al
+// confirmar (ver ese campo).
+enum PurchaseAcquisitionKind {
+  GOOD
+  SERVICE
+  OTHER
+}
+
+// Dimensión B (destino contable/de negocio de la línea) — NUNCA inferida
+// del nombre del producto ni de su categoría de venta, siempre un valor
+// explícito. Determina qué AccountingSystemKey (PURCHASE_*) resuelve la
+// cuenta destino al confirmar; cuál sea esa cuenta REAL (de tránsito o
+// final) es una decisión de mapeo del contador, no una regla codificada.
+enum PurchasePurpose {
+  RESALE_INVENTORY
+  INTERNAL_CONSUMPTION
+  FIXED_ASSET
+  OPERATING_EXPENSE
+  OTHER
+}
+
+// Clasificación tributaria ESTRUCTURAL de la línea (qué dice el documento
+// del proveedor) — nunca una regla de deducibilidad inventada aquí. TAXED
+// exige taxBasis+taxRateSnapshot; los demás los exigen NULL y
+// taxAmount=creditableTaxAmount=0 (CHECK en migration.sql).
+enum PurchaseLineTaxCategory {
+  TAXED
+  EXEMPT
+  UNAFFECTED
+  OTHER
+}
+
+// Si el importe de la línea YA incluye el impuesto o lo excluye — por
+// LÍNEA, nunca por factura completa (dos proveedores distintos en la
+// misma factura pueden facturar de forma distinta).
+enum PurchaseLineTaxBasis {
+  TAX_INCLUDED
+  TAX_EXCLUDED
+}
+
+/**
+ * documentSeries es NULLABLE (muchos documentos extranjeros no tienen
+ * serie separada) — la unicidad real se mantiene con COALESCE en el índice
+ * funcional de migration.sql (ver ese archivo), nunca con el comportamiento
+ * nativo de NULL de PostgreSQL. documentNumber nunca se genera con
+ * DocumentSequenceService: es el número que el PROVEEDOR le puso a su
+ * propio documento.
+ *
+ * accountingDate es SIEMPRE explícita (nunca derivada de un instante,
+ * mismo criterio que ManualJournalDraft, Fase A4) — distinta de issueDate
+ * (fecha del proveedor) y registrationDate (cuándo DemoSystem la registra,
+ * puramente informativa, sin ninguna validación de periodo atada).
+ */
+model PurchaseInvoice {
+  id String @id @default(uuid()) @db.Uuid
+
+  supplierId String   @map("supplier_id") @db.Uuid
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  documentType   PurchaseInvoiceDocumentType @map("document_type")
+  documentSeries String?                     @map("document_series") @db.VarChar(20)
+  documentNumber String                      @map("document_number") @db.VarChar(32)
+
+  issueDate        DateTime  @map("issue_date") @db.Date
+  registrationDate DateTime  @map("registration_date") @db.Date
+  accountingDate   DateTime  @map("accounting_date") @db.Date
+  dueDate          DateTime? @map("due_date") @db.Date
+  paymentTermsDays Int?      @map("payment_terms_days")
+
+  // Snapshot inmutable desde la creación (nunca aceptado del cliente):
+  // siempre CompanySettings.currencyCode vigente en ese instante, mismo
+  // criterio que Sale.currencyCode. Restringe el alcance operativo a la
+  // moneda única de la empresa (PEN) sin impedir una futura Fase de
+  // Importaciones que sí acepte otra.
+  currencyCode String @map("currency_code") @db.VarChar(3)
+
+  // Siempre una SUMA de las líneas (nunca un valor independiente ni
+  // recalculado por una tasa única de documento): subtotal=ΣtaxableBase,
+  // taxAmount=Σtax, totalAmount=Σtotal de línea.
+  subtotal    Decimal @db.Decimal(14, 2)
+  taxAmount   Decimal @map("tax_amount") @db.Decimal(14, 2)
+  totalAmount Decimal @map("total_amount") @db.Decimal(14, 2)
+
+  status PurchaseInvoiceStatus @default(DRAFT)
+
+  // AccountingEntry definitivo (sourceType=PURCHASE), null mientras
+  // DRAFT/CANCELLED sin contabilizar. Mismo patrón que
+  // ManualJournalDraft.postedEntryId (A4): único, RESTRICT.
+  postedEntryId String?          @unique @map("posted_entry_id") @db.Uuid
+  postedEntry   AccountingEntry? @relation(fields: [postedEntryId], references: [id], onDelete: Restrict)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("PurchaseInvoiceCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  confirmedAt DateTime? @map("confirmed_at")
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId   String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy         User?     @relation("PurchaseInvoiceCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lines PurchaseInvoiceLine[]
+
+  // El índice único funcional (supplier_id, document_type,
+  // UPPER(BTRIM(COALESCE(document_series,''))), UPPER(BTRIM(document_number)))
+  // y los CHECK de cabecera se agregan a mano en migration.sql (mismo
+  // motivo que Supplier/Customer: el DSL de Prisma no expresa CHECK,
+  // UPPER(), BTRIM() ni COALESCE()).
+  @@index([supplierId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt, id])
+  @@map("purchase_invoices")
+}
+
+/**
+ * productId NULLABLE (a diferencia de SaleItem.productId, siempre
+ * obligatorio): una compra admite conceptos sin catálogo. descriptionSnapshot
+ * es SIEMPRE obligatoria — si hay producto, el servicio la copia de
+ * Product.name por defecto; si no, el llamador debe proveerla. Sin
+ * @@unique([purchaseInvoiceId, productId]) (a diferencia de SaleItem): una
+ * compra puede tener dos líneas del mismo producto (lotes/costos
+ * distintos).
+ *
+ * isReceiptEligible es NULL mientras la factura es DRAFT (todavía no se
+ * congela nada) y se calcula EXACTAMENTE UNA VEZ al confirmar, a partir de
+ * Product.isInventoryTracked vigente en ese instante — nunca se vuelve a
+ * leer después, para que un cambio posterior de esa configuración no
+ * altere retroactivamente la política de una línea ya confirmada (riesgo
+ * identificado en la revisión de A5.2). A5.2a nunca crea una recepción;
+ * este campo solo queda listo para que A5.2b lo consuma sin releer
+ * Product.
+ */
+model PurchaseInvoiceLine {
+  id                String          @id @default(uuid()) @db.Uuid
+  purchaseInvoiceId String          @map("purchase_invoice_id") @db.Uuid
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+
+  productId String?  @map("product_id") @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  descriptionSnapshot String  @map("description_snapshot") @db.VarChar(300)
+  unitCodeSnapshot    String? @map("unit_code_snapshot") @db.VarChar(15)
+  unitNameSnapshot    String? @map("unit_name_snapshot") @db.VarChar(60)
+
+  acquisitionKind PurchaseAcquisitionKind @map("acquisition_kind")
+  purchasePurpose PurchasePurpose         @map("purchase_purpose")
+
+  quantity  Decimal @db.Decimal(14, 3)
+  unitCost  Decimal @map("unit_cost") @db.Decimal(14, 2)
+
+  taxCategory       PurchaseLineTaxCategory @map("tax_category")
+  taxBasis          PurchaseLineTaxBasis?   @map("tax_basis")
+  taxRateSnapshot   Decimal?                @map("tax_rate_snapshot") @db.Decimal(5, 2)
+  taxableBaseAmount Decimal                 @map("taxable_base_amount") @db.Decimal(14, 2)
+  taxAmount         Decimal                 @map("tax_amount") @db.Decimal(14, 2)
+  // Nunca inferido de taxCategory (A5.2 corrección explícita): cuánto de
+  // taxAmount se reconoce como crédito fiscal es un valor propio, decidido
+  // por quien registra la línea — default 0 (nunca asumir deducibilidad).
+  creditableTaxAmount Decimal @default(0) @map("creditable_tax_amount") @db.Decimal(14, 2)
+
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  isReceiptEligible Boolean? @map("is_receipt_eligible")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: igual que SaleItem, una factura CONFIRMED no edita sus
+  // líneas (se anula, no se corrige) — mientras DRAFT, PurchaseInvoicesService
+  // reemplaza el arreglo completo (deleteMany+createMany), mismo patrón que
+  // ManualJournalDraftLine (A4). Los CHECK de línea (cantidad/montos >= 0,
+  // creditableTaxAmount <= taxAmount, consistencia taxCategory/taxBasis,
+  // lineTotal = taxableBaseAmount + taxAmount, isReceiptEligible solo
+  // posible con GOOD+productId) se agregan a mano en migration.sql.
+  @@index([purchaseInvoiceId])
+  @@index([productId])
+  @@map("purchase_invoice_lines")
 }
 
 // --- Secuencias de documentos y cotizaciones (Fase 5, Bloque A) ------------
@@ -1167,6 +1391,26 @@ enum AccountingSystemKey {
   VAT_PAYABLE
   SALES_REVENUE
   DISCOUNTS
+  // Fase A5.2a (compras universales). Ninguno de los 7 tiene un mapeo real
+  // activado por esta fase (ver CLAUDE.md §11): existen como valores de
+  // enum resolvibles por AccountingEngine.postPurchaseRecognition(), pero
+  // activarlos exige que ADMIN asigne una cuenta PCGE real vía
+  // PATCH /chart-of-accounts/system-keys/:systemKey (A1, sin cambios) —
+  // una decisión del contador, nunca automática ni sembrada por seed.
+  // ACCOUNTS_PAYABLE/VAT_RECEIVABLE son el espejo exacto de
+  // ACCOUNTS_RECEIVABLE/VAT_PAYABLE. Los 5 PURCHASE_* son la cuenta
+  // DESTINO configurable por cada PurchasePurpose de línea — su nombre
+  // identifica el propósito de compra, nunca impone un tratamiento
+  // contable (tránsito vs. cuenta final es una decisión de mapeo del
+  // contador, no una regla codificada aquí; revisión A5.2 corrigió
+  // explícitamente la asunción anterior de una cuenta puente obligatoria).
+  ACCOUNTS_PAYABLE
+  VAT_RECEIVABLE
+  PURCHASE_RESALE_INVENTORY
+  PURCHASE_INTERNAL_CONSUMPTION
+  PURCHASE_FIXED_ASSET
+  PURCHASE_OPERATING_EXPENSE
+  PURCHASE_OTHER
 }
 
 // Qué evento de negocio origina un AccountingEntry. Sin FK real hacia
@@ -1178,10 +1422,16 @@ enum AccountingSystemKey {
 // parcial accounting_entries_one_original_per_source (migration.sql) ya
 // garantiza, sin código nuevo, que un mismo borrador nunca se contabilice
 // dos veces.
+// Fase A5.2a: PURCHASE — el asiento ORIGINAL de reconocimiento de una
+// PurchaseInvoice confirmada (sourceId = PurchaseInvoice.id). Mismo
+// polimorfismo sin FK, mismo índice único parcial
+// accounting_entries_one_original_per_source ya existente (sin cambios),
+// que impide por sí solo una doble contabilización.
 enum AccountingSourceType {
   SALE
   PAYMENT
   MANUAL
+  PURCHASE
 }
 
 // ORIGINAL: primer asiento de un evento de negocio (de venta/pago
@@ -1380,6 +1630,12 @@ model AccountingEntry {
   // borrador asociado). Puramente informativo para trazabilidad; ningún
   // código de AccountingEngine lo consulta para decidir nada.
   postedByDraft ManualJournalDraft?
+
+  // Fase A5.2a: lado inverso de PurchaseInvoice.postedEntryId — SOLO
+  // presente cuando sourceType=PURCHASE. Mismo criterio exacto que
+  // postedByDraft: puramente informativo, AccountingEngine nunca lo
+  // consulta para decidir nada.
+  postedByPurchaseInvoice PurchaseInvoice?
 
   // Los 3 CHECK (description no en blanco, consistencia ORIGINAL/REVERSAL,
   // no auto-reversión) y el índice único parcial
