@@ -1,14 +1,16 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { AGING_BUCKET_ORDER } from '../accounts-payable-calculator';
+import { AccountsPayableFilterQueryDto } from './accounts-payable-filter-query.dto';
 
 /**
- * Sin status/paymentStatus/search/orderBy/direction/aging bucket/dueDate: la
- * definición de cuenta por pagar es fija (PurchaseInvoice.status=CONFIRMED)
- * y el orden es fijo (issueDate asc, id asc — deuda más antigua primero) en
- * el servicio.
+ * Sin search/orderBy/direction: el orden es fijo (issueDate asc, id asc —
+ * deuda más antigua primero) en el servicio. `agingBucket` es exclusivo
+ * de este listado (filtrar la antigüedad antes de calcularla no tiene
+ * sentido en los reportes de resumen/aging, que justamente la calculan).
  */
-export class ListAccountsPayableQueryDto {
+export class ListAccountsPayableQueryDto extends AccountsPayableFilterQueryDto {
   @ApiPropertyOptional({ minimum: 1, default: 1 })
   @IsOptional()
   @Type(() => Number)
@@ -24,8 +26,8 @@ export class ListAccountsPayableQueryDto {
   @Max(100)
   limit?: number;
 
-  @ApiPropertyOptional({ format: 'uuid' })
+  @ApiPropertyOptional({ enum: AGING_BUCKET_ORDER })
   @IsOptional()
-  @IsUUID()
-  supplierId?: string;
+  @IsIn(AGING_BUCKET_ORDER)
+  agingBucket?: (typeof AGING_BUCKET_ORDER)[number];
 }

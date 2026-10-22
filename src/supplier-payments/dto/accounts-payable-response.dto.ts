@@ -1,10 +1,11 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { PurchaseInvoiceDocumentType } from '@prisma/client';
+import { AGING_BUCKET_ORDER } from '../accounts-payable-calculator';
 
 /**
  * Fila segura de cuentas por pagar: una PurchaseInvoice CONFIRMED.
- * paidAmount/balanceDue/status se calculan SIEMPRE en tiempo de lectura a
- * partir de SupplierPaymentAllocation ACTIVE — nunca una columna duplicada.
+ * paidAmount/balanceDue/status/agingBucket/daysOverdue se calculan
+ * SIEMPRE en tiempo de lectura (A5.3/A5.4) — nunca una columna duplicada.
  */
 export class AccountsPayableItemResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -12,6 +13,12 @@ export class AccountsPayableItemResponseDto {
 
   @ApiProperty({ format: 'uuid' })
   supplierId!: string;
+
+  @ApiProperty()
+  supplierLegalName!: string;
+
+  @ApiProperty()
+  supplierDocumentNumber!: string;
 
   @ApiProperty({ enum: PurchaseInvoiceDocumentType })
   documentType!: PurchaseInvoiceDocumentType;
@@ -42,6 +49,12 @@ export class AccountsPayableItemResponseDto {
 
   @ApiProperty({ enum: ['UNPAID', 'PARTIALLY_PAID', 'PAID'] })
   status!: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
+
+  @ApiProperty({ enum: AGING_BUCKET_ORDER })
+  agingBucket!: (typeof AGING_BUCKET_ORDER)[number];
+
+  @ApiProperty({ type: Number, nullable: true })
+  daysOverdue!: number | null;
 }
 
 export class AccountsPayablePaymentHistoryItemResponseDto {

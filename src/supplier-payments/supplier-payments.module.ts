@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module';
 import { ConfigurationModule } from '../configuration/configuration.module';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PaymentMethodsModule } from '../payment-methods/payment-methods.module';
 import { AccountsPayableController } from './accounts-payable.controller';
 import { AccountsPayableService } from './accounts-payable.service';
@@ -13,11 +14,17 @@ import { SupplierPaymentsService } from './supplier-payments.service';
  * cobro al proveedor); ConfigurationModule por SettingsReader (moneda
  * vigente); PaymentMethodsModule por PaymentMethodReader (resolución del
  * método de pago dinámico) — mismo patrón que PaymentsModule/
- * PurchaseInvoicesModule. Hoja: no se exporta.
+ * PurchaseInvoicesModule. ExcelExportService (Fase A5.4, NR-06) se
+ * registra como provider local, mismo patrón que PaymentsModule. Hoja: no
+ * se exporta.
  */
 @Module({
   imports: [AccountingModule, ConfigurationModule, PaymentMethodsModule],
   controllers: [SupplierPaymentsController, AccountsPayableController],
-  providers: [SupplierPaymentsService, AccountsPayableService],
+  providers: [
+    SupplierPaymentsService,
+    AccountsPayableService,
+    ExcelExportService,
+  ],
 })
 export class SupplierPaymentsModule {}

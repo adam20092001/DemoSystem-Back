@@ -1,3 +1,4 @@
+import { StreamableFile } from '@nestjs/common';
 import { RoleName } from '@prisma/client';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
@@ -22,6 +23,13 @@ function createServiceMock() {
   return {
     list: jest.fn<Promise<unknown>, [unknown, unknown]>(),
     getDetail: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    getSummary: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    getAging: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    getReconciliation: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    exportDetailedXlsx: jest.fn<Promise<Buffer>, [unknown, unknown]>(),
+    exportSummaryXlsx: jest.fn<Promise<Buffer>, [unknown, unknown]>(),
+    exportAgingXlsx: jest.fn<Promise<Buffer>, [unknown, unknown]>(),
+    exportReconciliationXlsx: jest.fn<Promise<Buffer>, [unknown, unknown]>(),
   };
 }
 
@@ -52,7 +60,74 @@ describe('AccountsPayableController', () => {
     expect(result).toBe(expected);
   });
 
-  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT), nunca SELLER/WAREHOUSE', () => {
+  it('getSummary delega query + rol actual', async () => {
+    const expected = { bySupplier: [], grandTotal: {} };
+    service.getSummary.mockResolvedValue(expected);
+    const result = await controller.getSummary({}, ACTOR);
+    expect(service.getSummary).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBe(expected);
+  });
+
+  it('getAging delega query + rol actual', async () => {
+    const expected = {
+      asOfDate: '2026-06-15',
+      totals: {},
+      bySupplier: [],
+      limitations: [],
+    };
+    service.getAging.mockResolvedValue(expected);
+    const result = await controller.getAging({}, ACTOR);
+    expect(service.getAging).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBe(expected);
+  });
+
+  it('getReconciliation delega query + rol actual', async () => {
+    const expected = {
+      invoices: [],
+      accounts: [],
+      overallConsistent: true,
+      limitations: [],
+    };
+    service.getReconciliation.mockResolvedValue(expected);
+    const result = await controller.getReconciliation({}, ACTOR);
+    expect(service.getReconciliation).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBe(expected);
+  });
+
+  it('exportDetailedXlsx delega query + rol actual y envuelve el buffer en StreamableFile', async () => {
+    service.exportDetailedXlsx.mockResolvedValue(Buffer.from('xlsx-bytes'));
+    const result = await controller.exportDetailedXlsx({}, ACTOR);
+    expect(service.exportDetailedXlsx).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBeInstanceOf(StreamableFile);
+  });
+
+  it('exportSummaryXlsx delega query + rol actual y envuelve el buffer en StreamableFile', async () => {
+    service.exportSummaryXlsx.mockResolvedValue(Buffer.from('xlsx-bytes'));
+    const result = await controller.exportSummaryXlsx({}, ACTOR);
+    expect(service.exportSummaryXlsx).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBeInstanceOf(StreamableFile);
+  });
+
+  it('exportAgingXlsx delega query + rol actual y envuelve el buffer en StreamableFile', async () => {
+    service.exportAgingXlsx.mockResolvedValue(Buffer.from('xlsx-bytes'));
+    const result = await controller.exportAgingXlsx({}, ACTOR);
+    expect(service.exportAgingXlsx).toHaveBeenCalledWith({}, RoleName.ADMIN);
+    expect(result).toBeInstanceOf(StreamableFile);
+  });
+
+  it('exportReconciliationXlsx delega query + rol actual y envuelve el buffer en StreamableFile', async () => {
+    service.exportReconciliationXlsx.mockResolvedValue(
+      Buffer.from('xlsx-bytes'),
+    );
+    const result = await controller.exportReconciliationXlsx({}, ACTOR);
+    expect(service.exportReconciliationXlsx).toHaveBeenCalledWith(
+      {},
+      RoleName.ADMIN,
+    );
+    expect(result).toBeInstanceOf(StreamableFile);
+  });
+
+  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) en TODOS los endpoints, nunca SELLER/WAREHOUSE', () => {
     const prototype = AccountsPayableController.prototype as unknown as Record<
       string,
       object
@@ -62,17 +137,25 @@ describe('AccountsPayableController', () => {
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
     ];
-    const listRoles = Reflect.getMetadata(
-      ROLES_KEY,
-      prototype.list,
-    ) as RoleName[];
-    const detailRoles = Reflect.getMetadata(
-      ROLES_KEY,
-      prototype.getDetail,
-    ) as RoleName[];
-    expect(listRoles).toEqual(readRoles);
-    expect(detailRoles).toEqual(readRoles);
-    expect(listRoles).not.toContain(RoleName.SELLER);
-    expect(listRoles).not.toContain(RoleName.WAREHOUSE);
+    const methods = [
+      'list',
+      'getDetail',
+      'getSummary',
+      'getAging',
+      'getReconciliation',
+      'exportDetailedXlsx',
+      'exportSummaryXlsx',
+      'exportAgingXlsx',
+      'exportReconciliationXlsx',
+    ];
+    for (const method of methods) {
+      const roles = Reflect.getMetadata(
+        ROLES_KEY,
+        prototype[method],
+      ) as RoleName[];
+      expect(roles).toEqual(readRoles);
+      expect(roles).not.toContain(RoleName.SELLER);
+      expect(roles).not.toContain(RoleName.WAREHOUSE);
+    }
   });
 });
