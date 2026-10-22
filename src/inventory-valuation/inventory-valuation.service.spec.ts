@@ -85,14 +85,14 @@ describe('InventoryValuationService', () => {
         },
       ]);
       prisma.product.count.mockResolvedValue(1);
-      prisma.inventoryValuation.groupBy
-        .mockResolvedValueOnce([
-          {
-            productId: PRODUCT_ID,
-            _sum: { quantity: d('10.000'), totalCost: d('100.00') },
-          },
-        ])
-        .mockResolvedValueOnce([]);
+      prisma.inventoryValuation.groupBy.mockResolvedValueOnce([
+        {
+          productId: PRODUCT_ID,
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: 'ORIGINAL',
+          _sum: { quantity: d('10.000'), totalCost: d('100.00') },
+        },
+      ]);
 
       const result = await service.getValuedInventory({}, RoleName.ADMIN);
 
@@ -112,19 +112,20 @@ describe('InventoryValuationService', () => {
           valuationMethod: InventoryValuationMethod.MOVING_WEIGHTED_AVERAGE,
         },
       ]);
-      prisma.inventoryValuation.groupBy
-        .mockResolvedValueOnce([
-          {
-            productId: PRODUCT_ID,
-            _sum: { quantity: d('10.000'), totalCost: d('100.00') },
-          },
-        ])
-        .mockResolvedValueOnce([
-          {
-            productId: PRODUCT_ID,
-            _sum: { quantity: d('4.000'), totalCost: d('40.00') },
-          },
-        ]);
+      prisma.inventoryValuation.groupBy.mockResolvedValueOnce([
+        {
+          productId: PRODUCT_ID,
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: 'ORIGINAL',
+          _sum: { quantity: d('10.000'), totalCost: d('100.00') },
+        },
+        {
+          productId: PRODUCT_ID,
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: 'REVERSAL',
+          _sum: { quantity: d('4.000'), totalCost: d('40.00') },
+        },
+      ]);
 
       const result = await service.getValuedInventory({}, RoleName.ADMIN);
 

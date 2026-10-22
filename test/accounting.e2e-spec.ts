@@ -1989,6 +1989,7 @@ describe('Basic Accounting (e2e)', () => {
       // ni puede existir en tiempo de compilación, garantía estática, no
       // una comprobación en runtime.
       expect(Object.values(AccountingSourceType).sort()).toEqual([
+        'COGS',
         'MANUAL',
         'PAYMENT',
         'PURCHASE',

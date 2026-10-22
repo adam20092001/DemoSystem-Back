@@ -1,5 +1,9 @@
 import { InternalServerErrorException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import {
+  InventoryValuationEventType,
+  InventoryValuationSourceType,
+  Prisma,
+} from '@prisma/client';
 import {
   computeLineDestinationAmount,
   computeProportionalReclassificationAmount,
@@ -114,6 +118,56 @@ export function computeWeightedAverage(
   return totalValue
     .dividedBy(valuedQuantity)
     .toDecimalPlaces(UNIT_COST_DECIMALS, Prisma.Decimal.ROUND_HALF_UP);
+}
+
+/**
+ * Signo unificado del efecto de UN evento de valorización sobre el pool
+ * agregado del producto (Fase A6.2) — SIEMPRE coincide con la dirección del
+ * InventoryMovement físico subyacente (ENTRY=+1/EXIT=-1), nunca una tabla de
+ * signos independiente por sourceType: PURCHASE_RECEIPT.ORIGINAL (entrada
+ * física) y SALE.REVERSAL (reversa de una salida) ambos SUMAN; SALE.ORIGINAL
+ * (salida física) y PURCHASE_RECEIPT.REVERSAL (reversa de una entrada) ambos
+ * RESTAN. Única fuente de verdad del signo, reutilizada tanto por
+ * InventoryValuationEngine (guardas de concurrencia/consumo) como por
+ * InventoryValuationService (agregados de lectura) — nunca una segunda
+ * fórmula paralela.
+ */
+export function valuationEventSign(
+  sourceType: InventoryValuationSourceType,
+  eventType: InventoryValuationEventType,
+): 1 | -1 {
+  const isEntryDirection =
+    (sourceType === InventoryValuationSourceType.PURCHASE_RECEIPT &&
+      eventType === InventoryValuationEventType.ORIGINAL) ||
+    (sourceType === InventoryValuationSourceType.SALE &&
+      eventType === InventoryValuationEventType.REVERSAL);
+  return isEntryDirection ? 1 : -1;
+}
+
+/**
+ * Costo EXACTO a consumir por la salida de una venta (Fase A6.2), con el
+ * mismo criterio de residual exacto en agotamiento total ya usado por
+ * computeReceiptValuationCost/A5.2b: cuando `saleQuantity` consume el pool
+ * disponible COMPLETO, el costo consumido es el valor disponible EXACTO
+ * (nunca unitCost×cantidad, que podría dejar un residual de redondeo sin
+ * consumir) — en cualquier otro caso, proporcional con redondeo HALF_UP a 2
+ * decimales. El llamador debe haber verificado `saleQuantity <=
+ * availableQuantity` antes de invocar esta función (bloquear costeo
+ * obligatorio es responsabilidad de InventoryValuationEngine, nunca de esta
+ * función pura).
+ */
+export function computeSaleConsumptionCost(
+  availableQuantity: Prisma.Decimal,
+  availableValue: Prisma.Decimal,
+  saleQuantity: Prisma.Decimal,
+): { totalCost: Prisma.Decimal; unitCost: Prisma.Decimal } {
+  const unitCost = computeWeightedAverage(availableQuantity, availableValue);
+  const totalCost = saleQuantity.equals(availableQuantity)
+    ? availableValue
+    : unitCost
+        .mul(saleQuantity)
+        .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  return { totalCost, unitCost };
 }
 
 export function assertValidValuationQuantity(value: Prisma.Decimal): void {

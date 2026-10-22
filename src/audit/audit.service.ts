@@ -501,11 +501,17 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'productId',
     'inventoryMovementId',
     'purchaseReceiptLineId',
+    // Fase A6.2: presentes solo cuando sourceType=SALE.
+    'sourceType',
+    'saleItemId',
   ],
   [AuditAction.INVENTORY_VALUATION_REVERSED]: [
     'valuationId',
     'reversesValuationId',
     'productId',
+    // Fase A6.2: presentes solo cuando sourceType=SALE.
+    'sourceType',
+    'saleItemId',
   ],
   // SUPPLIER_PAYMENT_ (Fase A5.3). SupplierPaymentsService es su único
   // emisor. Nunca el detalle de asignaciones por factura.

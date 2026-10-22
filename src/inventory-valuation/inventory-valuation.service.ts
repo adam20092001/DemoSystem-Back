@@ -2,11 +2,13 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import {
   InventoryMovementOrigin,
   InventoryMovementType,
-  InventoryValuationEventType,
   Prisma,
   RoleName,
 } from '@prisma/client';
-import { computeWeightedAverage } from './inventory-valuation-calculator';
+import {
+  computeWeightedAverage,
+  valuationEventSign,
+} from './inventory-valuation-calculator';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import {
@@ -195,49 +197,40 @@ export class InventoryValuationService {
     };
   }
 
+  /**
+   * Pool agregado por producto (Fase A6.2): ORIGINAL/REVERSAL de AMBOS
+   * sourceType (PURCHASE_RECEIPT y SALE), cada grupo aplicado con su signo
+   * unificado (valuationEventSign) — nunca "ORIGINAL siempre suma", ya que
+   * un SALE.ORIGINAL (consumo) debe RESTAR. Única función de agregación de
+   * lectura; InventoryValuationEngine mantiene su propia agregación
+   * equivalente dentro de una transacción (nunca esta, que usa
+   * `this.prisma` fuera de cualquier tx del llamador).
+   */
   private async computeValuationAggregates(
     productIds: string[],
   ): Promise<Map<string, { quantity: Prisma.Decimal; value: Prisma.Decimal }>> {
     if (productIds.length === 0) {
       return new Map();
     }
-    const [originals, reversals] = await Promise.all([
-      this.prisma.inventoryValuation.groupBy({
-        by: ['productId'],
-        where: {
-          productId: { in: productIds },
-          eventType: InventoryValuationEventType.ORIGINAL,
-        },
-        _sum: { quantity: true, totalCost: true },
-      }),
-      this.prisma.inventoryValuation.groupBy({
-        by: ['productId'],
-        where: {
-          productId: { in: productIds },
-          eventType: InventoryValuationEventType.REVERSAL,
-        },
-        _sum: { quantity: true, totalCost: true },
-      }),
-    ]);
+    const groups = await this.prisma.inventoryValuation.groupBy({
+      by: ['productId', 'sourceType', 'eventType'],
+      where: { productId: { in: productIds } },
+      _sum: { quantity: true, totalCost: true },
+    });
 
     const result = new Map<
       string,
       { quantity: Prisma.Decimal; value: Prisma.Decimal }
     >();
-    for (const row of originals) {
-      result.set(row.productId, {
-        quantity: row._sum.quantity ?? ZERO,
-        value: row._sum.totalCost ?? ZERO,
-      });
-    }
-    for (const row of reversals) {
+    for (const row of groups) {
+      const sign = valuationEventSign(row.sourceType, row.eventType);
       const existing = result.get(row.productId) ?? {
         quantity: ZERO,
         value: ZERO,
       };
       result.set(row.productId, {
-        quantity: existing.quantity.minus(row._sum.quantity ?? ZERO),
-        value: existing.value.minus(row._sum.totalCost ?? ZERO),
+        quantity: existing.quantity.plus((row._sum.quantity ?? ZERO).mul(sign)),
+        value: existing.value.plus((row._sum.totalCost ?? ZERO).mul(sign)),
       });
     }
     return result;

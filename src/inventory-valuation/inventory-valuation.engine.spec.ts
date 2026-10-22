@@ -30,6 +30,7 @@ function createTxMock() {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
       create: jest.fn<Promise<unknown>, [unknown]>(),
       aggregate: jest.fn<Promise<unknown>, [unknown]>(),
+      groupBy: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
   };
 }
@@ -221,9 +222,13 @@ describe('InventoryValuationEngine', () => {
       tx.inventoryValuation.findFirst
         .mockResolvedValueOnce(original) // búsqueda del ORIGINAL
         .mockResolvedValueOnce(null); // sin reversión previa
-      tx.inventoryValuation.aggregate
-        .mockResolvedValueOnce({ _sum: { quantity: d('10.000') } }) // total ORIGINAL
-        .mockResolvedValueOnce({ _sum: { quantity: d('0') } }); // total REVERSAL
+      tx.inventoryValuation.groupBy.mockResolvedValueOnce([
+        {
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: InventoryValuationEventType.ORIGINAL,
+          _sum: { quantity: d('10.000'), totalCost: d('100.00') },
+        },
+      ]);
       tx.inventoryValuation.create.mockResolvedValue(
         makeCreatedRow({
           id: 'reversal-1',
@@ -271,14 +276,211 @@ describe('InventoryValuationEngine', () => {
         )
         .mockResolvedValueOnce(null);
       // total ORIGINAL=10, total REVERSAL=5 -> vigente=5, menor que lo que se intenta revertir (10)
-      tx.inventoryValuation.aggregate
-        .mockResolvedValueOnce({ _sum: { quantity: d('10.000') } })
-        .mockResolvedValueOnce({ _sum: { quantity: d('5.000') } });
+      tx.inventoryValuation.groupBy.mockResolvedValueOnce([
+        {
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: InventoryValuationEventType.ORIGINAL,
+          _sum: { quantity: d('10.000'), totalCost: d('100.00') },
+        },
+        {
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: InventoryValuationEventType.REVERSAL,
+          _sum: { quantity: d('5.000'), totalCost: d('50.00') },
+        },
+      ]);
 
       await expect(
         engine.reverseForReceiptLine(
           tx as unknown as Prisma.TransactionClient,
           reverseCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.inventoryValuation.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('recordSaleConsumption (Fase A6.2)', () => {
+    const SALE_ITEM_ID = '66666666-6666-4666-8666-666666666666';
+
+    function consumptionCommand(
+      overrides: Partial<Record<string, unknown>> = {},
+    ) {
+      return {
+        productId: PRODUCT_ID,
+        inventoryMovementId: MOVEMENT_ID,
+        saleItemId: SALE_ITEM_ID,
+        quantity: d('3.000'),
+        actorUserId: ACTOR_ID,
+        ipAddress: null,
+        ...overrides,
+      };
+    }
+
+    it('producto sin valuationMethod: no-op (null), nunca crea nada', async () => {
+      tx.product.findUniqueOrThrow.mockResolvedValue({ valuationMethod: null });
+      const result = await engine.recordSaleConsumption(
+        tx as unknown as Prisma.TransactionClient,
+        consumptionCommand(),
+      );
+      expect(result).toBeNull();
+      expect(tx.inventoryValuation.create).not.toHaveBeenCalled();
+    });
+
+    it('pool insuficiente para costear la venta: ConflictException, nunca inventa costo', async () => {
+      tx.product.findUniqueOrThrow.mockResolvedValue({
+        valuationMethod: InventoryValuationMethod.MOVING_WEIGHTED_AVERAGE,
+      });
+      tx.inventoryValuation.findUnique.mockResolvedValue(null);
+      tx.inventoryValuation.groupBy.mockResolvedValue([
+        {
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: InventoryValuationEventType.ORIGINAL,
+          _sum: { quantity: d('2.000'), totalCost: d('20.00') },
+        },
+      ]);
+
+      await expect(
+        engine.recordSaleConsumption(
+          tx as unknown as Prisma.TransactionClient,
+          consumptionCommand({ quantity: d('3.000') }),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.inventoryValuation.create).not.toHaveBeenCalled();
+    });
+
+    it('consumo parcial: crea el evento ORIGINAL de sourceType=SALE con el costo del promedio ponderado vigente', async () => {
+      tx.product.findUniqueOrThrow.mockResolvedValue({
+        valuationMethod: InventoryValuationMethod.MOVING_WEIGHTED_AVERAGE,
+      });
+      tx.inventoryValuation.findUnique.mockResolvedValue(null);
+      tx.inventoryValuation.groupBy.mockResolvedValue([
+        {
+          sourceType: 'PURCHASE_RECEIPT',
+          eventType: InventoryValuationEventType.ORIGINAL,
+          _sum: { quantity: d('10.000'), totalCost: d('100.00') },
+        },
+      ]);
+      tx.inventoryValuation.create.mockResolvedValue(
+        makeCreatedRow({
+          sourceType: 'SALE',
+          purchaseReceiptLineId: null,
+          saleItemId: SALE_ITEM_ID,
+          totalCost: d('30.00'),
+        }),
+      );
+
+      const result = await engine.recordSaleConsumption(
+        tx as unknown as Prisma.TransactionClient,
+        consumptionCommand({ quantity: d('3.000') }),
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.totalCost.toFixed(2)).toBe('30.00');
+      const call = tx.inventoryValuation.create.mock.calls[0][0] as {
+        data: {
+          sourceType: string;
+          saleItemId: string;
+          purchaseReceiptLineId: string | null;
+          eventType: string;
+          totalCost: Prisma.Decimal;
+        };
+      };
+      expect(call.data.sourceType).toBe('SALE');
+      expect(call.data.saleItemId).toBe(SALE_ITEM_ID);
+      expect(call.data.purchaseReceiptLineId).toBeUndefined();
+      expect(call.data.eventType).toBe(InventoryValuationEventType.ORIGINAL);
+      expect(call.data.totalCost.toFixed(2)).toBe('30.00');
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+    });
+
+    it('movimiento ya valorizado (reintento/invariante roto): ConflictException', async () => {
+      tx.product.findUniqueOrThrow.mockResolvedValue({
+        valuationMethod: InventoryValuationMethod.MOVING_WEIGHTED_AVERAGE,
+      });
+      tx.inventoryValuation.findUnique.mockResolvedValue({ id: 'existing' });
+      await expect(
+        engine.recordSaleConsumption(
+          tx as unknown as Prisma.TransactionClient,
+          consumptionCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.inventoryValuation.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reverseForSaleItem (Fase A6.2)', () => {
+    const SALE_ITEM_ID = '66666666-6666-4666-8666-666666666666';
+
+    function reverseSaleCommand(
+      overrides: Partial<Record<string, unknown>> = {},
+    ) {
+      return {
+        saleItemId: SALE_ITEM_ID,
+        newInventoryMovementId: 'entry-movement-1',
+        actorUserId: ACTOR_ID,
+        ipAddress: null,
+        ...overrides,
+      };
+    }
+
+    it('ítem nunca costeado (producto sin valorización al confirmar): no-op (null)', async () => {
+      tx.inventoryValuation.findFirst.mockResolvedValue(null);
+      const result = await engine.reverseForSaleItem(
+        tx as unknown as Prisma.TransactionClient,
+        reverseSaleCommand(),
+      );
+      expect(result).toBeNull();
+      expect(tx.inventoryValuation.create).not.toHaveBeenCalled();
+    });
+
+    it('camino feliz: crea el evento REVERSAL reutilizando EXACTAMENTE el costo del ORIGINAL', async () => {
+      const original = makeCreatedRow({
+        id: 'original-sale-1',
+        sourceType: 'SALE',
+        purchaseReceiptLineId: null,
+        saleItemId: SALE_ITEM_ID,
+        totalCost: d('30.00'),
+      });
+      tx.inventoryValuation.findFirst
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(null);
+      tx.inventoryValuation.create.mockResolvedValue(
+        makeCreatedRow({
+          id: 'reversal-sale-1',
+          sourceType: 'SALE',
+          purchaseReceiptLineId: null,
+          saleItemId: SALE_ITEM_ID,
+          eventType: InventoryValuationEventType.REVERSAL,
+          reversesValuationId: 'original-sale-1',
+          totalCost: d('30.00'),
+        }),
+      );
+
+      const result = await engine.reverseForSaleItem(
+        tx as unknown as Prisma.TransactionClient,
+        reverseSaleCommand(),
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.totalCost.toFixed(2)).toBe('30.00');
+      const call = tx.inventoryValuation.create.mock.calls[0][0] as {
+        data: { eventType: string; reversesValuationId: string };
+      };
+      expect(call.data.eventType).toBe(InventoryValuationEventType.REVERSAL);
+      expect(call.data.reversesValuationId).toBe('original-sale-1');
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+    });
+
+    it('ya revertida anteriormente: ConflictException', async () => {
+      tx.inventoryValuation.findFirst
+        .mockResolvedValueOnce(
+          makeCreatedRow({ id: 'original-sale-1', sourceType: 'SALE' }),
+        )
+        .mockResolvedValueOnce({ id: 'existing-reversal' });
+      await expect(
+        engine.reverseForSaleItem(
+          tx as unknown as Prisma.TransactionClient,
+          reverseSaleCommand(),
         ),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(tx.inventoryValuation.create).not.toHaveBeenCalled();

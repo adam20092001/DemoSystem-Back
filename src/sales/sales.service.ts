@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  AccountingEventType,
   AccountingSourceType,
   CategoryStatus,
   CustomerDocumentType,
@@ -40,6 +41,8 @@ import { PaginatedResult } from '../common/types/paginated-result';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
 import { DocumentSequenceService } from '../document-sequences/document-sequence.service';
+import { resolveHistoricalInventoryAccountForProduct } from '../inventory-valuation/cogs-account-resolver';
+import { InventoryValuationEngine } from '../inventory-valuation/inventory-valuation.engine';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
 import {
   PAYMENT_SAFE_SELECT,
@@ -93,6 +96,8 @@ const CANCELLATION_REASON_MAX_LENGTH = 200;
 
 /** Referencia polimórfica que StockMovementEngine asocia a la venta (§57 del plan aprobado, sin FK). */
 const SALE_REFERENCE_TYPE = 'Sale';
+
+const ZERO = new Prisma.Decimal(0);
 
 /** 404 único de la conversión: cotización inexistente o ajena. */
 const QUOTE_NOT_FOUND_MESSAGE = 'La cotización no existe';
@@ -214,6 +219,7 @@ export class SalesService {
     private readonly auditService: AuditService,
     private readonly documentSequenceService: DocumentSequenceService,
     private readonly stockMovementEngine: StockMovementEngine,
+    private readonly inventoryValuationEngine: InventoryValuationEngine,
     private readonly paymentEngine: PaymentEngine,
     private readonly accountingEngine: AccountingEngine,
     private readonly settingsReader: SettingsReader,
@@ -417,6 +423,8 @@ export class SalesService {
         created.id,
         number,
         lines,
+        created.items,
+        confirmedAt,
         input.actorUserId,
         input.ipAddress ?? null,
       );
@@ -714,6 +722,8 @@ export class SalesService {
         created.id,
         number,
         lines,
+        created.items,
+        confirmedAt,
         input.actorUserId,
         input.ipAddress ?? null,
       );
@@ -848,8 +858,19 @@ export class SalesService {
         orderBy: [{ productId: 'asc' }, { id: 'asc' }],
       });
 
+      // Fase A6.2: mapa productId->SaleItem.id de ESTA venta, para revertir
+      // el consumo de costo de cada movimiento (si lo tuvo) sin exigir una
+      // segunda referencia polimórfica.
+      const saleItemsForCancellation = await tx.saleItem.findMany({
+        where: { saleId: sale.id },
+        select: { id: true, productId: true },
+      });
+      const saleItemIdByProductId = new Map(
+        saleItemsForCancellation.map((item) => [item.productId, item.id]),
+      );
+
       for (const movement of originalMovements) {
-        await this.stockMovementEngine.apply(tx, {
+        const reversedMovement = await this.stockMovementEngine.apply(tx, {
           productId: movement.productId,
           quantity: movement.quantity,
           movementType: InventoryMovementType.ENTRY,
@@ -860,6 +881,46 @@ export class SalesService {
           ipAddress: input.ipAddress ?? null,
           referenceType: SALE_REFERENCE_TYPE,
           referenceId: sale.id,
+        });
+
+        const saleItemId = saleItemIdByProductId.get(movement.productId);
+        if (saleItemId === undefined) {
+          throw new ConflictException(
+            `No se encontró el ítem de venta del producto ${movement.productId}; invariante interno roto`,
+          );
+        }
+        await this.inventoryValuationEngine.reverseForSaleItem(tx, {
+          saleItemId,
+          newInventoryMovementId: reversedMovement.id,
+          actorUserId: input.actorUserId,
+          ipAddress: input.ipAddress ?? null,
+        });
+      }
+
+      // Fase A6.2: reversión del asiento de COGS, SOLO si esta venta llegó
+      // a contabilizarlo al confirmarse (al menos una línea valorizada con
+      // costo > 0) — su existencia es la única fuente de verdad, nunca
+      // "¿hubo líneas con Product.valuationMethod configurado?" (un
+      // producto valorizado con costo exactamente 0 nunca generó este
+      // asiento). reverseOriginalForSource() reutiliza EXACTAMENTE las
+      // líneas ya persistidas del ORIGINAL (invertResolvedLines) — nunca
+      // vuelve a resolver cuentas aquí.
+      const existingCogsEntry = await tx.accountingEntry.findFirst({
+        where: {
+          sourceType: AccountingSourceType.COGS,
+          sourceId: sale.id,
+          eventType: AccountingEventType.ORIGINAL,
+        },
+        select: { id: true },
+      });
+      if (existingCogsEntry !== null) {
+        await this.accountingEngine.reverseOriginalForSource(tx, {
+          sourceType: AccountingSourceType.COGS,
+          sourceId: sale.id,
+          sourceNumber: sale.number,
+          postedAt: cancelledAt,
+          actorUserId: input.actorUserId,
+          ipAddress: input.ipAddress ?? null,
         });
       }
 
@@ -1742,12 +1803,25 @@ export class SalesService {
    * llamada relockea la misma fila ya tomada FOR UPDATE por
    * lockProductsForSale (reentrante dentro de la misma transacción, sin
    * costo adicional real).
+   *
+   * Fase A6.2: tras cada salida física, consume costo vía
+   * InventoryValuationEngine.recordSaleConsumption() — no-op (null) si el
+   * producto no tiene Product.valuationMethod configurado, cero cambio de
+   * comportamiento. Cuando SÍ consume costo, resuelve la ÚNICA cuenta
+   * histórica de inventario que respalda el pool consumido
+   * (resolveHistoricalInventoryAccountForProduct) y bloquea (409) ANTES de
+   * cualquier posteo si es ambigua/incompatible/sin configurar — nunca
+   * adivina (CLAUDE.md A6.2 §5). Al cierre, si CUALQUIER línea consumió
+   * costo, postea UN solo asiento de COGS para toda la venta (agrupado por
+   * cuenta de inventario real, varios productos pueden compartir cuenta).
    */
   private async applyOutboundMovements(
     tx: Prisma.TransactionClient,
     saleId: string,
     saleNumber: string,
     lines: SaleItemLine[],
+    createdItems: { id: string; productId: string }[],
+    postedAt: Date,
     actorUserId: string,
     ipAddress: string | null,
   ): Promise<void> {
@@ -1756,9 +1830,18 @@ export class SalesService {
       .sort((a, b) =>
         a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0,
       );
+    const saleItemIdByProductId = new Map(
+      createdItems.map((item) => [item.productId, item.id]),
+    );
+
+    const inventoryAmountByAccountId = new Map<string, Prisma.Decimal>();
+    const accountResolutionCache = new Map<
+      string,
+      { accountId: string } | null
+    >();
 
     for (const line of trackedLines) {
-      await this.stockMovementEngine.apply(tx, {
+      const movement = await this.stockMovementEngine.apply(tx, {
         productId: line.productId,
         quantity: line.quantity,
         movementType: InventoryMovementType.EXIT,
@@ -1769,6 +1852,62 @@ export class SalesService {
         ipAddress,
         referenceType: SALE_REFERENCE_TYPE,
         referenceId: saleId,
+      });
+
+      const saleItemId = saleItemIdByProductId.get(line.productId);
+      if (saleItemId === undefined) {
+        throw new ConflictException(
+          `No se encontró el ítem de venta del producto ${line.productId}; invariante interno roto`,
+        );
+      }
+
+      const consumption =
+        await this.inventoryValuationEngine.recordSaleConsumption(tx, {
+          productId: line.productId,
+          inventoryMovementId: movement.id,
+          saleItemId,
+          quantity: line.quantity,
+          actorUserId,
+          ipAddress,
+        });
+      if (consumption === null) {
+        // Producto sin Product.valuationMethod configurado: cero cambio de
+        // comportamiento, sin ningún efecto de costeo.
+        continue;
+      }
+
+      let resolution = accountResolutionCache.get(line.productId);
+      if (resolution === undefined) {
+        resolution = await resolveHistoricalInventoryAccountForProduct(
+          tx,
+          line.productId,
+        );
+        accountResolutionCache.set(line.productId, resolution);
+      }
+      if (resolution === null) {
+        throw new ConflictException(
+          `No se puede costear la venta: el producto ${line.productSku} no tiene una cuenta contable de inventario histórica consistente o configurada para el costo de ventas`,
+        );
+      }
+
+      inventoryAmountByAccountId.set(
+        resolution.accountId,
+        (inventoryAmountByAccountId.get(resolution.accountId) ?? ZERO).plus(
+          consumption.totalCost,
+        ),
+      );
+    }
+
+    if (inventoryAmountByAccountId.size > 0) {
+      await this.accountingEngine.postCogsRecognition(tx, {
+        saleId,
+        saleNumber,
+        postedAt,
+        inventoryLines: Array.from(inventoryAmountByAccountId.entries()).map(
+          ([accountId, amount]) => ({ accountId, amount }),
+        ),
+        actorUserId,
+        ipAddress,
       });
     }
   }

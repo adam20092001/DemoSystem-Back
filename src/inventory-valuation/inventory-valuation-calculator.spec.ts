@@ -1,9 +1,15 @@
 import { InternalServerErrorException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import {
+  InventoryValuationEventType,
+  InventoryValuationSourceType,
+  Prisma,
+} from '@prisma/client';
 import {
   assertValidValuationQuantity,
   computeReceiptValuationCost,
+  computeSaleConsumptionCost,
   computeWeightedAverage,
+  valuationEventSign,
 } from './inventory-valuation-calculator';
 
 function d(value: string): Prisma.Decimal {
@@ -117,6 +123,81 @@ describe('computeWeightedAverage', () => {
     expect(computeWeightedAverage(d('-1'), d('100')).toFixed(6)).toBe(
       '0.000000',
     );
+  });
+});
+
+describe('valuationEventSign (Fase A6.2)', () => {
+  it('PURCHASE_RECEIPT.ORIGINAL suma (+1), igual que una entrada física', () => {
+    expect(
+      valuationEventSign(
+        InventoryValuationSourceType.PURCHASE_RECEIPT,
+        InventoryValuationEventType.ORIGINAL,
+      ),
+    ).toBe(1);
+  });
+
+  it('PURCHASE_RECEIPT.REVERSAL resta (-1)', () => {
+    expect(
+      valuationEventSign(
+        InventoryValuationSourceType.PURCHASE_RECEIPT,
+        InventoryValuationEventType.REVERSAL,
+      ),
+    ).toBe(-1);
+  });
+
+  it('SALE.ORIGINAL resta (-1), igual que una salida física', () => {
+    expect(
+      valuationEventSign(
+        InventoryValuationSourceType.SALE,
+        InventoryValuationEventType.ORIGINAL,
+      ),
+    ).toBe(-1);
+  });
+
+  it('SALE.REVERSAL suma (+1), igual que reinstalar lo consumido', () => {
+    expect(
+      valuationEventSign(
+        InventoryValuationSourceType.SALE,
+        InventoryValuationEventType.REVERSAL,
+      ),
+    ).toBe(1);
+  });
+});
+
+describe('computeSaleConsumptionCost (Fase A6.2)', () => {
+  it('consumo parcial: proporcional al promedio ponderado, redondeado HALF_UP a 2 decimales', () => {
+    const result = computeSaleConsumptionCost(
+      d('10.000'),
+      d('100.00'),
+      d('3.000'),
+    );
+    expect(result.unitCost.toFixed(6)).toBe('10.000000');
+    expect(result.totalCost.toFixed(2)).toBe('30.00');
+  });
+
+  it('consumo que agota el pool EXACTO: usa el residual exacto, nunca unitCost×cantidad', () => {
+    // 100.00 / 3 = 33.333... -> unitCost redondea a 33.333333; 3 × 33.333333 = 99.999999 (nunca 100.00)
+    const result = computeSaleConsumptionCost(
+      d('3.000'),
+      d('100.00'),
+      d('3.000'),
+    );
+    expect(result.totalCost.toFixed(2)).toBe('100.00');
+  });
+
+  it('tres consumos parciales (1+1+1 de un pool de 3 con costo no exacto): la suma coincide con el valor disponible, sin drift', () => {
+    // Simula el pool decreciendo tras cada consumo (mismo patrón que el llamador real).
+    let quantity = d('3.000');
+    let value = d('100.00');
+    const costs: Prisma.Decimal[] = [];
+    for (const qty of [d('1.000'), d('1.000'), d('1.000')]) {
+      const result = computeSaleConsumptionCost(quantity, value, qty);
+      costs.push(result.totalCost);
+      quantity = quantity.minus(qty);
+      value = value.minus(result.totalCost);
+    }
+    const sum = costs.reduce((acc, c) => acc.plus(c), new Prisma.Decimal(0));
+    expect(sum.toFixed(2)).toBe('100.00');
   });
 });
 
