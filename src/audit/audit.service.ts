@@ -522,6 +522,35 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'entryId',
   ],
   [AuditAction.SUPPLIER_PAYMENT_CANCELLED]: ['reason', 'reversalEntryId'],
+  // IMPORT_* (Fase B1). ImportOperationsService/ImportShipmentsService son
+  // sus únicos emisores. Nunca referencia/descripción/notas (texto libre) —
+  // solo identificadores/estados/conteos.
+  [AuditAction.IMPORT_OPERATION_CREATED]: ['importOperationId'],
+  [AuditAction.IMPORT_OPERATION_UPDATED]: [
+    'importOperationId',
+    'updatedFields',
+  ],
+  [AuditAction.IMPORT_OPERATION_COMPLETED]: ['importOperationId'],
+  [AuditAction.IMPORT_OPERATION_CANCELLED]: [
+    'importOperationId',
+    'previousStatus',
+  ],
+  [AuditAction.IMPORT_SHIPMENT_CREATED]: [
+    'importOperationId',
+    'importShipmentId',
+    'lineCount',
+  ],
+  [AuditAction.IMPORT_SHIPMENT_UPDATED]: [
+    'importShipmentId',
+    'updatedFields',
+    'lineCount',
+  ],
+  [AuditAction.IMPORT_SHIPMENT_DEPARTED]: ['importShipmentId'],
+  [AuditAction.IMPORT_SHIPMENT_ARRIVED]: ['importShipmentId'],
+  [AuditAction.IMPORT_SHIPMENT_CANCELLED]: [
+    'importShipmentId',
+    'previousStatus',
+  ],
 };
 
 function isPlainObject(
