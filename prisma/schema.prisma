@@ -215,6 +215,18 @@ model User {
   // (ORIGINAL o REVERSAL) — nunca editable, mismo criterio que el resto
   // del dominio.
   createdInventoryValuations InventoryValuation[]
+  // Operaciones de importación (Fase B1): tres relaciones nombradas porque
+  // ImportOperation referencia User tres veces (quien la crea, quien la
+  // completa y, si aplica, quien la cancela), mismo criterio que
+  // PurchaseInvoice/AccountingPeriod arriba.
+  createdImportOperations   ImportOperation[]    @relation("ImportOperationCreatedBy")
+  completedImportOperations ImportOperation[]    @relation("ImportOperationCompletedBy")
+  cancelledImportOperations ImportOperation[]    @relation("ImportOperationCancelledBy")
+  // Embarques de importación (Fase B1): mismo criterio exacto que
+  // PurchaseInvoice/PurchaseReceipt arriba (quien lo crea y, si aplica,
+  // quien lo anula).
+  createdImportShipments   ImportShipment[]      @relation("ImportShipmentCreatedBy")
+  cancelledImportShipments ImportShipment[]      @relation("ImportShipmentCancelledBy")
 
   @@index([status])
   @@map("users")
@@ -325,6 +337,10 @@ model Product {
   // inventario (responsabilidad exclusiva de A5.2b, todavía no
   // implementada).
   purchaseInvoiceLines  PurchaseInvoiceLine[]
+  // Fase B1 (Importaciones): líneas de embarque que opcionalmente
+  // referencian este producto — información logística, nunca un segundo
+  // saldo de stock ni una presunción de que el producto es inventariable.
+  importShipmentLines   ImportShipmentLine[]
   createdAt             DateTime               @default(now()) @map("created_at")
   updatedAt             DateTime               @updatedAt @map("updated_at")
 
@@ -960,6 +976,13 @@ model PurchaseInvoiceLine {
   // lectura a partir de la suma de PurchaseReceiptLine de recepciones
   // ACTIVE — nunca una columna duplicada en esta tabla (riesgo de drift).
   receiptLines PurchaseReceiptLine[]
+
+  // Fase B1 (Importaciones): líneas de embarque que opcionalmente
+  // referencian esta línea de factura — vínculo puramente logístico, nunca
+  // modifica esta factura. La cantidad ya asignada se calcula SIEMPRE en
+  // tiempo de lectura (suma de ImportShipmentLine.plannedQuantity de
+  // embarques no CANCELLED que apuntan aquí) — nunca una columna duplicada.
+  importShipmentLines ImportShipmentLine[]
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -2773,4 +2796,223 @@ model CashSessionPaymentMethodSummary {
   // cashSessionId.
   @@unique([cashSessionId, paymentMethodId])
   @@map("cash_session_payment_method_summaries")
+}
+
+// --- Importaciones (Fase B1) -------------------------------------------
+
+// DRAFT: en planificación, editable libremente. IN_PROGRESS: tiene al menos
+// un ImportShipment (transición automática al crear el primero, nunca
+// manual). COMPLETED: cierre OPERATIVO/logístico explícito (nunca
+// financiero/contable — eso es una fase futura, ver CLAUDE.md). CANCELLED:
+// terminal, nunca si algún embarque ya está ARRIVED.
+enum ImportOperationStatus {
+  DRAFT
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ImportTransportMode {
+  SEA
+  AIR
+  LAND
+  OTHER
+}
+
+// PLANNED: en planificación (único estado en el que sus líneas se pueden
+// reemplazar). IN_TRANSIT/ARRIVED: hechos logísticos, nunca editables salvo
+// por su propia transición. CANCELLED: terminal, nunca desde ARRIVED.
+// ARRIVED significa que la mercadería llegó a destino LOGÍSTICO — nunca que
+// se recibió físicamente en inventario (eso sigue siendo exclusivamente
+// PurchaseReceipt, Fase A5.2b).
+enum ImportShipmentStatus {
+  PLANNED
+  IN_TRANSIT
+  ARRIVED
+  CANCELLED
+}
+
+/**
+ * Caso/expediente de importación (Fase B1) — arquitectura genérica,
+ * reutilizable por cualquier industria (no exclusiva de maquinaria/IMDIMAQ).
+ * Deliberadamente SIN supplierId ni purchaseInvoiceId propios: una
+ * importación consolidada puede abarcar varios proveedores/facturas
+ * distintos, asociados únicamente a nivel de ImportShipmentLine (vínculo
+ * opcional hacia PurchaseInvoiceLine). B1 nunca calcula costos de
+ * importación, nunca convierte moneda, nunca asume un Incoterm — ver
+ * CLAUDE.md §7/§11 para el alcance exacto y lo que queda deliberadamente
+ * fuera (flete/seguro/aduanas, pagos a proveedor, valorización, asientos
+ * contables: todo eso depende de B2/B3, no iniciadas).
+ */
+model ImportOperation {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Identificador de caso elegido por quien lo registra (ADMIN) — nunca un
+  // correlativo generado por DocumentSequenceService: no es un documento
+  // comercial/fiscal con numeración regulada, es un expediente interno
+  // (mismo criterio de "no inventar un correlativo donde el negocio no lo
+  // exige todavía"). Unicidad DB-enforced vía índice funcional case/
+  // espacio-insensible (import_operations_reference_unique, UPPER(BTRIM(...))
+  // en migration.sql, mismo criterio exacto que Supplier/Customer).
+  reference String @db.VarChar(40)
+
+  description String? @db.VarChar(300)
+
+  // ISO 3166-1 alpha-2, validado en el DTO — nunca una tabla de países
+  // nueva (fuera de alcance de B1).
+  originCountry      String @map("origin_country") @db.VarChar(2)
+  destinationCountry String @map("destination_country") @db.VarChar(2)
+
+  status ImportOperationStatus @default(DRAFT)
+
+  externalReference String? @map("external_reference") @db.VarChar(100)
+  notes             String? @db.VarChar(1000)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("ImportOperationCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Cierre OPERATIVO/logístico explícito — nunca financiero/contable
+  // (CLAUDE.md B1 §1: "Do not mix operational completion with financial/
+  // accounting closure"). Bloqueado mientras exista algún ImportShipment
+  // PLANNED/IN_TRANSIT (ver ImportShipmentsService).
+  completedAt       DateTime? @map("completed_at")
+  completedByUserId String?   @map("completed_by_user_id") @db.Uuid
+  completedBy       User?     @relation("ImportOperationCompletedBy", fields: [completedByUserId], references: [id], onDelete: Restrict)
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("ImportOperationCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  shipments ImportShipment[]
+
+  // El índice único funcional sobre reference y los CHECK de consistencia
+  // de completado/cancelación se agregan a mano en migration.sql (mismo
+  // motivo que Supplier/PurchaseInvoice: el DSL de Prisma no expresa
+  // UPPER()/BTRIM() ni CHECK).
+  @@index([status, createdAt])
+  @@index([createdAt, id])
+  @@map("import_operations")
+}
+
+/**
+ * Embarque logístico de UNA ImportOperation (Fase B1) — NUNCA llama a
+ * StockMovementEngine ni genera ningún efecto de inventario/contable:
+ * PurchaseReceipt sigue siendo el único evento que mueve stock realmente
+ * (CLAUDE.md B1 §4, separación crítica). ARRIVED es un hecho LOGÍSTICO, no
+ * una recepción física.
+ */
+model ImportShipment {
+  id String @id @default(uuid()) @db.Uuid
+
+  importOperationId String          @map("import_operation_id") @db.Uuid
+  importOperation   ImportOperation @relation(fields: [importOperationId], references: [id], onDelete: Restrict)
+
+  transportMode ImportTransportMode @map("transport_mode")
+
+  // Todos opcionales a propósito: ninguno aplica igual a los cuatro modos
+  // de transporte (CLAUDE.md B1 §2: "Avoid requiring fields that do not
+  // apply to every transport mode") — p. ej. containerReference no aplica
+  // a AIR/LAND sueltos, billOfLadingNumber es BL (SEA) o AWB (AIR) según el
+  // modo, nunca validado de forma distinta aquí.
+  carrierName        String? @map("carrier_name") @db.VarChar(150)
+  trackingReference  String? @map("tracking_reference") @db.VarChar(100)
+  billOfLadingNumber String? @map("bill_of_lading_number") @db.VarChar(100)
+  containerReference String? @map("container_reference") @db.VarChar(100)
+
+  originLocation      String? @map("origin_location") @db.VarChar(150)
+  destinationLocation String? @map("destination_location") @db.VarChar(150)
+
+  estimatedDepartureDate DateTime? @map("estimated_departure_date") @db.Date
+  actualDepartureDate    DateTime? @map("actual_departure_date") @db.Date
+  estimatedArrivalDate   DateTime? @map("estimated_arrival_date") @db.Date
+  actualArrivalDate      DateTime? @map("actual_arrival_date") @db.Date
+
+  status ImportShipmentStatus @default(PLANNED)
+
+  notes String? @db.VarChar(1000)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("ImportShipmentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("ImportShipmentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  lines ImportShipmentLine[]
+
+  // (importOperationId, billOfLadingNumber) único DESDE Postgres de forma
+  // natural: múltiples NULL nunca colisionan en un índice único (mismo
+  // criterio exacto y ya documentado que
+  // PurchaseReceipt.[purchaseInvoiceId, idempotencyKey]) — nunca exige BL/
+  // AWB cuando el modo de transporte no lo tiene todavía. Los CHECK de
+  // consistencia de cancelación/transición se agregan a mano en
+  // migration.sql.
+  @@unique([importOperationId, billOfLadingNumber])
+  @@index([importOperationId])
+  @@index([status, createdAt])
+  @@map("import_shipments")
+}
+
+/**
+ * Contenido planificado de UN ImportShipment (Fase B1) — información
+ * LOGÍSTICA, nunca un segundo saldo de stock autoritativo (CLAUDE.md B1
+ * §3: "Shipment quantities are logistics information, not a second
+ * authoritative stock balance"). purchaseInvoiceLineId es SIEMPRE opcional:
+ * una operación/embarque debe poder existir y usarse ANTES de que la
+ * factura de compra se confirme.
+ */
+model ImportShipmentLine {
+  id String @id @default(uuid()) @db.Uuid
+
+  importShipmentId String         @map("import_shipment_id") @db.Uuid
+  importShipment   ImportShipment @relation(fields: [importShipmentId], references: [id], onDelete: Cascade)
+
+  // Opcional: un bien sin catálogo (p. ej. repuesto genérico aún no
+  // registrado como Product) puede describirse solo por texto libre. Nunca
+  // se asume que el producto referenciado es inventariable (CLAUDE.md B1
+  // §3: "Do not infer that every shipped good is inventory-tracked").
+  productId String?  @map("product_id") @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  descriptionSnapshot String @map("description_snapshot") @db.VarChar(300)
+
+  plannedQuantity Decimal @map("planned_quantity") @db.Decimal(14, 3)
+  unitCode        String? @map("unit_code") @db.VarChar(15)
+  unitName        String? @map("unit_name") @db.VarChar(60)
+
+  // Mediciones logísticas opcionales (no todo embarque las reporta).
+  weightValue Decimal? @map("weight_value") @db.Decimal(14, 3)
+  weightUnit  String?  @map("weight_unit") @db.VarChar(10)
+  volumeValue Decimal? @map("volume_value") @db.Decimal(14, 3)
+  volumeUnit  String?  @map("volume_unit") @db.VarChar(10)
+
+  // Vínculo OPCIONAL hacia la factura de compra real (Fase A5.2a) — nunca
+  // modifica PurchaseInvoice/PurchaseInvoiceLine. La cantidad ya asignada
+  // contra esta línea (de TODOS los embarques no CANCELLED que la
+  // referencian, incluidos los de otras operaciones) se calcula SIEMPRE en
+  // tiempo de lectura; ImportShipmentsService la verifica bajo lock
+  // transaccional antes de exceder PurchaseInvoiceLine.quantity (protección
+  // real de concurrencia, ver su propio comentario de servicio).
+  purchaseInvoiceLineId String?              @map("purchase_invoice_line_id") @db.Uuid
+  purchaseInvoiceLine   PurchaseInvoiceLine? @relation(fields: [purchaseInvoiceLineId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: mientras el embarque es PLANNED, ImportShipmentsService
+  // reemplaza el arreglo completo (deleteMany+createMany dentro de la MISMA
+  // transacción que revalida la asignación), mismo patrón exacto que
+  // PurchaseInvoiceLine/ManualJournalDraftLine. El CHECK de cantidad
+  // positiva se agrega a mano en migration.sql.
+  @@index([importShipmentId])
+  @@index([productId])
+  @@index([purchaseInvoiceLineId])
+  @@map("import_shipment_lines")
 }

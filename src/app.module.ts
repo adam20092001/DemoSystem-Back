@@ -10,6 +10,7 @@ import { CustomersModule } from './customers/customers.module';
 import { DatabaseModule } from './database/database.module';
 import { ElectronicInvoicingModule } from './electronic-invoicing/electronic-invoicing.module';
 import { HealthModule } from './health/health.module';
+import { ImportOperationsModule } from './import-operations/import-operations.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { InventoryValuationModule } from './inventory-valuation/inventory-valuation.module';
 import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
@@ -52,6 +53,7 @@ import { UsersModule } from './users/users.module';
     PurchaseInvoicesModule,
     PurchaseReceiptsModule,
     SupplierPaymentsModule,
+    ImportOperationsModule,
     ReportsModule,
     ConfigurationModule,
     ElectronicInvoicingModule,
