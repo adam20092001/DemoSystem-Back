@@ -492,6 +492,21 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'reclassified',
   ],
   [AuditAction.PURCHASE_RECEIPT_CANCELLED]: ['reason', 'reversalEntryId'],
+  // INVENTORY_VALUATION_ (Fase A6.1). InventoryValuationEngine es su
+  // único emisor. Nunca el desglose de costo (purchasePriceAmount/
+  // nonCreditableTaxAmount) en metadata de auditoría — solo
+  // identificadores, mismo criterio que PURCHASE_RECEIPT_.
+  [AuditAction.INVENTORY_VALUATION_RECORDED]: [
+    'valuationId',
+    'productId',
+    'inventoryMovementId',
+    'purchaseReceiptLineId',
+  ],
+  [AuditAction.INVENTORY_VALUATION_REVERSED]: [
+    'valuationId',
+    'reversesValuationId',
+    'productId',
+  ],
   // SUPPLIER_PAYMENT_ (Fase A5.3). SupplierPaymentsService es su único
   // emisor. Nunca el detalle de asignaciones por factura.
   [AuditAction.SUPPLIER_PAYMENT_REGISTERED]: [

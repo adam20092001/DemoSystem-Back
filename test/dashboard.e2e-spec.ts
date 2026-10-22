@@ -1751,7 +1751,22 @@ describe('Dashboard (e2e)', () => {
         type: 'string',
       });
 
-      const serialized = JSON.stringify(doc);
+      // Alcance deliberadamente acotado a los esquemas PROPIOS de Dashboard
+      // (prefijo "Dashboard", convención ya establecida en todo el
+      // dominio) — nunca el documento OpenAPI completo: otros módulos sin
+      // relación (p. ej. el aging de cuentas por pagar, Fase A5.4) pueden
+      // legítimamente exponer su propio campo "percentage" sin que eso
+      // implique que Dashboard lo adoptó.
+      const dashboardSchemaNames = Object.keys(doc.components.schemas).filter(
+        (name) => name.startsWith('Dashboard'),
+      );
+      const dashboardSchemas = Object.fromEntries(
+        dashboardSchemaNames.map((name) => [
+          name,
+          doc.components.schemas[name],
+        ]),
+      );
+      const serialized = JSON.stringify(dashboardSchemas);
       expect(serialized).not.toMatch(/percentage|conversionRate|growth/i);
     });
   });

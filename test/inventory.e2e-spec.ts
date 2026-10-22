@@ -2485,8 +2485,13 @@ describe('Inventory (e2e)', () => {
       };
       expect(document.tags.map((tag) => tag.name)).toContain('Inventory');
 
-      const inventoryPaths = Object.keys(document.paths).filter((path) =>
-        path.includes('/inventory'),
+      // Excluye deliberadamente /inventory/valuation* (Fase A6.1): un
+      // módulo SEPARADO (InventoryValuationController), con su propio tag
+      // y su propio alcance — nunca parte de las 10 operaciones de
+      // InventoryController que esta prueba fija.
+      const inventoryPaths = Object.keys(document.paths).filter(
+        (path) =>
+          path.includes('/inventory') && !path.includes('/inventory/valuation'),
       );
       expect(inventoryPaths).toHaveLength(10);
       for (const path of inventoryPaths) {

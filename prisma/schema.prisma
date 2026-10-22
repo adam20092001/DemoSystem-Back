@@ -211,6 +211,10 @@ model User {
   // quien lo anula).
   createdSupplierPayments   SupplierPayment[]    @relation("SupplierPaymentCreatedBy")
   cancelledSupplierPayments SupplierPayment[]    @relation("SupplierPaymentCancelledBy")
+  // Valorización de inventario (Fase A6.1): quien registró cada evento
+  // (ORIGINAL o REVERSAL) — nunca editable, mismo criterio que el resto
+  // del dominio.
+  createdInventoryValuations InventoryValuation[]
 
   @@index([status])
   @@map("users")
@@ -291,10 +295,28 @@ model Product {
   isInventoryTracked    Boolean                @default(true) @map("is_inventory_tracked")
   stockCurrent          Decimal                @default(0) @map("stock_current") @db.Decimal(14, 3)
   stockMinimum          Decimal                @default(0) @map("stock_minimum") @db.Decimal(14, 3)
+
+  // Fase A6.1: NULL (default, en todo producto de toda fase anterior y en
+  // todo producto nuevo) significa "sin valorización — comportamiento
+  // actual sin cambios". Un valor NO NULL activa, para ESTE producto
+  // únicamente, el cálculo de costo al recibir compras (A6.1 nunca lo
+  // activa automáticamente ni lo siembra; se configura hoy solo vía
+  // Prisma directo — ver CLAUDE.md §11 — hasta que exista un
+  // procedimiento formal de activación/cambio retroactivo). Cambiar este
+  // valor cuando el producto YA tiene InventoryValuation registrada es
+  // responsabilidad de InventoryValuationEngine, nunca de un UPDATE
+  // directo sobre esta columna.
+  valuationMethod InventoryValuationMethod? @map("valuation_method")
+
   status                ProductStatus          @default(ACTIVE)
   specifications        ProductSpecification[]
   images                ProductImage[]
   movements             InventoryMovement[]
+  // Fase A6.1: historial inmutable de eventos de valorización de este
+  // producto (ORIGINAL por recepción, REVERSAL por cancelación). Nunca
+  // una fuente de verdad alternativa a stockCurrent: el saldo FÍSICO
+  // sigue siendo exclusivamente StockMovementEngine/Product.stockCurrent.
+  inventoryValuations   InventoryValuation[]
   quoteItems            QuoteItem[]
   saleItems             SaleItem[]
   // Fase A5.2a: líneas de compra que referencian este producto (opcional —
@@ -381,6 +403,12 @@ model InventoryMovement {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  // Fase A6.1: a lo sumo UN evento de valorización por movimiento físico
+  // (ORIGINAL si este ENTRY se valorizó al recibirse; REVERSAL si este
+  // EXIT compensa el costo de una recepción cancelada) — la unicidad de
+  // InventoryValuation.inventoryMovementId lo garantiza en base de datos.
+  inventoryValuation InventoryValuation?
+
   // Sin updatedAt: un movimiento confirmado es inmutable (no hay
   // PATCH/DELETE). Sin deletedAt ni status: no hay borrado lógico de
   // movimientos, la corrección es un movimiento compensatorio (Bloque B).
@@ -392,6 +420,125 @@ model InventoryMovement {
   @@index([createdAt])
   @@index([createdByUserId, createdAt])
   @@map("inventory_movements")
+}
+
+// --- Valorización de inventario (Fase A6.1) ---------------------------------
+//
+// Infraestructura de costeo, NUNCA activada por defecto: ningún producto de
+// pos_db/pos_db_test nace con Product.valuationMethod distinto de NULL, y
+// esta fase no siembra ni activa ninguno. StockMovementEngine sigue siendo
+// el ÚNICO escritor del inventario FÍSICO (InventoryMovement/
+// Product.stockCurrent) — InventoryValuationEngine nunca lo toca, nunca lo
+// duplica como fuente de verdad: existencias valorizadas (cantidad
+// valorizada, costo unitario promedio, valor total) se calculan SIEMPRE en
+// tiempo de lectura replay-ando este historial inmutable, nunca desde una
+// columna de saldo acumulado. Fuera de alcance de A6.1 (ver CLAUDE.md):
+// consumo de valorización por venta (COGS, Fase A6.2) — esta fase NUNCA
+// resta valorización al vender, así que `valuedQuantity` solo crece con
+// recepciones mientras A6.2 no exista.
+
+// MOVING_WEIGHTED_AVERAGE es la única implementada. FIFO se declara ahora
+// (mismo criterio que AccountingSourceType.SALE en la Fase 5, Bloque A:
+// declarar un valor futuro para no requerir migrar el enum más tarde) pero
+// NINGÚN código de este repositorio lo interpreta todavía — asignarlo a un
+// producto no tiene ningún efecto funcional en A6.1.
+enum InventoryValuationMethod {
+  MOVING_WEIGHTED_AVERAGE
+  FIFO
+}
+
+// ORIGINAL: evento de valorización al recibir físicamente (A5.2b). REVERSAL:
+// evento compensatorio al cancelar esa misma recepción — nunca edita ni
+// elimina el ORIGINAL, mismo criterio exacto que AccountingEntry/
+// AccountingEventType.
+enum InventoryValuationEventType {
+  ORIGINAL
+  REVERSAL
+}
+
+/**
+ * Evento inmutable de valorización de UN InventoryMovement físico (Fase
+ * A6.1) — nunca se edita ni se elimina; una corrección es siempre un
+ * nuevo evento REVERSAL. Fuente del costo: la línea de factura de compra
+ * (A5.2a) que originó la recepción (A5.2b), nunca inventada. Solo existe
+ * para un producto con Product.valuationMethod configurado en el
+ * instante de recibir — un producto sin valorización habilitada nunca
+ * genera ninguna fila aquí, y recibir/cancelar se comporta exactamente
+ * igual que hoy (cero cambio de comportamiento del inventario físico).
+ */
+model InventoryValuation {
+  id String @id @default(uuid()) @db.Uuid
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  // Único por movimiento físico: nunca dos eventos de valorización para
+  // el mismo ENTRY/EXIT (reintentos HTTP nunca llegan aquí dos veces —
+  // PurchaseReceiptsService ya corta el reintento antes de generar un
+  // movimiento nuevo; esta unicidad es la segunda línea de defensa en
+  // base de datos, mismo criterio que el resto del dominio).
+  inventoryMovementId String            @unique @map("inventory_movement_id") @db.Uuid
+  inventoryMovement   InventoryMovement @relation(fields: [inventoryMovementId], references: [id], onDelete: Restrict)
+
+  // Origen real del costo: SIEMPRE una PurchaseReceiptLine concreta (A5.2b)
+  // — nunca inventado. Varias recepciones PARCIALES de la misma
+  // PurchaseInvoiceLine producen varias filas ORIGINAL distintas, una por
+  // cada PurchaseReceiptLine.
+  purchaseReceiptLineId String              @map("purchase_receipt_line_id") @db.Uuid
+  purchaseReceiptLine   PurchaseReceiptLine @relation(fields: [purchaseReceiptLineId], references: [id], onDelete: Restrict)
+
+  eventType InventoryValuationEventType @map("event_type")
+
+  // Self-relation de reversión, mismo patrón exacto que
+  // AccountingEntry.reversesEntryId: un ORIGINAL se revierte como máximo
+  // una vez (unicidad implícita de esta columna).
+  reversesValuationId String?             @unique @map("reverses_valuation_id") @db.Uuid
+  reversesValuation    InventoryValuation? @relation("InventoryValuationReversal", fields: [reversesValuationId], references: [id], onDelete: Restrict)
+  reversedByValuation  InventoryValuation? @relation("InventoryValuationReversal")
+
+  // Método vigente para el producto EN EL INSTANTE de este evento —
+  // snapshot inmutable, nunca releído de Product.valuationMethod después
+  // (que podría cambiar vía un futuro procedimiento formal sin alterar
+  // retroactivamente este historial).
+  method InventoryValuationMethod
+
+  quantity Decimal @db.Decimal(14, 3)
+
+  // Desglose de qué se capitalizó, nunca el total bruto de la factura
+  // (CLAUDE.md A6.1 §3): precio de compra neto de impuesto
+  // (taxableBaseAmount de la línea) + impuesto NO acreditable (la porción
+  // de taxAmount que no se recupera como crédito fiscal — exactamente la
+  // misma fórmula ya usada por A5.2b para destinationAmount, nunca una
+  // segunda regla). additionalCostsAmount queda en 0 en A6.1: flete/
+  // seguros/aduanas son un punto de extensión explícito, nunca
+  // implementado aquí (Importaciones sigue fuera de alcance).
+  purchasePriceAmount    Decimal @map("purchase_price_amount") @db.Decimal(14, 2)
+  nonCreditableTaxAmount Decimal @map("non_creditable_tax_amount") @db.Decimal(14, 2)
+  additionalCostsAmount  Decimal @default(0) @map("additional_costs_amount") @db.Decimal(14, 2)
+
+  // SIEMPRE la suma exacta de los tres componentes de arriba — nunca
+  // recalculado por separado (CHECK de consistencia en migration.sql).
+  // Toda agregación de valorización (promedio ponderado, valor total)
+  // suma SIEMPRE este campo, nunca quantity×unitCost: unitCost es
+  // puramente informativo, derivado una sola vez aquí y nunca usado como
+  // fuente de cálculo aguas abajo (evita pérdida/creación de valor por
+  // redondeo acumulado).
+  totalCost Decimal @map("total_cost") @db.Decimal(14, 2)
+  unitCost  Decimal @map("unit_cost") @db.Decimal(18, 6)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Sin updatedAt: inmutable por diseño, igual que InventoryMovement.
+  // Los CHECK (quantity > 0, montos >= 0, totalCost = suma de
+  // componentes, unitCost >= 0, consistencia reversesValuationId según
+  // eventType) se agregan a mano en migration.sql.
+  @@index([productId, createdAt])
+  @@index([purchaseReceiptLineId])
+  @@index([eventType, createdAt])
+  @@map("inventory_valuations")
 }
 
 // --- Clientes (Fase 4, Bloque A) --------------------------------------------
@@ -897,6 +1044,11 @@ model PurchaseReceiptLine {
   reclassifiedAmount Decimal? @map("reclassified_amount") @db.Decimal(14, 2)
 
   createdAt DateTime @default(now()) @map("created_at")
+
+  // Fase A6.1: hasta dos filas (ORIGINAL al recibir + REVERSAL si la
+  // recepción se cancela) — nunca más, nunca menos de las que de verdad
+  // ocurrieron.
+  inventoryValuations InventoryValuation[]
 
   // CHECK de cantidad positiva se agrega a mano en migration.sql.
   @@unique([purchaseReceiptId, purchaseInvoiceLineId])

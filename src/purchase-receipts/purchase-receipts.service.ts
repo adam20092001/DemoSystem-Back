@@ -28,6 +28,7 @@ import {
 } from '../common/date/business-date';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
+import { InventoryValuationEngine } from '../inventory-valuation/inventory-valuation.engine';
 import { PURCHASE_PURPOSE_TO_SYSTEM_KEY } from '../purchase-invoices/purchase-invoice-calculator';
 import {
   computeLineDestinationAmount,
@@ -118,6 +119,7 @@ export class PurchaseReceiptsService {
     private readonly auditService: AuditService,
     private readonly stockMovementEngine: StockMovementEngine,
     private readonly accountingEngine: AccountingEngine,
+    private readonly inventoryValuationEngine: InventoryValuationEngine,
   ) {}
 
   // ==================================================================
@@ -359,7 +361,7 @@ export class PurchaseReceiptsService {
             'Línea elegible sin productId; invariante interno roto',
           );
         }
-        await this.stockMovementEngine.apply(tx, {
+        const movement = await this.stockMovementEngine.apply(tx, {
           productId: row.productId,
           quantity: qty,
           movementType: InventoryMovementType.ENTRY,
@@ -370,6 +372,34 @@ export class PurchaseReceiptsService {
           ipAddress: input.ipAddress,
           referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
           referenceId: created.id,
+        });
+
+        // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si
+        // el producto no tiene valuationMethod configurado — cero
+        // cambio de comportamiento del inventario físico. Misma
+        // transacción `tx` que el movimiento físico: si falla, nada se
+        // confirma (atomicidad).
+        const receiptLineId = createdLineIdByInvoiceLineId.get(row.id);
+        if (receiptLineId === undefined) {
+          throw new InternalServerErrorException(
+            'No se encontró la línea de recepción recién creada; invariante interno roto',
+          );
+        }
+        await this.inventoryValuationEngine.recordOriginal(tx, {
+          productId: row.productId,
+          inventoryMovementId: movement.id,
+          purchaseReceiptLineId: receiptLineId,
+          purchaseInvoiceLineId: row.id,
+          quantity: qty,
+          invoicedQuantity: row.quantity,
+          priorReceivedQuantity: alreadyReceivedMap.get(row.id) ?? ZERO,
+          lineFinancials: {
+            taxableBaseAmount: row.taxableBaseAmount,
+            taxAmount: row.taxAmount,
+            creditableTaxAmount: row.creditableTaxAmount,
+          },
+          actorUserId: input.actorUserId,
+          ipAddress: input.ipAddress,
         });
       }
 
@@ -494,6 +524,7 @@ export class PurchaseReceiptsService {
       const lines = await tx.purchaseReceiptLine.findMany({
         where: { purchaseReceiptId: locked.id },
         select: {
+          id: true,
           purchaseInvoiceLine: { select: { productId: true } },
           quantity: true,
         },
@@ -506,7 +537,7 @@ export class PurchaseReceiptsService {
             'Línea de recepción sin productId; invariante interno roto',
           );
         }
-        await this.stockMovementEngine.apply(tx, {
+        const movement = await this.stockMovementEngine.apply(tx, {
           productId,
           quantity: line.quantity,
           movementType: InventoryMovementType.EXIT,
@@ -517,6 +548,17 @@ export class PurchaseReceiptsService {
           ipAddress: input.ipAddress,
           referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
           referenceId: locked.id,
+        });
+
+        // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si
+        // esta línea nunca se valorizó al recibirse (producto sin
+        // valuationMethod en ese instante, o sin monto elegible). Nunca
+        // recalcula el costo: reutiliza exactamente el del ORIGINAL.
+        await this.inventoryValuationEngine.reverseForReceiptLine(tx, {
+          purchaseReceiptLineId: line.id,
+          newInventoryMovementId: movement.id,
+          actorUserId: input.actorUserId,
+          ipAddress: input.ipAddress,
         });
       }
 
