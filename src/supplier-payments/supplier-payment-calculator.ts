@@ -96,6 +96,10 @@ export function assertValidSupplierPaymentAmountShape(
  */
 export type AccountsPayableStatus = 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
 
+/** Valores válidos de AccountsPayableStatus, para validación de DTOs (class-validator @IsIn) — un tipo union no es un enum real. */
+export const ACCOUNTS_PAYABLE_STATUS_VALUES: readonly AccountsPayableStatus[] =
+  ['UNPAID', 'PARTIALLY_PAID', 'PAID'];
+
 export function computeAccountsPayableStatus(
   paidAmount: Prisma.Decimal,
   totalAmount: Prisma.Decimal,
