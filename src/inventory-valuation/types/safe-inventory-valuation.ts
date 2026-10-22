@@ -1,6 +1,7 @@
 import {
   InventoryValuationEventType,
   InventoryValuationMethod,
+  InventoryValuationSourceType,
 } from '@prisma/client';
 
 /** Forma segura de un evento de valorización (ORIGINAL o REVERSAL) — todos los Decimal como string de escala fija. */
@@ -8,7 +9,9 @@ export interface SafeInventoryValuation {
   id: string;
   productId: string;
   inventoryMovementId: string;
-  purchaseReceiptLineId: string;
+  sourceType: InventoryValuationSourceType;
+  purchaseReceiptLineId: string | null;
+  saleItemId: string | null;
   eventType: InventoryValuationEventType;
   reversesValuationId: string | null;
   method: InventoryValuationMethod;

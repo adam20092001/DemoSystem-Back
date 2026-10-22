@@ -456,15 +456,28 @@ enum InventoryValuationEventType {
   REVERSAL
 }
 
+// Fase A6.2: distingue el origen real del evento sin cambiar el eje
+// ORIGINAL/REVERSAL ya existente. PURCHASE_RECEIPT: valorización por
+// recepción física de compra (A5.2b, sin cambios). SALE: consumo de costo
+// por la salida física de una venta confirmada (A6.2) o su reversión al
+// anular. Mutuamente excluyente con purchaseReceiptLineId/saleItemId (CHECK
+// en migration.sql): nunca ambos, nunca ninguno.
+enum InventoryValuationSourceType {
+  PURCHASE_RECEIPT
+  SALE
+}
+
 /**
  * Evento inmutable de valorización de UN InventoryMovement físico (Fase
- * A6.1) — nunca se edita ni se elimina; una corrección es siempre un
- * nuevo evento REVERSAL. Fuente del costo: la línea de factura de compra
- * (A5.2a) que originó la recepción (A5.2b), nunca inventada. Solo existe
- * para un producto con Product.valuationMethod configurado en el
- * instante de recibir — un producto sin valorización habilitada nunca
- * genera ninguna fila aquí, y recibir/cancelar se comporta exactamente
- * igual que hoy (cero cambio de comportamiento del inventario físico).
+ * A6.1, extendido en A6.2) — nunca se edita ni se elimina; una corrección
+ * es siempre un nuevo evento REVERSAL. Fuente del costo: la línea de
+ * factura de compra (A5.2a) que originó la recepción (A5.2b) para
+ * sourceType=PURCHASE_RECEIPT, o el SaleItem que originó el consumo para
+ * sourceType=SALE (A6.2) — nunca inventada. Solo existe para un producto
+ * con Product.valuationMethod configurado en el instante del movimiento —
+ * un producto sin valorización habilitada nunca genera ninguna fila aquí,
+ * y recibir/vender/cancelar se comporta exactamente igual que hoy (cero
+ * cambio de comportamiento del inventario físico).
  */
 model InventoryValuation {
   id String @id @default(uuid()) @db.Uuid
@@ -474,18 +487,26 @@ model InventoryValuation {
 
   // Único por movimiento físico: nunca dos eventos de valorización para
   // el mismo ENTRY/EXIT (reintentos HTTP nunca llegan aquí dos veces —
-  // PurchaseReceiptsService ya corta el reintento antes de generar un
-  // movimiento nuevo; esta unicidad es la segunda línea de defensa en
-  // base de datos, mismo criterio que el resto del dominio).
+  // PurchaseReceiptsService/SalesService ya cortan el reintento antes de
+  // generar un movimiento nuevo; esta unicidad es la segunda línea de
+  // defensa en base de datos, mismo criterio que el resto del dominio).
   inventoryMovementId String            @unique @map("inventory_movement_id") @db.Uuid
   inventoryMovement   InventoryMovement @relation(fields: [inventoryMovementId], references: [id], onDelete: Restrict)
 
-  // Origen real del costo: SIEMPRE una PurchaseReceiptLine concreta (A5.2b)
-  // — nunca inventado. Varias recepciones PARCIALES de la misma
-  // PurchaseInvoiceLine producen varias filas ORIGINAL distintas, una por
-  // cada PurchaseReceiptLine.
-  purchaseReceiptLineId String              @map("purchase_receipt_line_id") @db.Uuid
-  purchaseReceiptLine   PurchaseReceiptLine @relation(fields: [purchaseReceiptLineId], references: [id], onDelete: Restrict)
+  sourceType InventoryValuationSourceType @map("source_type")
+
+  // Origen real del costo cuando sourceType=PURCHASE_RECEIPT (A5.2b) —
+  // NULL para sourceType=SALE (CHECK en migration.sql). Varias recepciones
+  // PARCIALES de la misma PurchaseInvoiceLine producen varias filas
+  // ORIGINAL distintas, una por cada PurchaseReceiptLine.
+  purchaseReceiptLineId String?             @map("purchase_receipt_line_id") @db.Uuid
+  purchaseReceiptLine   PurchaseReceiptLine? @relation(fields: [purchaseReceiptLineId], references: [id], onDelete: Restrict)
+
+  // Origen real del consumo cuando sourceType=SALE (A6.2) — NULL para
+  // sourceType=PURCHASE_RECEIPT (CHECK en migration.sql). Nunca exige una
+  // PurchaseReceiptLine artificial para una salida por venta.
+  saleItemId String?   @map("sale_item_id") @db.Uuid
+  saleItem   SaleItem? @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
 
   eventType InventoryValuationEventType @map("event_type")
 
@@ -511,7 +532,11 @@ model InventoryValuation {
   // misma fórmula ya usada por A5.2b para destinationAmount, nunca una
   // segunda regla). additionalCostsAmount queda en 0 en A6.1: flete/
   // seguros/aduanas son un punto de extensión explícito, nunca
-  // implementado aquí (Importaciones sigue fuera de alcance).
+  // implementado aquí (Importaciones sigue fuera de alcance). Para
+  // sourceType=SALE (A6.2) este desglose no es aplicable (no hay un
+  // "precio de compra" propio del consumo): purchasePriceAmount = totalCost
+  // y los otros dos quedan en 0, reutilizando las mismas columnas en vez de
+  // agregar otras nuevas (extensión mínima de esquema).
   purchasePriceAmount    Decimal @map("purchase_price_amount") @db.Decimal(14, 2)
   nonCreditableTaxAmount Decimal @map("non_creditable_tax_amount") @db.Decimal(14, 2)
   additionalCostsAmount  Decimal @default(0) @map("additional_costs_amount") @db.Decimal(14, 2)
@@ -534,10 +559,13 @@ model InventoryValuation {
   // Sin updatedAt: inmutable por diseño, igual que InventoryMovement.
   // Los CHECK (quantity > 0, montos >= 0, totalCost = suma de
   // componentes, unitCost >= 0, consistencia reversesValuationId según
-  // eventType) se agregan a mano en migration.sql.
+  // eventType, y desde A6.2 la exclusividad mutua purchaseReceiptLineId/
+  // saleItemId según sourceType) se agregan a mano en migration.sql.
   @@index([productId, createdAt])
   @@index([purchaseReceiptLineId])
+  @@index([saleItemId])
   @@index([eventType, createdAt])
+  @@index([sourceType, createdAt])
   @@map("inventory_valuations")
 }
 
@@ -1530,6 +1558,12 @@ model SaleItem {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  // Fase A6.2: hasta dos filas (ORIGINAL al confirmar la venta + REVERSAL
+  // si la venta se anula) cuando Product.valuationMethod está configurado
+  // — vacío para un ítem de producto sin valorización habilitada (cero
+  // cambio de comportamiento).
+  inventoryValuations InventoryValuation[]
+
   // Sin updatedAt: una venta confirmada no se edita (se anula y se crea
   // otra), así que un SaleItem es inmutable desde su creación.
   //
@@ -1816,6 +1850,16 @@ enum AccountingSystemKey {
   PURCHASE_FIXED_ASSET
   PURCHASE_OPERATING_EXPENSE
   PURCHASE_OTHER
+  // Fase A6.2 (costo de ventas). Débito del costo reconocido al confirmar
+  // una venta con líneas valorizadas (A6.1) — sin mapeo real activado por
+  // esta fase (mismo criterio que los 7 anteriores): ADMIN debe asignarlo
+  // vía PATCH /chart-of-accounts/system-keys/:systemKey antes de que
+  // cualquier venta real con costeo pueda contabilizarse. El lado crédito
+  // (inventario) nunca usa este ni ningún otro systemKey nuevo: se resuelve
+  // por accountId REAL, igual que PostSupplierPaymentCollectionCommand —
+  // la cuenta histórica que la compra original de ese producto realmente
+  // usó (ver AccountingEngine.postCogsRecognition()).
+  COST_OF_GOODS_SOLD
 }
 
 // Qué evento de negocio origina un AccountingEntry. Sin FK real hacia
@@ -1854,6 +1898,16 @@ enum AccountingSourceType {
   // acredita CASH/BANK según el método de pago — nunca vuelve a reconocer
   // la compra ni el IGV, nunca toca inventario.
   SUPPLIER_PAYMENT
+  // Fase A6.2: costo de ventas (COGS) de una venta confirmada con al menos
+  // una línea valorizada (A6.1). sourceId = Sale.id — DISTINTO de
+  // (SALE, Sale.id), así que coexiste sin conflicto con el asiento de
+  // reconocimiento de ingresos de la misma venta bajo el mismo índice único
+  // parcial accounting_entries_one_original_per_source (sin cambios: la
+  // tupla (sourceType, sourceId) es distinta). Ausente (sin ningún
+  // AccountingEntry) cuando la venta no tiene ninguna línea con
+  // Product.valuationMethod configurado — el caso normal mientras la
+  // valorización no esté habilitada para ningún producto.
+  COGS
 }
 
 // ORIGINAL: primer asiento de un evento de negocio (de venta/pago

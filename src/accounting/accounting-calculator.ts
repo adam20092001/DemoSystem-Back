@@ -276,6 +276,15 @@ export function buildSupplierPaymentReversalDescription(
   return `Reversión de pago a proveedor ${supplierLabel}`;
 }
 
+/** Backend-only, determinista, sin datos del cliente ni PII (Fase A6.2). */
+export function buildCogsOriginalDescription(saleNumber: string): string {
+  return `Costo de ventas ${saleNumber}`;
+}
+
+export function buildCogsReversalDescription(saleNumber: string): string {
+  return `Reversión de costo de ventas ${saleNumber}`;
+}
+
 /**
  * Defensa en profundidad (mismo criterio que StockMovementEngine con
  * reason/notes): aunque la descripción SIEMPRE la genera el backend a

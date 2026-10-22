@@ -24,6 +24,8 @@ import {
 import {
   assertLinesBalanced,
   assertValidAccountingDescription,
+  buildCogsOriginalDescription,
+  buildCogsReversalDescription,
   buildManualReversalDescription,
   buildPaymentCollectionLines,
   buildPaymentOriginalDescription,
@@ -38,6 +40,7 @@ import {
   invertResolvedLines,
 } from './accounting-calculator';
 import {
+  PostCogsRecognitionCommand,
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
   PostPurchaseReceiptReclassificationCommand,
@@ -643,6 +646,120 @@ export class AccountingEngine {
   }
 
   /**
+   * Contabiliza DEFINITIVAMENTE el costo de ventas (COGS) de una venta
+   * confirmada con al menos una línea valorizada (Fase A6.2) — único punto
+   * donde se produce una fila real de AccountingEntry con sourceType=COGS.
+   * `sourceId` = `command.saleId`: una tupla (sourceType, sourceId)
+   * DISTINTA de (SALE, Sale.id), así que el índice único parcial
+   * accounting_entries_one_original_per_source (sin código nuevo) permite
+   * que ambos asientos coexistan sin conflicto y a la vez impide por sí
+   * solo una doble contabilización de COGS.
+   *
+   * Débito: COST_OF_GOODS_SOLD, resuelto por AccountingSystemKey — un
+   * mapeo sin configurar todavía es el estado NORMAL y ESPERADO mientras
+   * el contador no lo apruebe (409, nunca el 500 de las 6 cuentas de
+   * sistema originales), mismo criterio exacto que
+   * resolvePurchaseDestinationAccounts(). Crédito: `inventoryLines`, YA
+   * resuelto por `accountId` real por el llamador (SalesService, vía
+   * cogs-account-resolver.ts) — la(s) cuenta(s) histórica(s) de inventario
+   * que el pool valorizado consumido realmente respalda, nunca el mapeo
+   * VIGENTE de PURCHASE_RESALE_INVENTORY por sí solo.
+   */
+  async postCogsRecognition(
+    tx: Prisma.TransactionClient,
+    command: PostCogsRecognitionCommand,
+  ): Promise<PostedAccountingEntry> {
+    const description = buildCogsOriginalDescription(command.saleNumber);
+    assertValidAccountingDescription(description);
+
+    const existing = await tx.accountingEntry.findFirst({
+      where: {
+        sourceType: AccountingSourceType.COGS,
+        sourceId: command.saleId,
+        eventType: AccountingEventType.ORIGINAL,
+      },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'El costo de ventas de esta venta ya fue contabilizado anteriormente',
+      );
+    }
+
+    const cogsAccount = await this.resolveCostOfGoodsSoldAccount(tx);
+    const inventoryAccountsById = await this.resolveManualAccounts(
+      tx,
+      command.inventoryLines.map((line) => line.accountId),
+    );
+    const totalAmount = command.inventoryLines.reduce(
+      (sum, line) => sum.plus(line.amount),
+      new Prisma.Decimal(0),
+    );
+    const resolvedLines: ResolvedAccountingLine[] = [
+      {
+        accountId: cogsAccount.id,
+        debitAmount: totalAmount,
+        creditAmount: new Prisma.Decimal(0),
+      },
+      ...command.inventoryLines.map((line) => ({
+        accountId: this.requireManualAccount(
+          inventoryAccountsById,
+          line.accountId,
+        ).id,
+        debitAmount: new Prisma.Decimal(0),
+        creditAmount: line.amount,
+      })),
+    ];
+    // Defensa en profundidad: SalesService ya garantiza que Σ inventoryLines
+    // = Σ costos consumidos de esta venta — esto nunca debería fallar aquí.
+    assertLinesBalanced(resolvedLines);
+
+    const { accountingDate, periodId, journalNumber } =
+      await this.resolvePeriodAndAssignNumber(tx, command.postedAt);
+
+    const created = await tx.accountingEntry.create({
+      data: {
+        sourceType: AccountingSourceType.COGS,
+        sourceId: command.saleId,
+        eventType: AccountingEventType.ORIGINAL,
+        description,
+        postedAt: command.postedAt,
+        accountingDate,
+        periodId,
+        journalNumber,
+        createdByUserId: command.actorUserId,
+        lines: {
+          create: resolvedLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: line.debitAmount,
+            creditAmount: line.creditAmount,
+          })),
+        },
+      },
+      select: ACCOUNTING_ENTRY_RESULT_SELECT,
+    });
+
+    await this.auditService.record({
+      userId: command.actorUserId,
+      module: 'ACCOUNTING',
+      action: AuditAction.ACCOUNTING_ENTRY_POSTED,
+      entityType: 'AccountingEntry',
+      entityId: created.id,
+      description,
+      metadata: {
+        entryId: created.id,
+        sourceType: created.sourceType,
+        sourceId: created.sourceId,
+        eventType: created.eventType,
+      },
+      ipAddress: command.ipAddress,
+      client: tx,
+    });
+
+    return created;
+  }
+
+  /**
    * Revierte el asiento ORIGINAL de un evento de negocio (Sale o Payment),
    * identificado por su fuente (sourceType/sourceId) — API orientada a la
    * fuente (plan final aprobado, §22): el llamador nunca necesita conocer
@@ -723,6 +840,9 @@ export class AccountingEngine {
         break;
       case AccountingSourceType.MANUAL:
         description = buildManualReversalDescription(original.description);
+        break;
+      case AccountingSourceType.COGS:
+        description = buildCogsReversalDescription(command.sourceNumber);
         break;
     }
     assertValidAccountingDescription(description);
@@ -1162,6 +1282,34 @@ export class AccountingEngine {
     if (account === undefined) {
       throw new ConflictException(
         `No se puede contabilizar: falta el mapeo contable configurado para "${systemKey}".`,
+      );
+    }
+    return account;
+  }
+
+  /**
+   * Resuelve la cuenta de costo de ventas por AccountingSystemKey
+   * (COST_OF_GOODS_SOLD, Fase A6.2) — mismo criterio exacto de excepción
+   * que resolvePurchaseDestinationAccounts(): sin mapeo configurado
+   * todavía es el estado NORMAL y ESPERADO mientras el contador no lo
+   * apruebe, nunca una corrupción de configuración del servidor (409,
+   * nunca el 500 de resolveAccounts()).
+   */
+  private async resolveCostOfGoodsSoldAccount(
+    tx: Prisma.TransactionClient,
+  ): Promise<Account> {
+    const account = await tx.account.findFirst({
+      where: {
+        systemKey: AccountingSystemKey.COST_OF_GOODS_SOLD,
+        status: AccountStatus.ACTIVE,
+        isPostable: true,
+      },
+    });
+    if (account === null) {
+      throw new ConflictException(
+        'No se puede contabilizar el costo de ventas: falta el mapeo contable configurado para "COST_OF_GOODS_SOLD". ' +
+          'ADMIN debe asignar una cuenta activa y postable a este AccountingSystemKey ' +
+          '(PATCH /api/v1/chart-of-accounts/system-keys/:systemKey) antes de confirmar ventas con costeo.',
       );
     }
     return account;

@@ -28,6 +28,8 @@ import { CompanySettingsSnapshot } from '../configuration/types/company-settings
 import ExcelJS from 'exceljs';
 import { ExcelExportService } from '../common/excel/excel-export.service';
 import { PrismaService } from '../database/prisma.service';
+import * as cogsAccountResolverModule from '../inventory-valuation/cogs-account-resolver';
+import { InventoryValuationEngine } from '../inventory-valuation/inventory-valuation.engine';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
 import { PaymentEngine } from '../payments/payment.engine';
 import { SaleAccessRequester } from './sale-access.policy';
@@ -342,10 +344,19 @@ function createTxMock() {
     inventoryMovement: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
     },
+    // Fase A6.2: productId->SaleItem.id de la venta siendo anulada.
+    saleItem: {
+      findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+    },
     payment: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
     },
     electronicDocument: {
+      findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
+    },
+    // Fase A6.2: existencia del asiento COGS a revertir (null = la venta
+    // nunca costeó nada, mismo comportamiento que hoy).
+    accountingEntry: {
       findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     },
   };
@@ -398,7 +409,16 @@ function createAccountingEngineMock() {
   return {
     postSaleRecognition: jest.fn<Promise<unknown>, [unknown, unknown]>(),
     postPaymentCollection: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    postCogsRecognition: jest.fn<Promise<unknown>, [unknown, unknown]>(),
     reverseOriginalForSource: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+  };
+}
+
+/** Fase A6.2: por defecto ambos no-op (null) — mismo comportamiento que un producto sin Product.valuationMethod configurado. */
+function createInventoryValuationEngineMock() {
+  return {
+    recordSaleConsumption: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    reverseForSaleItem: jest.fn<Promise<unknown>, [unknown, unknown]>(),
   };
 }
 
@@ -427,6 +447,9 @@ describe('SalesService', () => {
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let sequenceService: ReturnType<typeof createSequenceServiceMock>;
   let engine: ReturnType<typeof createEngineMock>;
+  let inventoryValuationEngine: ReturnType<
+    typeof createInventoryValuationEngineMock
+  >;
   let paymentEngine: ReturnType<typeof createPaymentEngineMock>;
   let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
   let settingsReader: ReturnType<typeof createSettingsReaderMock>;
@@ -444,6 +467,9 @@ describe('SalesService', () => {
     sequenceService.next.mockResolvedValue('NV-000001');
     engine = createEngineMock();
     engine.apply.mockResolvedValue(makeMovementRow());
+    inventoryValuationEngine = createInventoryValuationEngineMock();
+    inventoryValuationEngine.recordSaleConsumption.mockResolvedValue(null);
+    inventoryValuationEngine.reverseForSaleItem.mockResolvedValue(null);
     paymentEngine = createPaymentEngineMock();
     paymentEngine.register.mockResolvedValue(makePaymentRow());
     paymentEngine.sumActiveForSale.mockResolvedValue(new Prisma.Decimal(0));
@@ -483,6 +509,7 @@ describe('SalesService', () => {
       auditService as unknown as AuditService,
       sequenceService,
       engine as unknown as StockMovementEngine,
+      inventoryValuationEngine as unknown as InventoryValuationEngine,
       paymentEngine as unknown as PaymentEngine,
       accountingEngine as unknown as AccountingEngine,
       settingsReader as unknown as SettingsReader,
@@ -504,6 +531,16 @@ describe('SalesService', () => {
     prisma.tx.quoteItem.findMany.mockResolvedValue([makeQuoteItemRow()]);
     prisma.tx.customer.update.mockResolvedValue(makeCustomerRow());
     prisma.tx.inventoryMovement.findMany.mockResolvedValue([]);
+    // Fase A6.2: SaleItem fijo por producto, para que cualquier prueba de
+    // cancel() que simule un movimiento ORIGINAL de PRODUCT_ID/PRODUCT_ID_2
+    // (vía inventoryMovement.findMany.mockResolvedValueOnce) encuentre su
+    // SaleItem.id sin necesitar un override propio. Sin asiento COGS previo
+    // por defecto — mismo comportamiento que una venta que nunca costeó nada.
+    prisma.tx.saleItem.findMany.mockResolvedValue([
+      { id: 'sale-item-1', productId: PRODUCT_ID },
+      { id: 'sale-item-2', productId: PRODUCT_ID_2 },
+    ]);
+    prisma.tx.accountingEntry.findFirst.mockResolvedValue(null);
     prisma.tx.payment.findMany.mockResolvedValue([makePaymentRow()]);
     // A0.3: por defecto, sin comprobante electrónico ACEPTADO — las
     // pruebas de cancel() que sí necesitan uno lo sobrescriben.
@@ -1532,6 +1569,14 @@ describe('SalesService', () => {
             ]),
           }),
         );
+        prisma.tx.sale.create.mockResolvedValueOnce(
+          makeSaleDetailRow({
+            items: [
+              makeSaleItemRow(),
+              makeSaleItemRow({ id: 'sale-item-2', productId: PRODUCT_ID_2 }),
+            ],
+          }),
+        );
         await service.createDirect({
           ...validDirectInput,
           items: [
@@ -1556,6 +1601,14 @@ describe('SalesService', () => {
               [PRODUCT_ID, makeProductRow({ productId: PRODUCT_ID })],
               [PRODUCT_ID_2, makeProductRow({ productId: PRODUCT_ID_2 })],
             ]),
+          }),
+        );
+        prisma.tx.sale.create.mockResolvedValueOnce(
+          makeSaleDetailRow({
+            items: [
+              makeSaleItemRow(),
+              makeSaleItemRow({ id: 'sale-item-2', productId: PRODUCT_ID_2 }),
+            ],
           }),
         );
         await service.createDirect({
@@ -5135,6 +5188,121 @@ describe('SalesService', () => {
     it('nunca recalcula paidAmount/balanceDue/paymentStatus (el resumen congelado sigue siendo responsabilidad exclusiva de la Fase 7)', async () => {
       await service.cancel(validCancelInput);
       expect(paymentEngine.recalculateSaleSummary).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Fase A6.2 — integración de costo de ventas (COGS)', () => {
+    const COGS_ACCOUNT_ID = 'acc-inventory-historical';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    describe('createDirect/createFromQuote (vía applyOutboundMovements)', () => {
+      it('producto sin valorización habilitada (no-op): nunca postea COGS', async () => {
+        await service.createDirect(validDirectInput);
+        expect(
+          inventoryValuationEngine.recordSaleConsumption,
+        ).toHaveBeenCalledTimes(1);
+        expect(accountingEngine.postCogsRecognition).not.toHaveBeenCalled();
+      });
+
+      it('producto valorizado con cuenta histórica resuelta: postea COGS con el costo consumido y la cuenta de inventario correctas', async () => {
+        inventoryValuationEngine.recordSaleConsumption.mockResolvedValue({
+          valuation: { id: 'valuation-1' },
+          totalCost: new Prisma.Decimal('7.50'),
+        });
+        jest
+          .spyOn(
+            cogsAccountResolverModule,
+            'resolveHistoricalInventoryAccountForProduct',
+          )
+          .mockResolvedValue({ accountId: COGS_ACCOUNT_ID });
+
+        await service.createDirect(validDirectInput);
+
+        expect(accountingEngine.postCogsRecognition).toHaveBeenCalledTimes(1);
+        const call = accountingEngine.postCogsRecognition.mock.calls[0][1] as {
+          saleId: string;
+          inventoryLines: { accountId: string; amount: Prisma.Decimal }[];
+        };
+        expect(call.saleId).toBe(SALE_ID);
+        expect(call.inventoryLines).toEqual([
+          { accountId: COGS_ACCOUNT_ID, amount: new Prisma.Decimal('7.50') },
+        ]);
+      });
+
+      it('producto valorizado pero sin cuenta contable histórica consistente/configurada: ConflictException, nunca postea nada', async () => {
+        inventoryValuationEngine.recordSaleConsumption.mockResolvedValue({
+          valuation: { id: 'valuation-1' },
+          totalCost: new Prisma.Decimal('7.50'),
+        });
+        jest
+          .spyOn(
+            cogsAccountResolverModule,
+            'resolveHistoricalInventoryAccountForProduct',
+          )
+          .mockResolvedValue(null);
+
+        await expect(
+          service.createDirect(validDirectInput),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(accountingEngine.postCogsRecognition).not.toHaveBeenCalled();
+        expect(prisma.tx.sale.create).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('cancel (reversión de COGS)', () => {
+      const validCancelInput = {
+        saleId: SALE_ID,
+        reason: 'Motivo de anulación de prueba COGS',
+        actorUserId: ACTOR_ID,
+        ipAddress: '10.0.0.1',
+      };
+
+      it('la venta nunca contabilizó COGS (sin asiento previo): nunca revierte COGS', async () => {
+        prisma.tx.accountingEntry.findFirst.mockResolvedValue(null);
+        await service.cancel(validCancelInput);
+        expect(accountingEngine.reverseOriginalForSource).toHaveBeenCalledTimes(
+          1,
+        ); // solo la reversión SALE (venta económicamente activa por defecto)
+        const sourceTypes =
+          accountingEngine.reverseOriginalForSource.mock.calls.map(
+            (call) => (call[1] as { sourceType: string }).sourceType,
+          );
+        expect(sourceTypes).not.toContain('COGS');
+      });
+
+      it('la venta sí contabilizó COGS (existe un ORIGINAL previo): revierte también el asiento COGS, reutilizando sale.id/sale.number', async () => {
+        prisma.tx.accountingEntry.findFirst.mockResolvedValue({
+          id: 'cogs-entry-1',
+        });
+        await service.cancel(validCancelInput);
+        const cogsCall =
+          accountingEngine.reverseOriginalForSource.mock.calls.find(
+            (call) => (call[1] as { sourceType: string }).sourceType === 'COGS',
+          );
+        expect(cogsCall).toBeDefined();
+        const command = cogsCall?.[1] as {
+          sourceId: string;
+          sourceNumber: string;
+        };
+        expect(command.sourceId).toBe(SALE_ID);
+        expect(command.sourceNumber).toBe('NV-000001');
+      });
+
+      it('también revierte la valorización de cada movimiento original vía InventoryValuationEngine.reverseForSaleItem', async () => {
+        prisma.tx.inventoryMovement.findMany.mockResolvedValueOnce([
+          { productId: PRODUCT_ID, quantity: new Prisma.Decimal('1.000') },
+        ]);
+        await service.cancel(validCancelInput);
+        expect(
+          inventoryValuationEngine.reverseForSaleItem,
+        ).toHaveBeenCalledTimes(1);
+        const call = inventoryValuationEngine.reverseForSaleItem.mock
+          .calls[0][1] as { saleItemId: string };
+        expect(call.saleItemId).toBe('sale-item-1');
+      });
     });
   });
 });

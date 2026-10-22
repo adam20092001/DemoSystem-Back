@@ -178,3 +178,34 @@ export interface PostSupplierPaymentCollectionCommand {
   actorUserId: string;
   ipAddress: string | null;
 }
+
+/**
+ * Comando interno de AccountingEngine.postCogsRecognition() (Fase A6.2).
+ * `saleId` es el `Sale.id` — se usa tal cual como `AccountingEntry.sourceId`
+ * (sourceType=COGS), una tupla (sourceType, sourceId) DISTINTA de
+ * (SALE, Sale.id): coexiste sin conflicto con el asiento de reconocimiento
+ * de ingresos de la misma venta. HÍBRIDO, mismo criterio exacto que
+ * PostSupplierPaymentCollectionCommand pero invertido: el lado DÉBITO
+ * (costo de ventas) se resuelve por `AccountingSystemKey` DENTRO del motor
+ * (COST_OF_GOODS_SOLD, 409 si no está configurado — mismo criterio que
+ * PURCHASE_*, nunca el 500 de las 6 cuentas de sistema originales); el
+ * lado CRÉDITO (`inventoryLines`) llega YA resuelto por `accountId` real —
+ * SalesService ya verificó, producto por producto, cuál es la ÚNICA cuenta
+ * histórica de inventario que respalda el pool valorizado vigente
+ * (InventoryValuationEngine/cogs-account-resolver.ts), nunca el mapeo
+ * VIGENTE de PURCHASE_RESALE_INVENTORY por sí solo. `postedAt` es el mismo
+ * instante factual de la venta (Sale.confirmedAt) — periodo/fecha contable
+ * derivados de él, igual criterio que PostSaleRecognitionCommand, nunca una
+ * fecha explícita como los comandos de compra/pago a proveedor.
+ */
+export interface PostCogsRecognitionCommand {
+  saleId: string;
+  saleNumber: string;
+  postedAt: Date;
+  inventoryLines: {
+    accountId: string;
+    amount: Prisma.Decimal;
+  }[];
+  actorUserId: string;
+  ipAddress: string | null;
+}

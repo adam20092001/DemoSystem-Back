@@ -17,6 +17,7 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { AccountingEngine } from './accounting.engine';
 import {
+  PostCogsRecognitionCommand,
   PostManualEntryCommand,
   PostPaymentCollectionCommand,
   PostPurchaseReceiptReclassificationCommand,
@@ -124,6 +125,14 @@ function makeAccountRow(
       code: 'PURCHASE_OTHER',
       name: 'Compras otros',
       type: AccountType.EXPENSE,
+    },
+    // Fase A6.2: fixture de prueba únicamente, ninguna cuenta real en
+    // pos_db/pos_db_test tiene este systemKey mapeado todavía.
+    [AccountingSystemKey.COST_OF_GOODS_SOLD]: {
+      id: 'acc-cogs',
+      code: 'COGS',
+      name: 'Costo de ventas',
+      type: AccountType.COST,
     },
   };
   const base = byKey[systemKey];
@@ -310,6 +319,29 @@ function makePurchaseReceiptReclassificationCommand(
 const SUPPLIER_PAYMENT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 /**
+ * Fase A6.2: híbrido INVERTIDO respecto a SupplierPayment — el lado DÉBITO
+ * (COST_OF_GOODS_SOLD) se resuelve por systemKey (409 si falta, nunca el
+ * 500 de las 6 cuentas de sistema originales); el lado CRÉDITO
+ * (`inventoryLines`) llega YA resuelto por accountId real — SalesService ya
+ * verificó la ÚNICA cuenta histórica de inventario (cogs-account-resolver.ts).
+ */
+function makeCogsCommand(
+  overrides: Partial<PostCogsRecognitionCommand> = {},
+): PostCogsRecognitionCommand {
+  return {
+    saleId: SALE_ID,
+    saleNumber: SALE_NUMBER,
+    postedAt: POSTED_AT,
+    inventoryLines: [
+      { accountId: MANUAL_ACCOUNT_CREDIT_ID, amount: d('30.00') },
+    ],
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+    ...overrides,
+  };
+}
+
+/**
  * Fase A5.3: híbrido — el lado CASH/BANK se resuelve por systemKey (igual
  * que postPaymentCollection), el lado de pasivo llega YA resuelto por
  * accountId real (igual criterio que postManualEntry/
@@ -343,6 +375,7 @@ function createTxMock() {
     },
     account: {
       findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
+      findFirst: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
     },
     accountingPeriod: {
       findUnique: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
@@ -369,6 +402,17 @@ describe('AccountingEngine', () => {
 
     tx.accountingEntry.findFirst.mockResolvedValue(null);
     tx.account.findMany.mockResolvedValue(ALL_ACCOUNTS);
+    // Fase A6.2: resolveCostOfGoodsSoldAccount() usa findFirst por
+    // systemKey=COST_OF_GOODS_SOLD — por defecto SÍ está configurada
+    // (fixture de prueba, ver makeAccountRow); los tests de "mapeo
+    // faltante" lo sobrescriben a null.
+    tx.account.findFirst.mockImplementation(
+      (args: { where: { systemKey?: AccountingSystemKey } }) =>
+        Promise.resolve(
+          ALL_ACCOUNTS.find((a) => a.systemKey === args.where.systemKey) ??
+            null,
+        ),
+    );
     tx.accountingEntry.create.mockResolvedValue({
       id: ENTRY_ID,
       sourceType: AccountingSourceType.SALE,
@@ -1287,6 +1331,132 @@ describe('AccountingEngine', () => {
   });
 
   // ====================================================================
+  // postCogsRecognition (Fase A6.2)
+  // ====================================================================
+  describe('postCogsRecognition', () => {
+    beforeEach(() => {
+      tx.account.findMany.mockResolvedValue(MANUAL_ACCOUNTS);
+      tx.accountingEntry.create.mockResolvedValue({
+        id: ENTRY_ID,
+        sourceType: AccountingSourceType.COGS,
+        sourceId: SALE_ID,
+        eventType: AccountingEventType.ORIGINAL,
+      });
+    });
+
+    it('crea ORIGINAL con sourceType=COGS, sourceId=saleId; debita COST_OF_GOODS_SOLD y acredita la cuenta de inventario histórica', async () => {
+      await engine.postCogsRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeCogsCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          eventType: AccountingEventType;
+          lines: {
+            create: {
+              accountId: string;
+              debitAmount: Prisma.Decimal;
+              creditAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.COGS);
+      expect(call.data.sourceId).toBe(SALE_ID);
+      expect(call.data.eventType).toBe(AccountingEventType.ORIGINAL);
+      const byAccount = new Map(
+        call.data.lines.create.map((l) => [l.accountId, l]),
+      );
+      expect(byAccount.get('acc-cogs')?.debitAmount.toFixed(2)).toBe('30.00');
+      expect(
+        byAccount.get(MANUAL_ACCOUNT_CREDIT_ID)?.creditAmount.toFixed(2),
+      ).toBe('30.00');
+    });
+
+    it('agrupa varias líneas de inventario con la MISMA cuenta en una sola línea de crédito', async () => {
+      await engine.postCogsRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeCogsCommand({
+          inventoryLines: [
+            { accountId: MANUAL_ACCOUNT_CREDIT_ID, amount: d('10.00') },
+            { accountId: MANUAL_ACCOUNT_CREDIT_ID, amount: d('20.00') },
+          ],
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          lines: {
+            create: { accountId: string; debitAmount: Prisma.Decimal }[];
+          };
+        };
+      };
+      const debitLine = call.data.lines.create.find(
+        (l) => l.accountId === 'acc-cogs',
+      );
+      expect(debitLine?.debitAmount.toFixed(2)).toBe('30.00');
+    });
+
+    it('costo de ventas ya contabilizado (ya existe ORIGINAL con sourceType=COGS/ese sourceId): ConflictException', async () => {
+      tx.accountingEntry.findFirst.mockResolvedValue({ id: 'existing-entry' });
+      await expect(
+        engine.postCogsRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makeCogsCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('falta el mapeo de COST_OF_GOODS_SOLD: ConflictException (409, estado normal/esperado mientras el contador no lo apruebe)', async () => {
+      tx.account.findFirst.mockResolvedValue(null);
+      await expect(
+        engine.postCogsRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makeCogsCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('cuenta de inventario inexistente/inactiva/no postable: BadRequestException (error de entrada, nunca 500)', async () => {
+      tx.account.findMany.mockResolvedValue([]);
+      await expect(
+        engine.postCogsRecognition(
+          tx as unknown as Prisma.TransactionClient,
+          makeCogsCommand(),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('usa el periodo/fecha contable DERIVADOS del postedAt (instante de la venta), igual criterio que postSaleRecognition', async () => {
+      await engine.postCogsRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeCogsCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { postedAt: Date };
+      };
+      expect(call.data.postedAt).toEqual(POSTED_AT);
+    });
+
+    it('audita ACCOUNTING_ENTRY_POSTED exactamente una vez, mismo tx', async () => {
+      await engine.postCogsRecognition(
+        tx as unknown as Prisma.TransactionClient,
+        makeCogsCommand(),
+      );
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+      const call = auditService.record.mock.calls[0][0] as {
+        action: AuditAction;
+        client: unknown;
+      };
+      expect(call.action).toBe(AuditAction.ACCOUNTING_ENTRY_POSTED);
+      expect(call.client).toBe(tx);
+    });
+  });
+
+  // ====================================================================
   // reverseOriginalForSource
   // ====================================================================
   describe('reverseOriginalForSource', () => {
@@ -1516,6 +1686,44 @@ describe('AccountingEngine', () => {
       expect(call.data.description).toBe(
         'Reversión de pago a proveedor Acme SAC',
       );
+    });
+
+    it('descripción de reversión COGS (Fase A6.2): usa sourceNumber (número de venta), reutiliza EXACTAMENTE las líneas del ORIGINAL invertidas', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          ...makeOriginalWithLines(),
+          sourceType: AccountingSourceType.COGS,
+          sourceId: SALE_ID,
+          description: 'Costo de ventas NV-000001',
+        })
+        .mockResolvedValueOnce(null);
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({
+          sourceType: AccountingSourceType.COGS,
+          sourceId: SALE_ID,
+          sourceNumber: SALE_NUMBER,
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          description: string;
+          lines: {
+            create: {
+              debitAmount: Prisma.Decimal;
+              creditAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.COGS);
+      expect(call.data.description).toBe(
+        `Reversión de costo de ventas ${SALE_NUMBER}`,
+      );
+      // makeOriginalWithLines() ya viene con débito/crédito invertibles: la
+      // reversión intercambia exactamente debit<->credit de cada línea.
+      expect(tx.account.findMany).not.toHaveBeenCalled();
     });
 
     it('postedAt/actor/ip del comando se propagan al asiento REVERSAL', async () => {

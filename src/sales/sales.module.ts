@@ -4,6 +4,7 @@ import { ExcelExportService } from '../common/excel/excel-export.service';
 import { ConfigurationModule } from '../configuration/configuration.module';
 import { DocumentSequencesModule } from '../document-sequences/document-sequences.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { InventoryValuationModule } from '../inventory-valuation/inventory-valuation.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { SaleDocumentRenderer } from './printing/sale-document.renderer';
 import { SalesController } from './sales.controller';
@@ -45,11 +46,17 @@ import { SalesService } from './sales.service';
  * SettingsReader para el descuento (D18 aprobado: copia exacta del
  * snapshot de la cotización, sin revalidar contra la configuración
  * vigente). Sin ciclo: ConfigurationModule nunca importa SalesModule.
+ *
+ * Desde la Fase A6.2: importa InventoryValuationModule para que
+ * SalesService inyecte InventoryValuationEngine (consumo de costo por
+ * venta/reversion al anular, mismo patron ya usado por
+ * PurchaseReceiptsModule) - modulo hoja, sin ciclo.
  */
 @Module({
   imports: [
     DocumentSequencesModule,
     InventoryModule,
+    InventoryValuationModule,
     PaymentsModule,
     AccountingModule,
     ConfigurationModule,
