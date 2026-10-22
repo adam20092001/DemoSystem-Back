@@ -16,6 +16,8 @@ import {
   buildSaleOriginalDescription,
   buildSaleRecognitionLines,
   buildSaleReversalDescription,
+  buildSupplierPaymentOriginalDescription,
+  buildSupplierPaymentReversalDescription,
   hasSaleEconomicActivity,
   invertResolvedLines,
 } from './accounting-calculator';
@@ -315,6 +317,12 @@ describe('descripciones de asiento', () => {
     );
     expect(buildPurchaseReversalDescription('FACTURA F001-123')).toBe(
       'Reversión de compra FACTURA F001-123',
+    );
+    expect(buildSupplierPaymentOriginalDescription('Acme SAC')).toBe(
+      'Pago a proveedor Acme SAC',
+    );
+    expect(buildSupplierPaymentReversalDescription('Acme SAC')).toBe(
+      'Reversión de pago a proveedor Acme SAC',
     );
   });
 

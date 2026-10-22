@@ -117,6 +117,10 @@ function createTxMock() {
     purchaseReceipt: {
       count: jest.fn<Promise<number>, [unknown]>(),
     },
+    // Fase A5.3: guardia de cancel() contra pagos ACTIVE asignados.
+    supplierPaymentAllocation: {
+      count: jest.fn<Promise<number>, [unknown]>(),
+    },
     $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
   };
 }
@@ -182,6 +186,7 @@ describe('PurchaseInvoicesService', () => {
     });
     prisma.tx.product.findMany.mockResolvedValue([]);
     prisma.tx.purchaseReceipt.count.mockResolvedValue(0);
+    prisma.tx.supplierPaymentAllocation.count.mockResolvedValue(0);
     prisma.tx.$queryRaw.mockResolvedValue([makeLockedRow()]);
     prisma.tx.purchaseInvoice.create.mockResolvedValue(makeSafeInvoiceRow());
     prisma.tx.purchaseInvoice.update.mockResolvedValue(makeSafeInvoiceRow());
@@ -667,6 +672,34 @@ describe('PurchaseInvoicesService', () => {
       await expect(service.cancel(cancelInput())).resolves.toBeDefined();
       expect(prisma.tx.purchaseReceipt.count).toHaveBeenCalledWith({
         where: { purchaseInvoiceId: PURCHASE_INVOICE_ID, status: 'ACTIVE' },
+      });
+    });
+
+    it('Fase A5.3: factura con pagos ACTIVE asignados: ConflictException, nunca anula en cascada', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        makeLockedRow({ status: PurchaseInvoiceStatus.CONFIRMED }),
+      ]);
+      prisma.tx.supplierPaymentAllocation.count.mockResolvedValue(1);
+
+      await expect(service.cancel(cancelInput())).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(accountingEngine.reverseOriginalForSource).not.toHaveBeenCalled();
+      expect(prisma.tx.purchaseInvoice.update).not.toHaveBeenCalled();
+    });
+
+    it('Fase A5.3: sin pagos ACTIVE asignados: anula con normalidad, filtrando por supplierPayment.status=ACTIVE', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        makeLockedRow({ status: PurchaseInvoiceStatus.CONFIRMED }),
+      ]);
+      prisma.tx.supplierPaymentAllocation.count.mockResolvedValue(0);
+
+      await expect(service.cancel(cancelInput())).resolves.toBeDefined();
+      expect(prisma.tx.supplierPaymentAllocation.count).toHaveBeenCalledWith({
+        where: {
+          purchaseInvoiceId: PURCHASE_INVOICE_ID,
+          supplierPayment: { status: 'ACTIVE' },
+        },
       });
     });
   });

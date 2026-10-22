@@ -19,6 +19,7 @@ import { PurchaseReceiptsModule } from './purchase-receipts/purchase-receipts.mo
 import { QuotesModule } from './quotes/quotes.module';
 import { ReportsModule } from './reports/reports.module';
 import { SalesModule } from './sales/sales.module';
+import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { UnitsModule } from './units/units.module';
 import { UsersModule } from './users/users.module';
@@ -48,6 +49,7 @@ import { UsersModule } from './users/users.module';
     AccountingModule,
     PurchaseInvoicesModule,
     PurchaseReceiptsModule,
+    SupplierPaymentsModule,
     ReportsModule,
     ConfigurationModule,
     ElectronicInvoicingModule,

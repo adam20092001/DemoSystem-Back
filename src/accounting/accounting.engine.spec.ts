@@ -22,6 +22,7 @@ import {
   PostPurchaseReceiptReclassificationCommand,
   PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
+  PostSupplierPaymentCollectionCommand,
   ReverseOriginalForSourceCommand,
 } from './types/accounting-command';
 
@@ -299,6 +300,32 @@ function makePurchaseReceiptReclassificationCommand(
         debitAmount: d('0.00'),
         creditAmount: d('40.00'),
       },
+    ],
+    actorUserId: ACTOR_ID,
+    ipAddress: '10.0.0.1',
+    ...overrides,
+  };
+}
+
+const SUPPLIER_PAYMENT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+/**
+ * Fase A5.3: híbrido — el lado CASH/BANK se resuelve por systemKey (igual
+ * que postPaymentCollection), el lado de pasivo llega YA resuelto por
+ * accountId real (igual criterio que postManualEntry/
+ * postPurchaseReceiptReclassification) — SupplierPaymentsService ya
+ * determinó la cuenta histórica.
+ */
+function makeSupplierPaymentCommand(
+  overrides: Partial<PostSupplierPaymentCollectionCommand> = {},
+): PostSupplierPaymentCollectionCommand {
+  return {
+    supplierPaymentId: SUPPLIER_PAYMENT_ID,
+    description: 'Pago a proveedor Acme SAC',
+    accountingDateOnly: '2026-03-20',
+    accountingDestination: PaymentMethodAccountingDestination.CASH,
+    liabilityLines: [
+      { accountId: MANUAL_ACCOUNT_DEBIT_ID, amount: d('150.00') },
     ],
     actorUserId: ACTOR_ID,
     ipAddress: '10.0.0.1',
@@ -1123,6 +1150,143 @@ describe('AccountingEngine', () => {
   });
 
   // ====================================================================
+  // postSupplierPaymentCollection (Fase A5.3)
+  // ====================================================================
+  describe('postSupplierPaymentCollection', () => {
+    function queueAccountLookups(): void {
+      // Dos llamadas a tx.account.findMany en orden: primero
+      // resolveAccounts() (CASH/BANK por systemKey), luego
+      // resolveManualAccounts() (cuenta de pasivo histórica por accountId).
+      tx.account.findMany
+        .mockReset()
+        .mockResolvedValueOnce(ALL_ACCOUNTS)
+        .mockResolvedValueOnce(MANUAL_ACCOUNTS);
+    }
+
+    beforeEach(() => {
+      queueAccountLookups();
+      tx.accountingEntry.create.mockResolvedValue({
+        id: ENTRY_ID,
+        sourceType: AccountingSourceType.SUPPLIER_PAYMENT,
+        sourceId: SUPPLIER_PAYMENT_ID,
+        eventType: AccountingEventType.ORIGINAL,
+      });
+    });
+
+    it('crea ORIGINAL con sourceType=SUPPLIER_PAYMENT, sourceId=supplierPaymentId; debita la cuenta de pasivo y acredita CASH', async () => {
+      await engine.postSupplierPaymentCollection(
+        tx as unknown as Prisma.TransactionClient,
+        makeSupplierPaymentCommand(),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          sourceType: AccountingSourceType;
+          sourceId: string;
+          eventType: AccountingEventType;
+          lines: {
+            create: {
+              accountId: string;
+              debitAmount: Prisma.Decimal;
+              creditAmount: Prisma.Decimal;
+            }[];
+          };
+        };
+      };
+      expect(call.data.sourceType).toBe(AccountingSourceType.SUPPLIER_PAYMENT);
+      expect(call.data.sourceId).toBe(SUPPLIER_PAYMENT_ID);
+      expect(call.data.eventType).toBe(AccountingEventType.ORIGINAL);
+      const byAccount = new Map(
+        call.data.lines.create.map((l) => [l.accountId, l]),
+      );
+      expect(
+        byAccount.get(MANUAL_ACCOUNT_DEBIT_ID)?.debitAmount.toFixed(2),
+      ).toBe('150.00');
+      expect(byAccount.get('acc-cash')?.creditAmount.toFixed(2)).toBe('150.00');
+    });
+
+    it('agrupa varias líneas de pasivo con la MISMA cuenta en una sola línea de débito', async () => {
+      await engine.postSupplierPaymentCollection(
+        tx as unknown as Prisma.TransactionClient,
+        makeSupplierPaymentCommand({
+          liabilityLines: [
+            { accountId: MANUAL_ACCOUNT_DEBIT_ID, amount: d('100.00') },
+            { accountId: MANUAL_ACCOUNT_DEBIT_ID, amount: d('50.00') },
+          ],
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: {
+          lines: {
+            create: { accountId: string; debitAmount: Prisma.Decimal }[];
+          };
+        };
+      };
+      const debitLines = call.data.lines.create.filter(
+        (l) => l.accountId === MANUAL_ACCOUNT_DEBIT_ID,
+      );
+      expect(debitLines).toHaveLength(2);
+    });
+
+    it('pago ya contabilizado (ya existe ORIGINAL con ese sourceType/sourceId): ConflictException', async () => {
+      tx.accountingEntry.findFirst.mockResolvedValue({ id: 'existing-entry' });
+      await expect(
+        engine.postSupplierPaymentCollection(
+          tx as unknown as Prisma.TransactionClient,
+          makeSupplierPaymentCommand(),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.accountingEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('falta la cuenta de sistema CASH/BANK: InternalServerErrorException (corrupción de configuración, 500)', async () => {
+      tx.account.findMany.mockReset().mockResolvedValue(MANUAL_ACCOUNTS);
+      await expect(
+        engine.postSupplierPaymentCollection(
+          tx as unknown as Prisma.TransactionClient,
+          makeSupplierPaymentCommand(),
+        ),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+
+    it('cuenta de pasivo inexistente/inactiva/no postable: BadRequestException (error de entrada, nunca 500)', async () => {
+      tx.account.findMany.mockReset().mockResolvedValue(ALL_ACCOUNTS);
+      await expect(
+        engine.postSupplierPaymentCollection(
+          tx as unknown as Prisma.TransactionClient,
+          makeSupplierPaymentCommand(),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('usa la fecha contable EXPLÍCITA del comando (la del pago), nunca derivada de un instante', async () => {
+      await engine.postSupplierPaymentCollection(
+        tx as unknown as Prisma.TransactionClient,
+        makeSupplierPaymentCommand({ accountingDateOnly: '2026-03-25' }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { accountingDate: Date };
+      };
+      expect(call.data.accountingDate.toISOString()).toBe(
+        '2026-03-25T00:00:00.000Z',
+      );
+    });
+
+    it('audita ACCOUNTING_ENTRY_POSTED exactamente una vez, mismo tx', async () => {
+      await engine.postSupplierPaymentCollection(
+        tx as unknown as Prisma.TransactionClient,
+        makeSupplierPaymentCommand(),
+      );
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+      const call = auditService.record.mock.calls[0][0] as {
+        action: AuditAction;
+        client: unknown;
+      };
+      expect(call.action).toBe(AuditAction.ACCOUNTING_ENTRY_POSTED);
+      expect(call.client).toBe(tx);
+    });
+  });
+
+  // ====================================================================
   // reverseOriginalForSource
   // ====================================================================
   describe('reverseOriginalForSource', () => {
@@ -1326,6 +1490,31 @@ describe('AccountingEngine', () => {
       };
       expect(call.data.description).toBe(
         `Reversión de reclasificación por recepción de compra ${PURCHASE_RECEIPT_ID}`,
+      );
+    });
+
+    it('descripción de reversión SUPPLIER_PAYMENT: usa sourceNumber (etiqueta del proveedor), nunca original.description', async () => {
+      tx.accountingEntry.findFirst
+        .mockResolvedValueOnce({
+          ...makeOriginalWithLines(),
+          sourceType: AccountingSourceType.SUPPLIER_PAYMENT,
+          sourceId: SUPPLIER_PAYMENT_ID,
+          description: 'Pago a proveedor Acme SAC',
+        })
+        .mockResolvedValueOnce(null);
+      await engine.reverseOriginalForSource(
+        tx as unknown as Prisma.TransactionClient,
+        makeReverseCommand({
+          sourceType: AccountingSourceType.SUPPLIER_PAYMENT,
+          sourceId: SUPPLIER_PAYMENT_ID,
+          sourceNumber: 'Acme SAC',
+        }),
+      );
+      const call = tx.accountingEntry.create.mock.calls[0][0] as {
+        data: { description: string };
+      };
+      expect(call.data.description).toBe(
+        'Reversión de pago a proveedor Acme SAC',
       );
     });
 

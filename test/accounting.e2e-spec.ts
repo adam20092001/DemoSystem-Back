@@ -1983,16 +1983,18 @@ describe('Basic Accounting (e2e)', () => {
       // asientos manuales; Fase A5.2a: ampliado con PURCHASE para las
       // facturas de compra universales; Fase A5.2b: ampliado con
       // PURCHASE_RECEIPT para la reclasificación opcional por recepción
-      // física — ninguno de los tres se origina en una conversión de
-      // cotización) nunca incluye un valor QUOTE: no existe ni puede
-      // existir en tiempo de compilación, garantía estática, no una
-      // comprobación en runtime.
+      // física; Fase A5.3: ampliado con SUPPLIER_PAYMENT para el cobro de
+      // un pago a proveedor — ninguno de los cuatro se origina en una
+      // conversión de cotización) nunca incluye un valor QUOTE: no existe
+      // ni puede existir en tiempo de compilación, garantía estática, no
+      // una comprobación en runtime.
       expect(Object.values(AccountingSourceType).sort()).toEqual([
         'MANUAL',
         'PAYMENT',
         'PURCHASE',
         'PURCHASE_RECEIPT',
         'SALE',
+        'SUPPLIER_PAYMENT',
       ]);
     });
 
@@ -3808,7 +3810,8 @@ describe('Basic Accounting (e2e)', () => {
       const accountingPaths = Object.entries(doc.paths).filter(
         ([path]) =>
           (path.includes('/accounts') &&
-            !path.includes('accounts-receivable')) ||
+            !path.includes('accounts-receivable') &&
+            !path.includes('accounts-payable')) ||
           path.includes('/accounting/entries'),
       );
       let operationCount = 0;
