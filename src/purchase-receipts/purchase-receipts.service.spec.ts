@@ -19,6 +19,7 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
+import { InventoryValuationEngine } from '../inventory-valuation/inventory-valuation.engine';
 import { PurchaseReceiptsService } from './purchase-receipts.service';
 
 const ACTOR_ID = '33333333-3333-4333-8333-333333333333';
@@ -142,11 +143,21 @@ function createAccountingEngineMock() {
   };
 }
 
+function createInventoryValuationEngineMock() {
+  return {
+    recordOriginal: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    reverseForReceiptLine: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+  };
+}
+
 describe('PurchaseReceiptsService', () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   let auditService: ReturnType<typeof createAuditServiceMock>;
   let stockMovementEngine: ReturnType<typeof createStockMovementEngineMock>;
   let accountingEngine: ReturnType<typeof createAccountingEngineMock>;
+  let inventoryValuationEngine: ReturnType<
+    typeof createInventoryValuationEngineMock
+  >;
   let service: PurchaseReceiptsService;
 
   beforeEach(() => {
@@ -156,12 +167,18 @@ describe('PurchaseReceiptsService', () => {
     stockMovementEngine = createStockMovementEngineMock();
     stockMovementEngine.apply.mockResolvedValue({ id: 'movement-1' });
     accountingEngine = createAccountingEngineMock();
+    // Por defecto (producto sin valuationMethod configurado): no-op,
+    // mismo comportamiento que antes de A6.1.
+    inventoryValuationEngine = createInventoryValuationEngineMock();
+    inventoryValuationEngine.recordOriginal.mockResolvedValue(null);
+    inventoryValuationEngine.reverseForReceiptLine.mockResolvedValue(null);
 
     service = new PurchaseReceiptsService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
       stockMovementEngine as unknown as StockMovementEngine,
       accountingEngine as unknown as AccountingEngine,
+      inventoryValuationEngine as unknown as InventoryValuationEngine,
     );
 
     // Camino feliz por defecto: lock de factura, lock de línea, sin

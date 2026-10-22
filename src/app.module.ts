@@ -11,6 +11,7 @@ import { DatabaseModule } from './database/database.module';
 import { ElectronicInvoicingModule } from './electronic-invoicing/electronic-invoicing.module';
 import { HealthModule } from './health/health.module';
 import { InventoryModule } from './inventory/inventory.module';
+import { InventoryValuationModule } from './inventory-valuation/inventory-valuation.module';
 import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
 import { PaymentsModule } from './payments/payments.module';
 import { ProductsModule } from './products/products.module';
@@ -40,6 +41,7 @@ import { UsersModule } from './users/users.module';
     UnitsModule,
     ProductsModule,
     InventoryModule,
+    InventoryValuationModule,
     CustomersModule,
     SuppliersModule,
     QuotesModule,
