@@ -545,11 +545,10 @@ export class PurchaseInvoicesService {
   // ==================================================================
 
   /**
-   * A5.2a nunca tiene PurchaseReceipt (todavía no existe): no hay ningún
-   * chequeo de "recepciones activas" que bloquear aquí — esa guardia es
-   * responsabilidad exclusiva de una futura Fase A5.2b, que deberá
-   * agregarla ANTES de permitir esta anulación cuando ya existan
-   * recepciones.
+   * A5.2b agregó la guardia de recepciones ACTIVE; A5.3 agrega aquí la de
+   * pagos ACTIVE (vía asignación a esta factura). Ninguna de las dos
+   * cascada automáticamente: el usuario debe anular primero cada
+   * recepción/pago.
    */
   async cancel(
     input: CancelPurchaseInvoiceInput,
@@ -587,6 +586,23 @@ export class PurchaseInvoicesService {
       if (activeReceiptsCount > 0) {
         throw new ConflictException(
           'No se puede anular: existen recepciones activas para esta factura. Anule primero cada recepción.',
+        );
+      }
+
+      // Fase A5.3: una factura con asignaciones de pago ACTIVE tampoco se
+      // anula automáticamente en cascada — el usuario debe anular primero
+      // cada pago. Mismo criterio de lock que arriba: ambas rutas quedan
+      // serializadas entre sí sin lock adicional (la factura primero).
+      const activePaymentAllocationsCount =
+        await tx.supplierPaymentAllocation.count({
+          where: {
+            purchaseInvoiceId: locked.id,
+            supplierPayment: { status: 'ACTIVE' },
+          },
+        });
+      if (activePaymentAllocationsCount > 0) {
+        throw new ConflictException(
+          'No se puede anular: existen pagos activos asignados a esta factura. Anule primero cada pago.',
         );
       }
 

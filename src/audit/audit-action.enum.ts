@@ -234,4 +234,10 @@ export enum AuditAction {
   // contable (booleano), mismo criterio que el resto del dominio.
   PURCHASE_RECEIPT_CREATED = 'PURCHASE_RECEIPT_CREATED',
   PURCHASE_RECEIPT_CANCELLED = 'PURCHASE_RECEIPT_CANCELLED',
+  // Fase A5.3 (pagos a proveedores). SupplierPaymentsService es su único
+  // emisor. Nunca audita el detalle de asignaciones por factura — solo
+  // identificadores/conteos/montos agregados, mismo criterio que el resto
+  // del dominio.
+  SUPPLIER_PAYMENT_REGISTERED = 'SUPPLIER_PAYMENT_REGISTERED',
+  SUPPLIER_PAYMENT_CANCELLED = 'SUPPLIER_PAYMENT_CANCELLED',
 }

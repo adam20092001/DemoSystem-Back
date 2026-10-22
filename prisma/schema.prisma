@@ -206,6 +206,11 @@ model User {
   // PurchaseInvoice arriba (quien la crea y, si aplica, quien la anula).
   createdPurchaseReceipts   PurchaseReceipt[]    @relation("PurchaseReceiptCreatedBy")
   cancelledPurchaseReceipts PurchaseReceipt[]    @relation("PurchaseReceiptCancelledBy")
+  // Pagos a proveedor (Fase A5.3): mismo criterio exacto que
+  // PurchaseInvoice/PurchaseReceipt arriba (quien lo crea y, si aplica,
+  // quien lo anula).
+  createdSupplierPayments   SupplierPayment[]    @relation("SupplierPaymentCreatedBy")
+  cancelledSupplierPayments SupplierPayment[]    @relation("SupplierPaymentCancelledBy")
 
   @@index([status])
   @@map("users")
@@ -557,6 +562,9 @@ model Supplier {
   // requirió; puede reconsiderarse en una fase posterior si se necesita).
   purchaseInvoices PurchaseInvoice[]
 
+  // Fase A5.3: pagos registrados a este proveedor.
+  supplierPayments SupplierPayment[]
+
   // Las 3 CHECK y el índice único funcional (documentType+countryCode+
   // UPPER(BTRIM(documentNumber))) se añaden a mano en migration.sql (mismo
   // motivo que Customer: el DSL de Prisma no expresa CHECK, UPPER() ni
@@ -702,6 +710,14 @@ model PurchaseInvoice {
   // factura. Nunca presente mientras DRAFT (no se puede recibir contra un
   // borrador).
   receipts PurchaseReceipt[]
+
+  // Pagos a proveedor (Fase A5.3): asignaciones de SupplierPayment contra
+  // ESTA factura. El saldo pendiente NUNCA se persiste en esta tabla —
+  // siempre se calcula en tiempo de lectura a partir de totalAmount menos
+  // la suma de asignaciones de pagos ACTIVE (mismo criterio que
+  // isReceiptEligible/receiptLines arriba: nunca una fuente de verdad
+  // duplicada).
+  paymentAllocations SupplierPaymentAllocation[]
 
   // El índice único funcional (supplier_id, document_type,
   // UPPER(BTRIM(COALESCE(document_series,''))), UPPER(BTRIM(document_number)))
@@ -887,6 +903,116 @@ model PurchaseReceiptLine {
   @@index([purchaseReceiptId])
   @@index([purchaseInvoiceLineId])
   @@map("purchase_receipt_lines")
+}
+
+// Fase A5.3: igual criterio de dos estados que PurchaseReceiptStatus — un
+// pago nace efectivo (postea de inmediato, dentro de la misma transacción
+// que lo crea) y solo puede pasar a CANCELLED después.
+enum SupplierPaymentStatus {
+  ACTIVE
+  CANCELLED
+}
+
+/**
+ * Pago a proveedor (Fase A5.3), distribuible entre una o varias
+ * PurchaseInvoice CONFIRMED del MISMO proveedor (ver SupplierPaymentAllocation).
+ * Las obligaciones nacen de facturas CONFIRMED, nunca de recepciones
+ * físicas (A5.2b es independiente). Nunca se elimina físicamente: ACTIVE ->
+ * CANCELLED únicamente.
+ */
+model SupplierPayment {
+  id String @id @default(uuid()) @db.Uuid
+
+  supplierId String   @map("supplier_id") @db.Uuid
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  paymentDate DateTime @map("payment_date") @db.Date
+
+  // Siempre la SUMA de sus asignaciones (SupplierPaymentAllocation.amount) —
+  // validado por el servicio al crear, nunca un valor independiente.
+  amount Decimal @db.Decimal(14, 2)
+
+  // Snapshot inmutable desde la creación: siempre
+  // CompanySettings.currencyCode vigente en ese instante (mismo criterio
+  // que PurchaseInvoice.currencyCode, A5.2a) — nunca aceptado del cliente.
+  // Debe coincidir con la moneda de CADA factura pagada (validado por el
+  // servicio): A0.2 ya impide que currencyCode diverja mientras existe
+  // historia financiera, así que este chequeo es defensa en profundidad,
+  // nunca una vía real de multimoneda.
+  currencyCode String @map("currency_code") @db.VarChar(3)
+
+  // FK viva + snapshot histórico hacia el método de pago dinámico (mismo
+  // criterio exacto que Payment, Ticket C, Bloque C3): un pago ya
+  // registrado nunca cambia de significado porque un ADMIN edite el
+  // método después. accountingDestination nunca se snapshotea aquí (igual
+  // que Payment): ese hecho contable ya queda inmutable, por separado, en
+  // AccountingEntryLine.
+  paymentMethodId   String        @map("payment_method_id") @db.Uuid
+  paymentMethod     PaymentMethod @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+  paymentMethodCode String        @map("payment_method_code") @db.VarChar(30)
+  paymentMethodName String        @map("payment_method_name") @db.VarChar(60)
+
+  reference String? @db.VarChar(100)
+
+  // Idempotencia (mismo criterio exacto que PurchaseReceipt.idempotencyKey,
+  // A5.2b): opcional, único por proveedor, nunca global.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  status SupplierPaymentStatus @default(ACTIVE)
+
+  // AccountingEntry definitivo (sourceType=SUPPLIER_PAYMENT). Nunca NULL
+  // mientras ACTIVE: a diferencia de PurchaseReceipt.reclassificationEntryId
+  // (opcional), un SupplierPayment SIEMPRE contabiliza — nunca existe sin
+  // su asiento.
+  postedEntryId String          @unique @map("posted_entry_id") @db.Uuid
+  postedEntry   AccountingEntry @relation(fields: [postedEntryId], references: [id], onDelete: Restrict)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("SupplierPaymentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("SupplierPaymentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  allocations SupplierPaymentAllocation[]
+
+  // El CHECK de consistencia de cancelación (mismo criterio exacto que
+  // purchase_receipts_cancellation_consistency) se agrega a mano en
+  // migration.sql.
+  @@unique([supplierId, idempotencyKey])
+  @@index([supplierId, createdAt])
+  @@index([status, createdAt])
+  @@map("supplier_payments")
+}
+
+/**
+ * Cuánto de UN SupplierPayment se aplicó a UNA PurchaseInvoice. Varias
+ * asignaciones del MISMO pago pueden repartirse entre varias facturas del
+ * MISMO proveedor (validado por el servicio); nunca dos asignaciones del
+ * mismo pago contra la misma factura (una sola fila por par, @@unique).
+ */
+model SupplierPaymentAllocation {
+  id String @id @default(uuid()) @db.Uuid
+
+  supplierPaymentId String          @map("supplier_payment_id") @db.Uuid
+  supplierPayment    SupplierPayment @relation(fields: [supplierPaymentId], references: [id], onDelete: Cascade)
+
+  purchaseInvoiceId String          @map("purchase_invoice_id") @db.Uuid
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
+
+  amount Decimal @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // CHECK de monto positivo se agrega a mano en migration.sql.
+  @@unique([supplierPaymentId, purchaseInvoiceId])
+  @@index([supplierPaymentId])
+  @@index([purchaseInvoiceId])
+  @@map("supplier_payment_allocations")
 }
 
 // --- Secuencias de documentos y cotizaciones (Fase 5, Bloque A) ------------
@@ -1456,6 +1582,8 @@ model PaymentMethod {
   // Desglose de cierres de caja por método (Ticket B post-MVP, Bloque B1:
   // tabla vacía hasta un bloque de negocio posterior).
   cashSessionSummaries CashSessionPaymentMethodSummary[]
+  // Fase A5.3: pagos a proveedor registrados con este método.
+  supplierPayments     SupplierPayment[]
 
   // Los 3 CHECK (code con formato ^[A-Z][A-Z0-9_]{1,29}$, name no en blanco,
   // sort_order >= 0) se agregan a mano en migration.sql, mismo criterio que
@@ -1567,6 +1695,13 @@ enum AccountingSourceType {
   // ninguna cuenta involucrada tiene tránsito configurado — el caso
   // predeterminado y seguro mientras no exista una decisión del contador.
   PURCHASE_RECEIPT
+  // Fase A5.3: cobro de un pago a proveedor (SupplierPayment.id). Debita
+  // la(s) cuenta(s) de pasivo REALMENTE acreditadas en el/los asiento(s)
+  // PURCHASE originales de cada factura pagada (nunca el mapeo VIGENTE de
+  // ACCOUNTS_PAYABLE, que puede haberse reasignado desde entonces) y
+  // acredita CASH/BANK según el método de pago — nunca vuelve a reconocer
+  // la compra ni el IGV, nunca toca inventario.
+  SUPPLIER_PAYMENT
 }
 
 // ORIGINAL: primer asiento de un evento de negocio (de venta/pago
@@ -1793,6 +1928,11 @@ model AccountingEntry {
   // SOLO presente cuando sourceType=PURCHASE_RECEIPT. Mismo criterio
   // informativo exacto que postedByDraft/postedByPurchaseInvoice.
   postedByPurchaseReceiptReclassification PurchaseReceipt?
+
+  // Fase A5.3: lado inverso de SupplierPayment.postedEntryId — SOLO
+  // presente cuando sourceType=SUPPLIER_PAYMENT. Mismo criterio
+  // informativo exacto que los anteriores.
+  postedBySupplierPayment SupplierPayment?
 
   // Los 3 CHECK (description no en blanco, consistencia ORIGINAL/REVERSAL,
   // no auto-reversión) y el índice único parcial

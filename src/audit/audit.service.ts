@@ -492,6 +492,15 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'reclassified',
   ],
   [AuditAction.PURCHASE_RECEIPT_CANCELLED]: ['reason', 'reversalEntryId'],
+  // SUPPLIER_PAYMENT_ (Fase A5.3). SupplierPaymentsService es su único
+  // emisor. Nunca el detalle de asignaciones por factura.
+  [AuditAction.SUPPLIER_PAYMENT_REGISTERED]: [
+    'supplierId',
+    'amount',
+    'invoiceCount',
+    'entryId',
+  ],
+  [AuditAction.SUPPLIER_PAYMENT_CANCELLED]: ['reason', 'reversalEntryId'],
 };
 
 function isPlainObject(

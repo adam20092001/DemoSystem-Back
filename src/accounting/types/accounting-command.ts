@@ -148,3 +148,33 @@ export interface PostPurchaseReceiptReclassificationCommand {
   actorUserId: string;
   ipAddress: string | null;
 }
+
+/**
+ * Comando interno de AccountingEngine.postSupplierPaymentCollection() (Fase
+ * A5.3). `supplierPaymentId` es el `SupplierPayment.id` — se usa tal cual
+ * como `AccountingEntry.sourceId` (sourceType=SUPPLIER_PAYMENT). HÍBRIDO
+ * deliberado entre los dos estilos de resolución ya existentes:
+ * `liabilityLines` llega YA resuelto por `accountId` real (mismo criterio
+ * que PostManualEntryCommand/PostPurchaseReceiptReclassificationCommand) —
+ * SupplierPaymentsService ya agrupó cada factura pagada por la cuenta de
+ * pasivo que su asiento PURCHASE original REALMENTE acreditó, nunca por el
+ * mapeo VIGENTE de ACCOUNTS_PAYABLE; `accountingDestination` en cambio SÍ
+ * se resuelve por `AccountingSystemKey` DENTRO del motor (mismo criterio
+ * sistemático que PostPaymentCollectionCommand, Fase 7/Ticket C): CASH/BANK
+ * son cuentas de sistema originales, un invariante de despliegue (500 si
+ * falta), nunca una decisión histórica por factura. `accountingDateOnly`
+ * es SIEMPRE explícita (elegida por quien registra el pago), mismo
+ * criterio que PostManualEntryCommand/PostPurchaseRecognitionCommand.
+ */
+export interface PostSupplierPaymentCollectionCommand {
+  supplierPaymentId: string;
+  description: string;
+  accountingDateOnly: string;
+  accountingDestination: PaymentMethodAccountingDestination;
+  liabilityLines: {
+    accountId: string;
+    amount: Prisma.Decimal;
+  }[];
+  actorUserId: string;
+  ipAddress: string | null;
+}

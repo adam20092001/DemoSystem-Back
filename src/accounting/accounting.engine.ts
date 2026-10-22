@@ -16,6 +16,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { ACCOUNTING_DESTINATION_TO_SYSTEM_KEY } from './constants/accounting.constants';
 import {
   parseAccountingDateOnly,
   resolveAccountingDateParts,
@@ -32,6 +33,7 @@ import {
   buildSaleOriginalDescription,
   buildSaleRecognitionLines,
   buildSaleReversalDescription,
+  buildSupplierPaymentReversalDescription,
   hasSaleEconomicActivity,
   invertResolvedLines,
 } from './accounting-calculator';
@@ -41,6 +43,7 @@ import {
   PostPurchaseReceiptReclassificationCommand,
   PostPurchaseRecognitionCommand,
   PostSaleRecognitionCommand,
+  PostSupplierPaymentCollectionCommand,
   ReverseOriginalForSourceCommand,
 } from './types/accounting-command';
 import {
@@ -510,6 +513,136 @@ export class AccountingEngine {
   }
 
   /**
+   * Contabiliza DEFINITIVAMENTE un pago a proveedor (Fase A5.3) — único
+   * punto donde un SupplierPayment produce una fila real de AccountingEntry
+   * (sourceType=SUPPLIER_PAYMENT). A diferencia de postPaymentCollection()
+   * (cobro de cliente, ambos lados sistemáticos por systemKey): el lado
+   * CASH/BANK SÍ se resuelve por AccountingSystemKey (igual que el cobro de
+   * cliente: cuentas de sistema originales, 500 si faltan), pero el lado de
+   * PASIVO llega YA resuelto por `accountId` real —
+   * SupplierPaymentsService ya determinó, factura por factura, cuál cuenta
+   * acreditó realmente su asiento PURCHASE original (nunca el mapeo VIGENTE
+   * de ACCOUNTS_PAYABLE) y ya agrupó los montos por esa cuenta histórica.
+   * Nunca vuelve a reconocer la compra ni el IGV, nunca toca inventario.
+   *
+   * `sourceId` = `command.supplierPaymentId`: el mismo índice único parcial
+   * accounting_entries_one_original_per_source (sin código nuevo) impide
+   * por sí solo una doble contabilización.
+   */
+  async postSupplierPaymentCollection(
+    tx: Prisma.TransactionClient,
+    command: PostSupplierPaymentCollectionCommand,
+  ): Promise<PostedAccountingEntry> {
+    assertValidAccountingDescription(command.description);
+
+    const existing = await tx.accountingEntry.findFirst({
+      where: {
+        sourceType: AccountingSourceType.SUPPLIER_PAYMENT,
+        sourceId: command.supplierPaymentId,
+        eventType: AccountingEventType.ORIGINAL,
+      },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'Este pago a proveedor ya fue contabilizado anteriormente',
+      );
+    }
+
+    const cashBankSystemKey =
+      ACCOUNTING_DESTINATION_TO_SYSTEM_KEY[command.accountingDestination];
+    const systemAccounts = await this.resolveAccounts(tx, [cashBankSystemKey]);
+    const cashBankAccount = this.requireAccount(
+      systemAccounts,
+      cashBankSystemKey,
+    );
+
+    const liabilityAccountsById = await this.resolveManualAccounts(
+      tx,
+      command.liabilityLines.map((line) => line.accountId),
+    );
+    const totalAmount = command.liabilityLines.reduce(
+      (sum, line) => sum.plus(line.amount),
+      new Prisma.Decimal(0),
+    );
+    const resolvedLines: ResolvedAccountingLine[] = [
+      ...command.liabilityLines.map((line) => ({
+        accountId: this.requireManualAccount(
+          liabilityAccountsById,
+          line.accountId,
+        ).id,
+        debitAmount: line.amount,
+        creditAmount: new Prisma.Decimal(0),
+      })),
+      {
+        accountId: cashBankAccount.id,
+        debitAmount: new Prisma.Decimal(0),
+        creditAmount: totalAmount,
+      },
+    ];
+    // Defensa en profundidad: SupplierPaymentsService ya garantiza que
+    // Σ liabilityLines = SupplierPayment.amount (validado al construir las
+    // asignaciones) — esto nunca debería fallar aquí.
+    assertLinesBalanced(resolvedLines);
+
+    const { accountingDate, year, month } = parseAccountingDateOnly(
+      command.accountingDateOnly,
+    );
+    const periodId = await this.resolveOpenPeriodIdForExplicitDate(
+      tx,
+      year,
+      month,
+    );
+    const journalNumber = await this.incrementJournalNumber(
+      tx,
+      periodId,
+      year,
+      month,
+    );
+
+    const created = await tx.accountingEntry.create({
+      data: {
+        sourceType: AccountingSourceType.SUPPLIER_PAYMENT,
+        sourceId: command.supplierPaymentId,
+        eventType: AccountingEventType.ORIGINAL,
+        description: command.description,
+        postedAt: new Date(),
+        accountingDate,
+        periodId,
+        journalNumber,
+        createdByUserId: command.actorUserId,
+        lines: {
+          create: resolvedLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: line.debitAmount,
+            creditAmount: line.creditAmount,
+          })),
+        },
+      },
+      select: ACCOUNTING_ENTRY_RESULT_SELECT,
+    });
+
+    await this.auditService.record({
+      userId: command.actorUserId,
+      module: 'ACCOUNTING',
+      action: AuditAction.ACCOUNTING_ENTRY_POSTED,
+      entityType: 'AccountingEntry',
+      entityId: created.id,
+      description: command.description,
+      metadata: {
+        entryId: created.id,
+        sourceType: created.sourceType,
+        sourceId: created.sourceId,
+        eventType: created.eventType,
+      },
+      ipAddress: command.ipAddress,
+      client: tx,
+    });
+
+    return created;
+  }
+
+  /**
    * Revierte el asiento ORIGINAL de un evento de negocio (Sale o Payment),
    * identificado por su fuente (sourceType/sourceId) — API orientada a la
    * fuente (plan final aprobado, §22): el llamador nunca necesita conocer
@@ -562,12 +695,11 @@ export class AccountingEngine {
     const invertedLines = invertResolvedLines(originalLines);
     assertLinesBalanced(invertedLines);
 
-    // Fase A4.5/A5.2a/A5.2b: MANUAL nunca tiene número de documento
+    // Fase A4.5/A5.2a/A5.2b/A5.3: MANUAL nunca tiene número de documento
     // comercial propio y reutiliza la propia descripción del ORIGINAL ya
-    // cargado arriba; SALE/PAYMENT/PURCHASE/PURCHASE_RECEIPT sí tienen un
-    // identificador propio (número NV, serie-número de proveedor, o el id
-    // de recepción formateado por el llamador), que viaja en
-    // `command.sourceNumber`.
+    // cargado arriba; el resto sí tiene un identificador propio (número
+    // NV, serie-número de proveedor, el id de recepción, o la etiqueta del
+    // proveedor pagado), que viaja en `command.sourceNumber`.
     let description: string;
     switch (command.sourceType) {
       case AccountingSourceType.SALE:
@@ -581,6 +713,11 @@ export class AccountingEngine {
         break;
       case AccountingSourceType.PURCHASE_RECEIPT:
         description = buildPurchaseReceiptReclassificationReversalDescription(
+          command.sourceNumber,
+        );
+        break;
+      case AccountingSourceType.SUPPLIER_PAYMENT:
+        description = buildSupplierPaymentReversalDescription(
           command.sourceNumber,
         );
         break;
