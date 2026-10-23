@@ -112,6 +112,9 @@ function createTxMock() {
     accountingEntryLine: {
       findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
+    importReceiptLink: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
   };
 }
 
@@ -172,6 +175,9 @@ describe('PurchaseReceiptsService', () => {
     inventoryValuationEngine = createInventoryValuationEngineMock();
     inventoryValuationEngine.recordOriginal.mockResolvedValue(null);
     inventoryValuationEngine.reverseForReceiptLine.mockResolvedValue(null);
+    // Por defecto (Fase B3): ningún vínculo de importación activo —
+    // los tests dedicados a ese guardia lo sobrescriben.
+    prisma.tx.importReceiptLink.findFirst.mockResolvedValue(null);
 
     service = new PurchaseReceiptsService(
       prisma as unknown as PrismaService,
@@ -680,6 +686,17 @@ describe('PurchaseReceiptsService', () => {
         ConflictException,
       );
       expect(stockMovementEngine.apply).not.toHaveBeenCalled();
+    });
+
+    it('con vínculo de importación ACTIVO (Fase B3): ConflictException, nunca revierte stock ni contabilidad', async () => {
+      prisma.tx.importReceiptLink.findFirst.mockResolvedValue({
+        id: 'import-receipt-link-1',
+      });
+      await expect(service.cancel(cancelInput())).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(stockMovementEngine.apply).not.toHaveBeenCalled();
+      expect(prisma.tx.purchaseReceipt.update).not.toHaveBeenCalled();
     });
 
     it('camino feliz: un movimiento EXIT compensatorio, marca CANCELLED', async () => {

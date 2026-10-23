@@ -521,6 +521,23 @@ export class PurchaseReceiptsService {
         );
       }
 
+      // Fase B3: nunca anular una recepción con vínculos de importación
+      // ACTIVOS apuntando a sus líneas — nunca huérfanos silenciosos
+      // (CLAUDE.md B3 §2: "its cancellation must not silently orphan
+      // them. Require an explicit safe unlink/reversal process first").
+      const activeImportLink = await tx.importReceiptLink.findFirst({
+        where: {
+          purchaseReceiptLine: { purchaseReceiptId: locked.id },
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+      });
+      if (activeImportLink !== null) {
+        throw new ConflictException(
+          'No se puede anular: esta recepción tiene vínculos de importación ACTIVOS. Desvincule primero (POST /import-receipt-links/:id/cancel).',
+        );
+      }
+
       const lines = await tx.purchaseReceiptLine.findMany({
         where: { purchaseReceiptId: locked.id },
         select: {
