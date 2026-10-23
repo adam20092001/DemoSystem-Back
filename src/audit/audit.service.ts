@@ -565,6 +565,14 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'method',
     'lineCount',
   ],
+  // IMPORT_RECEIPT_LINK_* (Fase B3). ImportReceiptLinksService es su
+  // único emisor. Nunca cantidades/montos — solo identificadores.
+  [AuditAction.IMPORT_RECEIPT_LINK_CREATED]: [
+    'importShipmentLineId',
+    'purchaseReceiptLineId',
+    'importReceiptLinkId',
+  ],
+  [AuditAction.IMPORT_RECEIPT_LINK_CANCELLED]: ['importReceiptLinkId'],
 };
 
 function isPlainObject(

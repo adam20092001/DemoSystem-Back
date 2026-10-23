@@ -269,4 +269,10 @@ export enum AuditAction {
   IMPORT_EXPENSE_FINALIZED = 'IMPORT_EXPENSE_FINALIZED',
   IMPORT_EXPENSE_CANCELLED = 'IMPORT_EXPENSE_CANCELLED',
   IMPORT_EXPENSE_ALLOCATED = 'IMPORT_EXPENSE_ALLOCATED',
+  // Fase B3 (vínculos de recepción física de importación).
+  // ImportReceiptLinksService es su único emisor. Nunca registra ningún
+  // efecto de inventario/contable (B3 nunca genera ninguno en esta fase:
+  // solo vincula y previsualiza) — solo identificadores/cantidades.
+  IMPORT_RECEIPT_LINK_CREATED = 'IMPORT_RECEIPT_LINK_CREATED',
+  IMPORT_RECEIPT_LINK_CANCELLED = 'IMPORT_RECEIPT_LINK_CANCELLED',
 }

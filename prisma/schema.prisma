@@ -237,6 +237,11 @@ model User {
   // creador, sin estado propio de aprobación/cancelación (ver CLAUDE.md
   // B2 §5: las asignaciones son inmutables una vez creadas).
   createdImportExpenseAllocationBatches ImportExpenseAllocationBatch[]
+  // Vínculos de recepción de importación (Fase B3): mismo criterio exacto
+  // que PurchaseInvoice/PurchaseReceipt/ImportShipment arriba (quien lo
+  // crea y, si aplica, quien lo cancela/desvincula).
+  createdImportReceiptLinks   ImportReceiptLink[] @relation("ImportReceiptLinkCreatedBy")
+  cancelledImportReceiptLinks ImportReceiptLink[] @relation("ImportReceiptLinkCancelledBy")
 
   @@index([status])
   @@map("users")
@@ -1122,6 +1127,11 @@ model PurchaseReceiptLine {
   // recepción se cancela) — nunca más, nunca menos de las que de verdad
   // ocurrieron.
   inventoryValuations InventoryValuation[]
+
+  // Fase B3: vínculos con líneas de embarque de importación que reclaman
+  // esta recepción física como su mercadería recibida — nunca un segundo
+  // movimiento de inventario, puramente operativo/de trazabilidad.
+  importReceiptLinks ImportReceiptLink[]
 
   // CHECK de cantidad positiva se agrega a mano en migration.sql.
   @@unique([purchaseReceiptId, purchaseInvoiceLineId])
@@ -3041,6 +3051,13 @@ model ImportShipmentLine {
   // silencioso.
   expenseAllocations ImportExpenseAllocation[]
 
+  // Fase B3: vínculos con recepciones físicas reales (PurchaseReceiptLine)
+  // que reclaman haber recibido el cargamento de ESTA línea — nunca un
+  // segundo movimiento de inventario, puramente operativo. Mientras exista
+  // al menos un vínculo ACTIVO, anular la recepción física referenciada
+  // queda bloqueado (ver PurchaseReceiptsService.cancel()).
+  receiptLinks ImportReceiptLink[]
+
   // Sin updatedAt: mientras el embarque es PLANNED, ImportShipmentsService
   // reemplaza el arreglo completo (deleteMany+createMany dentro de la MISMA
   // transacción que revalida la asignación), mismo patrón exacto que
@@ -3245,4 +3262,72 @@ model ImportExpenseAllocation {
   @@unique([batchId, importShipmentLineId])
   @@index([importShipmentLineId])
   @@map("import_expense_allocations")
+}
+
+// --- Vínculo de recepción física de importación (Fase B3) --------------
+
+// ACTIVE: vínculo vigente. CANCELLED: desvinculado explícitamente (nunca
+// eliminado físicamente) — la única vía de invalidación, mismo criterio
+// que el resto del dominio B1/B2.
+enum ImportReceiptLinkStatus {
+  ACTIVE
+  CANCELLED
+}
+
+/**
+ * Vínculo operativo entre UNA ImportShipmentLine (Fase B1) y UNA
+ * PurchaseReceiptLine real ya recibida (Fase A5.2b) — declara "este
+ * cargamento embarcado llegó físicamente a través de esta recepción".
+ * NUNCA genera un segundo movimiento de inventario ni modifica
+ * Product.stockCurrent/InventoryMovement: StockMovementEngine sigue
+ * siendo el único origen real de todo movimiento físico (CLAUDE.md B3
+ * §1: "A link does NOT generate a second inventory entry"). Una línea de
+ * embarque puede recibirse a través de VARIAS recepciones parciales
+ * (varios vínculos); una línea de recepción puede a su vez respaldar
+ * VARIAS líneas de embarque distintas cuando sea legítimo (p. ej. una
+ * recepción consolidada que cubre dos embarques).
+ */
+model ImportReceiptLink {
+  id String @id @default(uuid()) @db.Uuid
+
+  importShipmentLineId String             @map("import_shipment_line_id") @db.Uuid
+  importShipmentLine   ImportShipmentLine @relation(fields: [importShipmentLineId], references: [id], onDelete: Restrict)
+
+  purchaseReceiptLineId String              @map("purchase_receipt_line_id") @db.Uuid
+  purchaseReceiptLine   PurchaseReceiptLine @relation(fields: [purchaseReceiptLineId], references: [id], onDelete: Restrict)
+
+  // Cantidad reclamada por ESTE vínculo — nunca la cantidad total de
+  // ninguna de las dos líneas. La suma de vínculos ACTIVE de una misma
+  // ImportShipmentLine nunca excede su plannedQuantity; la suma de
+  // vínculos ACTIVE de una misma PurchaseReceiptLine nunca excede su
+  // quantity física recibida — verificado bajo lock transaccional por
+  // ImportReceiptLinksService, nunca por un CHECK de base de datos (exige
+  // agregación entre filas).
+  linkedQuantity Decimal @map("linked_quantity") @db.Decimal(14, 3)
+
+  status ImportReceiptLinkStatus @default(ACTIVE)
+
+  // Idempotencia (mismo criterio exacto que PurchaseReceipt.idempotencyKey,
+  // A5.2b): opcional, único por línea de embarque, nunca global.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("ImportReceiptLinkCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("ImportReceiptLinkCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  // Unicidad de idempotencyKey por línea de embarque — Postgres permite
+  // múltiples NULL sin colisión (mismo criterio exacto que
+  // PurchaseReceipt.[purchaseInvoiceId, idempotencyKey]). Los CHECK de
+  // cantidad positiva y consistencia de cancelación se agregan a mano en
+  // migration.sql.
+  @@unique([importShipmentLineId, idempotencyKey])
+  @@index([importShipmentLineId])
+  @@index([purchaseReceiptLineId])
+  @@map("import_receipt_links")
 }
