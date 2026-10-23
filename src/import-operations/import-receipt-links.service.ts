@@ -10,7 +10,7 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PrismaService } from '../database/prisma.service';
-import { computeProportionalAllocation } from './import-expense-allocation-calculator';
+import { computeCostAttributionSplit } from './import-receipt-cost-attribution';
 import {
   IMPORT_RECEIPT_LINK_SAFE_SELECT,
   toSafeImportReceiptLink,
@@ -340,50 +340,25 @@ export class ImportReceiptLinksService {
       orderBy: { id: 'asc' },
     });
 
-    // El monto asignado es proporcional a toda la cantidad EMBARCADA
-    // (plannedQuantity), nunca solo a lo ya vinculado: repartir únicamente
-    // entre los vínculos ACTIVE (base = su propia suma) sobreatribuía el
-    // 100% del gasto a una recepción parcial. La porción correspondiente a
-    // lo todavía SIN vincular se aísla con un objetivo virtual (nunca
-    // expuesto en `lines`) que, al ir último, absorbe el residual exacto
-    // de redondeo — cuando la cantidad recibida ya iguala lo embarcado, su
-    // peso es 0 y el último vínculo ACTIVO real vuelve a absorber el
-    // residual exacto, igual que antes (CLAUDE.md B3 §4: "amount
-    // attributed never exceeds approved eligible amount").
-    const plannedQuantity = allocation.importShipmentLine.plannedQuantity;
-    const receivedQuantity = activeLinks.reduce(
-      (sum, link) => sum.plus(link.linkedQuantity),
-      ZERO,
+    // Núcleo de cálculo extraído a import-receipt-cost-attribution.ts (B4
+    // lo reutiliza textualmente para sus reportes de reconciliación) — ver
+    // ese archivo para el razonamiento completo del reparto y el residual.
+    const split = computeCostAttributionSplit(
+      activeLinks.map((link) => ({
+        key: link.id,
+        weight: link.linkedQuantity,
+      })),
+      allocation.importShipmentLine.plannedQuantity,
+      allocation.amount,
     );
-    const unreceivedQuantity = plannedQuantity.minus(receivedQuantity);
 
-    const targets = activeLinks.map((link) => ({
-      importShipmentLineId: link.id,
-      weight: link.linkedQuantity,
-    }));
-    if (unreceivedQuantity.greaterThan(0)) {
-      targets.push({
-        importShipmentLineId: '__unattributed__',
-        weight: unreceivedQuantity,
-      });
-    }
-
-    const results =
-      targets.length === 0
-        ? []
-        : computeProportionalAllocation(targets, allocation.amount);
-
-    const lines = activeLinks.map((link, index) => ({
+    const lines = activeLinks.map((link) => ({
       purchaseReceiptLineId: link.purchaseReceiptLineId,
       importReceiptLinkId: link.id,
       receivedQuantity: link.linkedQuantity.toFixed(3),
-      attributedAmount: results[index].amount.toFixed(2),
+      attributedAmount: (split.perKey.get(link.id) ?? ZERO).toFixed(2),
     }));
-    const unattributedAmount = (
-      unreceivedQuantity.greaterThan(0)
-        ? results[results.length - 1].amount
-        : ZERO
-    ).toFixed(2);
+    const unattributedAmount = split.unattributedAmount.toFixed(2);
 
     const currencyCode = allocation.batch.importExpense.currencyCode;
     const companySettings = await this.settingsReader.getCurrent();

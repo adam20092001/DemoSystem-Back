@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ExcelExportService } from '../common/excel/excel-export.service';
 import { ConfigurationModule } from '../configuration/configuration.module';
 import {
   ImportExpensesController,
@@ -13,6 +14,8 @@ import {
   ImportShipmentLineReceiptLinksController,
 } from './import-receipt-links.controller';
 import { ImportReceiptLinksService } from './import-receipt-links.service';
+import { ImportReportsController } from './import-reports.controller';
+import { ImportReportsService } from './import-reports.service';
 import { ImportShipmentsController } from './import-shipments.controller';
 import { ImportShipmentsService } from './import-shipments.service';
 
@@ -28,6 +31,12 @@ import { ImportShipmentsService } from './import-shipments.service';
  * ConfigurationModule se importa únicamente por SettingsReader (Fase B3:
  * ImportReceiptLinksService.previewCostAttribution() lo usa para comparar
  * la moneda del gasto contra la de la empresa, nunca para convertir).
+ *
+ * Fase B4 (reportes y reconciliación): agrega ImportReportsController/
+ * Service, de SOLO LECTURA — nunca escribe ninguna tabla, nunca activa
+ * capitalización/FX/mapeos contables. Reutiliza ExcelExportService (mismo
+ * patrón que AccountingModule) y `computeCostAttributionSplit` (B3) para
+ * nunca reimplementar el cálculo de atribución de costo.
  */
 @Module({
   imports: [ConfigurationModule],
@@ -39,12 +48,15 @@ import { ImportShipmentsService } from './import-shipments.service';
     ImportShipmentLineReceiptLinksController,
     ImportReceiptLinksController,
     ImportExpenseAllocationCostPreviewController,
+    ImportReportsController,
   ],
   providers: [
     ImportOperationsService,
     ImportShipmentsService,
     ImportExpensesService,
     ImportReceiptLinksService,
+    ImportReportsService,
+    ExcelExportService,
   ],
   exports: [
     ImportOperationsService,
