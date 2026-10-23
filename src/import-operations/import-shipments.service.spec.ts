@@ -94,6 +94,11 @@ function createTxMock() {
       createMany: jest.fn<Promise<unknown>, [unknown]>(),
       groupBy: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
+    // Fase B2: guarda contra anulación/reemplazo de líneas con
+    // asignaciones de gasto activas.
+    importExpenseAllocation: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
     product: {
       findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
@@ -137,6 +142,7 @@ describe('ImportShipmentsService', () => {
       { id: OPERATION_ID, status: ImportOperationStatus.DRAFT },
     ]);
     prisma.tx.importShipmentLine.groupBy.mockResolvedValue([]);
+    prisma.tx.importExpenseAllocation.findFirst.mockResolvedValue(null);
     prisma.tx.product.findMany.mockResolvedValue([]);
     service = new ImportShipmentsService(
       prisma as unknown as PrismaService,
@@ -434,6 +440,28 @@ describe('ImportShipmentsService', () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
+
+    it('Fase B2: reemplazar líneas con asignaciones de gasto activas: ConflictException, nunca borra', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        {
+          id: SHIPMENT_ID,
+          importOperationId: OPERATION_ID,
+          status: ImportShipmentStatus.PLANNED,
+        },
+      ]);
+      prisma.tx.importExpenseAllocation.findFirst.mockResolvedValue({
+        id: 'alloc-1',
+      });
+      await expect(
+        service.update({
+          importShipmentId: SHIPMENT_ID,
+          lines: [basicLine({ plannedQuantity: '5.000' })],
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.tx.importShipmentLine.deleteMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('depart', () => {
@@ -557,6 +585,28 @@ describe('ImportShipmentsService', () => {
         ipAddress: null,
       });
       expect(result.status).toBe(ImportShipmentStatus.CANCELLED);
+    });
+
+    it('Fase B2: anular con asignaciones de gasto activas: ConflictException, nunca anula', async () => {
+      prisma.tx.$queryRaw.mockResolvedValue([
+        {
+          id: SHIPMENT_ID,
+          importOperationId: OPERATION_ID,
+          status: ImportShipmentStatus.PLANNED,
+        },
+      ]);
+      prisma.tx.importExpenseAllocation.findFirst.mockResolvedValue({
+        id: 'alloc-1',
+      });
+      await expect(
+        service.cancel({
+          importShipmentId: SHIPMENT_ID,
+          reason: 'motivo de prueba',
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.tx.importShipment.update).not.toHaveBeenCalled();
     });
   });
 
