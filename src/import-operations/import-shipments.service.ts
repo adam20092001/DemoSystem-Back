@@ -327,6 +327,12 @@ export class ImportShipmentsService {
 
       let lineCount: number | undefined;
       if (input.lines !== undefined) {
+        // Fase B2: nunca reemplazar silenciosamente líneas con
+        // asignaciones de gasto activas (CLAUDE.md B2 §5: "Return a clear
+        // 409 rather than cascading silently") — un ON DELETE Restrict de
+        // la FK lo impediría igual a nivel de base de datos, pero esto da
+        // un error de negocio claro ANTES de intentar el delete.
+        await this.assertNoActiveExpenseAllocations(tx, input.importShipmentId);
         await tx.importShipmentLine.deleteMany({
           where: { importShipmentId: input.importShipmentId },
         });
@@ -473,6 +479,11 @@ export class ImportShipmentsService {
         );
       }
 
+      // Fase B2: nunca anular un embarque con asignaciones de gasto
+      // activas apuntando a sus líneas (CLAUDE.md B2 §5) — 409 explícito,
+      // nunca cascada silenciosa.
+      await this.assertNoActiveExpenseAllocations(tx, input.importShipmentId);
+
       const previousStatus = locked.status;
       const updated = await tx.importShipment.update({
         where: { id: input.importShipmentId },
@@ -539,6 +550,28 @@ export class ImportShipmentsService {
       throw new NotFoundException('Embarque de importación no encontrado');
     }
     return row;
+  }
+
+  /**
+   * Fase B2: bloquea (409) si alguna línea ACTUAL de este embarque tiene
+   * al menos una ImportExpenseAllocation — nunca permite que la
+   * anulación del embarque o el reemplazo de sus líneas deje asignaciones
+   * de gasto apuntando a cargamento inválido/inexistente (CLAUDE.md B2
+   * §5: "Return a clear 409 rather than cascading silently").
+   */
+  private async assertNoActiveExpenseAllocations(
+    tx: Prisma.TransactionClient,
+    importShipmentId: string,
+  ): Promise<void> {
+    const existing = await tx.importExpenseAllocation.findFirst({
+      where: { importShipmentLine: { importShipmentId } },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new ConflictException(
+        'No se puede anular ni reemplazar las líneas de este embarque: tiene asignaciones de gasto de importación registradas contra su cargamento',
+      );
+    }
   }
 
   /**

@@ -1,4 +1,9 @@
 import { Module } from '@nestjs/common';
+import {
+  ImportExpensesController,
+  ImportOperationExpensesController,
+} from './import-expenses.controller';
+import { ImportExpensesService } from './import-expenses.service';
 import { ImportOperationsController } from './import-operations.controller';
 import { ImportOperationsService } from './import-operations.service';
 import { ImportShipmentsController } from './import-shipments.controller';
@@ -15,8 +20,21 @@ import { ImportShipmentsService } from './import-shipments.service';
  * CLAUDE.md B1 §4, separación crítica).
  */
 @Module({
-  controllers: [ImportOperationsController, ImportShipmentsController],
-  providers: [ImportOperationsService, ImportShipmentsService],
-  exports: [ImportOperationsService, ImportShipmentsService],
+  controllers: [
+    ImportOperationsController,
+    ImportShipmentsController,
+    ImportOperationExpensesController,
+    ImportExpensesController,
+  ],
+  providers: [
+    ImportOperationsService,
+    ImportShipmentsService,
+    ImportExpensesService,
+  ],
+  exports: [
+    ImportOperationsService,
+    ImportShipmentsService,
+    ImportExpensesService,
+  ],
 })
 export class ImportOperationsModule {}

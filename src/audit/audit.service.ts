@@ -551,6 +551,20 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'importShipmentId',
     'previousStatus',
   ],
+  // IMPORT_EXPENSE_* (Fase B2). ImportExpensesService es su único emisor.
+  [AuditAction.IMPORT_EXPENSE_CREATED]: [
+    'importOperationId',
+    'importExpenseId',
+  ],
+  [AuditAction.IMPORT_EXPENSE_UPDATED]: ['importExpenseId', 'updatedFields'],
+  [AuditAction.IMPORT_EXPENSE_FINALIZED]: ['importExpenseId'],
+  [AuditAction.IMPORT_EXPENSE_CANCELLED]: ['importExpenseId'],
+  [AuditAction.IMPORT_EXPENSE_ALLOCATED]: [
+    'importExpenseId',
+    'batchId',
+    'method',
+    'lineCount',
+  ],
 };
 
 function isPlainObject(

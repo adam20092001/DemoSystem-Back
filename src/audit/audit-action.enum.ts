@@ -259,4 +259,14 @@ export enum AuditAction {
   IMPORT_SHIPMENT_DEPARTED = 'IMPORT_SHIPMENT_DEPARTED',
   IMPORT_SHIPMENT_ARRIVED = 'IMPORT_SHIPMENT_ARRIVED',
   IMPORT_SHIPMENT_CANCELLED = 'IMPORT_SHIPMENT_CANCELLED',
+  // Fase B2 (gastos de importación y asignación de costo).
+  // ImportExpensesService es su único emisor. Nunca registra monto/moneda
+  // ni el detalle de líneas asignadas — solo identificadores/estados/
+  // conteos, mismo criterio que el resto del dominio. B2 nunca audita un
+  // efecto contable/de inventario porque nunca genera ninguno.
+  IMPORT_EXPENSE_CREATED = 'IMPORT_EXPENSE_CREATED',
+  IMPORT_EXPENSE_UPDATED = 'IMPORT_EXPENSE_UPDATED',
+  IMPORT_EXPENSE_FINALIZED = 'IMPORT_EXPENSE_FINALIZED',
+  IMPORT_EXPENSE_CANCELLED = 'IMPORT_EXPENSE_CANCELLED',
+  IMPORT_EXPENSE_ALLOCATED = 'IMPORT_EXPENSE_ALLOCATED',
 }

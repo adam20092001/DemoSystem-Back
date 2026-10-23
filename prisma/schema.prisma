@@ -227,6 +227,16 @@ model User {
   // quien lo anula).
   createdImportShipments   ImportShipment[]      @relation("ImportShipmentCreatedBy")
   cancelledImportShipments ImportShipment[]      @relation("ImportShipmentCancelledBy")
+  // Gastos de importación (Fase B2): tres relaciones nombradas, mismo
+  // criterio exacto que ImportOperation arriba (quien lo crea, quien lo
+  // finaliza y, si aplica, quien lo cancela).
+  createdImportExpenses   ImportExpense[]                @relation("ImportExpenseCreatedBy")
+  finalizedImportExpenses ImportExpense[]                @relation("ImportExpenseFinalizedBy")
+  cancelledImportExpenses ImportExpense[]                @relation("ImportExpenseCancelledBy")
+  // Lotes de asignación de gasto de importación (Fase B2): un único
+  // creador, sin estado propio de aprobación/cancelación (ver CLAUDE.md
+  // B2 §5: las asignaciones son inmutables una vez creadas).
+  createdImportExpenseAllocationBatches ImportExpenseAllocationBatch[]
 
   @@index([status])
   @@map("users")
@@ -756,6 +766,12 @@ model Supplier {
   // Fase A5.3: pagos registrados a este proveedor.
   supplierPayments SupplierPayment[]
 
+  // Fase B2: gastos de importación opcionalmente atribuidos a este
+  // proveedor (nunca el único proveedor de la ImportOperation — un gasto
+  // de importación puede pertenecer a un proveedor DISTINTO del de la
+  // mercadería, CLAUDE.md B2 §1).
+  importExpenses ImportExpense[]
+
   // Las 3 CHECK y el índice único funcional (documentType+countryCode+
   // UPPER(BTRIM(documentNumber))) se añaden a mano en migration.sql (mismo
   // motivo que Customer: el DSL de Prisma no expresa CHECK, UPPER() ni
@@ -983,6 +999,12 @@ model PurchaseInvoiceLine {
   // tiempo de lectura (suma de ImportShipmentLine.plannedQuantity de
   // embarques no CANCELLED que apuntan aquí) — nunca una columna duplicada.
   importShipmentLines ImportShipmentLine[]
+
+  // Fase B2: gastos de importación que opcionalmente referencian esta
+  // línea — nunca modifica esta factura; PurchaseInvoice sigue siendo la
+  // única fuente de verdad financiera cuando un gasto la referencia
+  // (CLAUDE.md B2 §1/§2).
+  importExpenses ImportExpense[]
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -2889,6 +2911,12 @@ model ImportOperation {
 
   shipments ImportShipment[]
 
+  // Fase B2: gastos de importación de esta operación (fletes, seguros,
+  // aduanas, etc.) — nunca bloqueados por el estado logístico de la
+  // operación (CLAUDE.md B2 §5: "Logistical completion of an
+  // ImportOperation must NOT prevent later expense recording").
+  expenses ImportExpense[]
+
   // El índice único funcional sobre reference y los CHECK de consistencia
   // de completado/cancelación se agregan a mano en migration.sql (mismo
   // motivo que Supplier/PurchaseInvoice: el DSL de Prisma no expresa
@@ -3006,6 +3034,13 @@ model ImportShipmentLine {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  // Fase B2: asignaciones de gasto de importación que reparten su costo
+  // contra ESTA línea. Mientras exista al menos una, ImportShipmentsService
+  // bloquea con 409 tanto la anulación del embarque como el reemplazo del
+  // arreglo de líneas (CLAUDE.md B2 §5) — nunca un ON DELETE CASCADE
+  // silencioso.
+  expenseAllocations ImportExpenseAllocation[]
+
   // Sin updatedAt: mientras el embarque es PLANNED, ImportShipmentsService
   // reemplaza el arreglo completo (deleteMany+createMany dentro de la MISMA
   // transacción que revalida la asignación), mismo patrón exacto que
@@ -3015,4 +3050,199 @@ model ImportShipmentLine {
   @@index([productId])
   @@index([purchaseInvoiceLineId])
   @@map("import_shipment_lines")
+}
+
+// --- Gastos de importación y asignación de costo (Fase B2) -------------
+
+// Categorías DESCRIPTIVAS (CLAUDE.md B2 §1/§2) — nunca una clasificación
+// contable automática. Qué cuenta/tratamiento corresponde a cada una es
+// una decisión del contador, todavía no tomada ni codificada aquí.
+enum ImportExpenseCategory {
+  FREIGHT
+  INSURANCE
+  CUSTOMS_DUTY
+  PORT_HANDLING
+  STORAGE
+  INLAND_TRANSPORT
+  OTHER
+}
+
+// Tipo de documento soporte, también descriptivo — nunca implica un
+// tratamiento tributario/contable específico.
+enum ImportExpenseDocumentType {
+  INVOICE
+  RECEIPT
+  DEBIT_NOTE
+  OTHER
+}
+
+// DRAFT: editable libremente (categoría, proveedor, documento, monto,
+// moneda, etc.). FINALIZED: cabecera inmutable (ver CHECK), pero sigue
+// admitiendo nuevas asignaciones — el cierre logístico de la
+// ImportOperation NUNCA bloquea el registro de gastos (CLAUDE.md B2 §5).
+// CANCELLED: terminal, bloqueado mientras existan asignaciones activas
+// (ImportExpensesService lo verifica explícitamente, nunca a través de un
+// ON DELETE CASCADE).
+enum ImportExpenseStatus {
+  DRAFT
+  FINALIZED
+  CANCELLED
+}
+
+// QUANTITY/WEIGHT/VOLUME: reparto proporcional determinista (residual
+// exacto en la última línea, mismo criterio que A5.2b/A6.1). MANUAL:
+// montos explícitos por línea, provistos tal cual por quien asigna.
+enum ImportExpenseAllocationMethod {
+  QUANTITY
+  WEIGHT
+  VOLUME
+  MANUAL
+}
+
+/**
+ * Gasto de importación (Fase B2) — fletes, seguros, aduanas, manipuleo
+ * portuario, almacenaje, transporte interno u otro, asociado a UNA
+ * ImportOperation (nunca a un único ImportShipment: un gasto como el
+ * flete consolidado puede cubrir varios embarques de la misma operación).
+ * Arquitectura genérica, reutilizable por cualquier industria.
+ *
+ * supplierId y purchaseInvoiceLineId son SIEMPRE opcionales e
+ * INDEPENDIENTES entre sí y del proveedor de la mercadería: un gasto de
+ * importación puede pertenecer a un agente de carga/aduanas totalmente
+ * distinto (CLAUDE.md B2 §1). Si referencia una PurchaseInvoiceLine, esa
+ * factura sigue siendo la ÚNICA fuente de verdad financiera — este modelo
+ * NUNCA crea una obligación por pagar propia (sin SupplierPayment, sin
+ * AccountingEntry): ver CLAUDE.md B2 §2, separación crítica.
+ *
+ * currencyCode/amount preservan el documento ORIGINAL tal cual — nunca
+ * convertidos a la moneda de la empresa (CLAUDE.md B2 §4): no existe
+ * ninguna tasa de cambio en este modelo ni en ningún cálculo de B2.
+ */
+model ImportExpense {
+  id String @id @default(uuid()) @db.Uuid
+
+  importOperationId String          @map("import_operation_id") @db.Uuid
+  importOperation   ImportOperation @relation(fields: [importOperationId], references: [id], onDelete: Restrict)
+
+  category    ImportExpenseCategory
+  description String?               @db.VarChar(300)
+
+  supplierId String?   @map("supplier_id") @db.Uuid
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  // Vínculo OPCIONAL hacia una línea de factura de compra real (A5.2a) —
+  // nunca modifica esa factura. Igual criterio de verificación que
+  // ImportShipmentLine.purchaseInvoiceLineId: ImportExpensesService exige
+  // que la factura esté CONFIRMED al vincularla.
+  purchaseInvoiceLineId String?              @map("purchase_invoice_line_id") @db.Uuid
+  purchaseInvoiceLine   PurchaseInvoiceLine? @relation(fields: [purchaseInvoiceLineId], references: [id], onDelete: Restrict)
+
+  documentType      ImportExpenseDocumentType? @map("document_type")
+  documentReference String?                    @map("document_reference") @db.VarChar(100)
+
+  expenseDate DateTime @map("expense_date") @db.Date
+
+  // SIEMPRE el documento original, nunca convertido (CLAUDE.md B2 §4).
+  currencyCode String  @map("currency_code") @db.VarChar(3)
+  amount       Decimal @db.Decimal(14, 2)
+
+  remarks String? @db.VarChar(1000)
+
+  status ImportExpenseStatus @default(DRAFT)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation("ImportExpenseCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  finalizedAt       DateTime? @map("finalized_at")
+  finalizedByUserId String?   @map("finalized_by_user_id") @db.Uuid
+  finalizedBy       User?     @relation("ImportExpenseFinalizedBy", fields: [finalizedByUserId], references: [id], onDelete: Restrict)
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledBy        User?     @relation("ImportExpenseCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  cancellationReason String?   @map("cancellation_reason") @db.VarChar(300)
+
+  allocationBatches ImportExpenseAllocationBatch[]
+
+  // El CHECK de moneda (formato ISO 4217, 3 letras mayúsculas), monto
+  // positivo, y consistencia de finalizado/cancelación se agregan a mano
+  // en migration.sql.
+  @@index([importOperationId])
+  @@index([status, createdAt])
+  @@map("import_expenses")
+}
+
+/**
+ * UN lote de asignación (Fase B2) — resultado de UNA llamada a
+ * POST /import-expenses/:id/allocate. Agrupa el método elegido, el monto
+ * EXPLÍCITAMENTE seleccionado para ESTE lote (`requestedAmount` — nunca
+ * asumido como `ImportExpense.amount` completo: CLAUDE.md B2 §3, "An
+ * allocation calculation is NOT proof that the amount is approved for
+ * capitalization") y sus líneas resultantes. Varios lotes pueden existir
+ * para el mismo gasto (asignación incremental/parcial); la suma de
+ * `requestedAmount` de todos los lotes ACTIVOS de un gasto nunca excede
+ * `ImportExpense.amount` (verificado bajo lock, ver ImportExpensesService).
+ * Inmutable una vez creado — sin edición ni cancelación individual en esta
+ * fase (ver ImportExpenseStatus.CANCELLED más arriba para la única vía de
+ * invalidación, bloqueada mientras existan lotes).
+ */
+model ImportExpenseAllocationBatch {
+  id String @id @default(uuid()) @db.Uuid
+
+  importExpenseId String        @map("import_expense_id") @db.Uuid
+  importExpense   ImportExpense @relation(fields: [importExpenseId], references: [id], onDelete: Restrict)
+
+  method          ImportExpenseAllocationMethod
+  requestedAmount Decimal                        @map("requested_amount") @db.Decimal(14, 2)
+
+  // Idempotencia (mismo criterio exacto que PurchaseReceipt.idempotencyKey,
+  // A5.2b): opcional, único por gasto, nunca global. Postgres permite
+  // múltiples NULL en este índice único sin colisión.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  allocations ImportExpenseAllocation[]
+
+  // El CHECK de requestedAmount positivo se agrega a mano en migration.sql.
+  @@unique([importExpenseId, idempotencyKey])
+  @@index([importExpenseId])
+  @@map("import_expense_allocation_batches")
+}
+
+/**
+ * UNA línea de un lote de asignación (Fase B2): cuánto de
+ * `batch.requestedAmount` corresponde a UNA ImportShipmentLine concreta.
+ * `amount` SIEMPRE en la moneda del ImportExpense (nunca convertida) —
+ * nunca se suma junto a asignaciones de un gasto en OTRA moneda (CLAUDE.md
+ * B2 §4). Inmutable; nunca se edita ni se elimina individualmente (solo
+ * desaparece si el lote completo se elimina en cascada, lo que en la
+ * práctica nunca ocurre: ningún endpoint elimina un
+ * ImportExpenseAllocationBatch).
+ */
+model ImportExpenseAllocation {
+  id String @id @default(uuid()) @db.Uuid
+
+  batchId String                       @map("batch_id") @db.Uuid
+  batch   ImportExpenseAllocationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  importShipmentLineId String             @map("import_shipment_line_id") @db.Uuid
+  importShipmentLine   ImportShipmentLine @relation(fields: [importShipmentLineId], references: [id], onDelete: Restrict)
+
+  amount Decimal @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Nunca dos filas para la MISMA línea en el MISMO lote (defensa en
+  // profundidad; el servicio ya las deduplica por construcción). El CHECK
+  // de amount positivo se agrega a mano en migration.sql.
+  @@unique([batchId, importShipmentLineId])
+  @@index([importShipmentLineId])
+  @@map("import_expense_allocations")
 }
