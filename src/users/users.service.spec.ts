@@ -434,6 +434,27 @@ describe('UsersService', () => {
     });
   });
 
+  describe('listRoles', () => {
+    it('deriva siempre de Object.values(RoleName), sin tocar Prisma ni auditoría', () => {
+      const result = service.listRoles();
+
+      expect(result).toEqual(Object.values(RoleName).map((name) => ({ name })));
+      expect(prisma.user.findMany).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('incluye ADMIN y nunca duplica ni inventa un valor fuera del enum', () => {
+      const result = service.listRoles();
+      const names = result.map((r) => r.name);
+
+      expect(names).toContain(RoleName.ADMIN);
+      expect(new Set(names).size).toBe(names.length);
+      for (const name of names) {
+        expect(Object.values(RoleName)).toContain(name);
+      }
+    });
+  });
+
   describe('findUserById', () => {
     it('devuelve la forma segura cuando el usuario existe', async () => {
       prisma.user.findUnique.mockResolvedValue(makeUserRow());

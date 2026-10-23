@@ -26,6 +26,7 @@ import {
 import { CreateUserInput } from './types/create-user.input';
 import { ListUsersQuery, PaginatedResult } from './types/list-users.query';
 import { ResetPasswordResult } from './types/reset-password.result';
+import { RoleOption } from './types/role-option';
 import { SafeUser } from './types/safe-user';
 import { UpdateUserInput } from './types/update-user.input';
 import { UserLookupItem } from './types/user-lookup-item';
@@ -167,6 +168,18 @@ export class UsersService {
         { id: 'asc' },
       ],
     });
+  }
+
+  /**
+   * Los roles del sistema son el enum de Prisma `RoleName`, no registros
+   * dinámicos en una tabla: esta lista se deriva SIEMPRE de
+   * `Object.values(RoleName)` (mismo criterio ya usado por el seed de
+   * roles y por el validador `@IsEnum(RoleName)` de `UpdateUserDto`),
+   * nunca de un arreglo duplicado a mano que pudiera desincronizarse si
+   * el enum cambia.
+   */
+  listRoles(): RoleOption[] {
+    return Object.values(RoleName).map((name) => ({ name }));
   }
 
   async findUserById(id: string): Promise<SafeUser> {
