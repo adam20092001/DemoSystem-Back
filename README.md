@@ -415,6 +415,48 @@ aplicación **requiere** esa migración: en una base existente, aplicarla con
 `npm run prisma:deploy` (tras un backup) antes de arrancar. Para verificar el
 estado sin modificar nada: `npx prisma migrate status`.
 
+### Corrección del orden de migraciones (P3018, A6.1)
+
+Reconstruir la base desde cero fallaba con `P3018`: la migración de Inventory
+Valuation (A6.1) creaba una clave foránea hacia `purchase_receipt_lines`, tabla
+que crea la migración de Purchase Receipts (A5.2b), que por su nombre se
+ordenaba **después**. Nunca falló en bases incrementales porque se aplicaron en
+el orden de desarrollo.
+
+| | Nombre |
+|---|---|
+| Anterior | `20261022000000_add_inventory_valuation` |
+| Nuevo | `20261023120000_add_inventory_valuation` |
+
+El contenido de `migration.sql` es idéntico (solo cambia el nombre de la
+carpeta). Las **instalaciones nuevas** usan directamente el historial corregido
+(`npm run prisma:deploy` desde cero) y no requieren ningún paso adicional.
+
+**Bases existentes** (las que ya aplicaron A6.1 con el nombre anterior): antes
+de ejecutar cualquier migración con el historial nuevo hay que reconciliar el
+nombre registrado en `_prisma_migrations`. Si se ejecuta `migrate deploy` antes,
+Prisma ve la migración con el nombre nuevo como pendiente, intenta recrear
+objetos que ya existen, falla con `P3018` y deja una fila fallida que bloquea
+despliegues posteriores. Renombrar una migración ya aplicada **no es una
+operación documentada oficialmente por Prisma**, por lo que se hace con un
+procedimiento controlado, nunca con `migrate resolve` (no renombra):
+
+1. Congelar despliegues y `migrate deploy`/`migrate dev` contra esa base.
+2. Respaldar la base (`pg_dump`) y la tabla `_prisma_migrations`.
+3. Verificar que la fila anterior existe, está terminada (`finished_at` no nulo,
+   `rolled_back_at` nulo) y que su checksum coincide con el SHA-256 de
+   `migration.sql` (con CRLF o con LF; Prisma acepta ambas variantes).
+4. En una transacción, cambiar `migration_name` del nombre anterior al nuevo
+   con esa misma condición y **confirmar solo si afecta exactamente 1 fila**.
+5. Comprobar `npx prisma migrate status` ("up to date") y que
+   `migrate deploy` aplica 0 migraciones.
+
+Reversión: la operación inversa con la misma guarda, o restaurar el respaldo.
+Reconciliación y reversión ya se verificaron en copias aisladas; esa
+verificación **no** se ha ejecutado sobre `pos_db` ni `pos_db_test`.
+Coordinar el merge y la reconciliación en una misma ventana controlada, sin
+`migrate deploy` intermedio. Una base que aún no aplicó A6.1 no necesita nada.
+
 ### Base de datos de pruebas (pos_db_test)
 
 Completamente independiente de `pos_db`: contenedor, puerto (`5433` por
