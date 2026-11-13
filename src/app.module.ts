@@ -21,6 +21,7 @@ import { PurchaseReceiptsModule } from './purchase-receipts/purchase-receipts.mo
 import { QuotesModule } from './quotes/quotes.module';
 import { ReportsModule } from './reports/reports.module';
 import { SalesModule } from './sales/sales.module';
+import { SireDemoModule } from './sire-demo/sire-demo.module';
 import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { UnitsModule } from './units/units.module';
@@ -58,6 +59,9 @@ import { UsersModule } from './users/users.module';
     ConfigurationModule,
     ElectronicInvoicingModule,
     HealthModule,
+    // SIRE DEMO: apagado por defecto (fail-closed). Con SIRE_DEMO_ENABLED=false
+    // el módulo queda vacío: sin rutas ni Swagger. Ver sire-demo.flags.ts.
+    SireDemoModule.register(),
   ],
 })
 export class AppModule {}
