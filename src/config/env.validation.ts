@@ -11,6 +11,10 @@ import {
   MinLength,
   validateSync,
 } from 'class-validator';
+import {
+  SireDemoConfigError,
+  resolveSireDemoFlags,
+} from '../sire-demo/sire-demo.flags';
 
 export enum NodeEnv {
   Development = 'development',
@@ -115,6 +119,22 @@ export class EnvironmentVariables {
     message: 'ELECTRONIC_INVOICING_PROVIDER debe ser: mock',
   })
   ELECTRONIC_INVOICING_PROVIDER!: ElectronicInvoicingProviderCode;
+
+  /**
+   * SIRE DEMO (solo demostración, sin comunicación con SUNAT). Todo apagado por
+   * defecto: sin SIRE_DEMO_ENABLED=true el módulo entero no existe (404).
+   * Las combinaciones prohibidas se validan en resolveSireDemoFlags().
+   */
+  @IsBoolean({ message: 'SIRE_DEMO_ENABLED debe ser true o false' })
+  SIRE_DEMO_ENABLED!: boolean;
+
+  @IsBoolean({ message: 'SIRE_DEMO_FIXTURES_ENABLED debe ser true o false' })
+  SIRE_DEMO_FIXTURES_ENABLED!: boolean;
+
+  @IsBoolean({
+    message: 'SIRE_DEMO_ALLOW_IN_PRODUCTION debe ser true o false',
+  })
+  SIRE_DEMO_ALLOW_IN_PRODUCTION!: boolean;
 }
 
 /**
@@ -173,6 +193,12 @@ export function validateEnv(
     ),
     ELECTRONIC_INVOICING_PROVIDER:
       raw.ELECTRONIC_INVOICING_PROVIDER ?? ElectronicInvoicingProviderCode.Mock,
+    SIRE_DEMO_ENABLED: toBool(raw.SIRE_DEMO_ENABLED, false),
+    SIRE_DEMO_FIXTURES_ENABLED: toBool(raw.SIRE_DEMO_FIXTURES_ENABLED, false),
+    SIRE_DEMO_ALLOW_IN_PRODUCTION: toBool(
+      raw.SIRE_DEMO_ALLOW_IN_PRODUCTION,
+      false,
+    ),
   };
 
   const config = plainToInstance(EnvironmentVariables, normalized);
@@ -205,6 +231,25 @@ export function validateEnv(
         'con NODE_ENV=production.\n\n' +
         'Usa lax o strict en entornos no productivos, o cambia NODE_ENV a production.',
     );
+  }
+
+  // SIRE DEMO: combinaciones prohibidas (fixtures sin módulo; módulo en
+  // producción sin autorización explícita). Misma función pura que usa el
+  // registro del módulo, para que ambos nunca puedan discrepar.
+  try {
+    resolveSireDemoFlags({
+      NODE_ENV: config.NODE_ENV,
+      SIRE_DEMO_ENABLED: config.SIRE_DEMO_ENABLED,
+      SIRE_DEMO_FIXTURES_ENABLED: config.SIRE_DEMO_FIXTURES_ENABLED,
+      SIRE_DEMO_ALLOW_IN_PRODUCTION: config.SIRE_DEMO_ALLOW_IN_PRODUCTION,
+    });
+  } catch (error) {
+    if (error instanceof SireDemoConfigError) {
+      throw new Error(
+        `Configuración de entorno inválida:\n  - ${error.message}`,
+      );
+    }
+    throw error;
   }
 
   return config;
