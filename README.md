@@ -245,6 +245,50 @@ completa en `CLAUDE.md` y en el código de
 `src/electronic-invoicing/electronic-documents.service.ts`; no se repite
 aquí en detalle.)
 
+## SIRE DEMO (demostración; sin SUNAT)
+
+Módulo de **demostración** que simula el flujo del SIRE (RVIE: registro de ventas e ingresos; RCE: registro de
+compras): previsualiza los documentos del periodo, permite cargar una "propuesta" y la concilia contra los datos
+del sistema. **No se comunica con SUNAT**, no genera tickets, constancias ni códigos CAR, y los comprobantes
+electrónicos MOCK no tienen validez fiscal. Contratos REST para el frontend: [docs/sire-demo-api.md](docs/sire-demo-api.md).
+
+**Variables** (todas `false` por defecto; solo aceptan `true`/`false`; ver `.env.example`):
+
+| Variable | Efecto |
+|---|---|
+| `SIRE_DEMO_ENABLED` | Interruptor maestro. En `false` el módulo no existe: sus rutas responden 404 y no aparecen en Swagger. |
+| `SIRE_DEMO_FIXTURES_ENABLED` | Habilita el origen `DEMO_FIXTURES` (datos sintéticos versionados). Sin `SIRE_DEMO_ENABLED=true` el arranque falla. |
+| `SIRE_DEMO_ALLOW_IN_PRODUCTION` | Con `NODE_ENV=production`, `SIRE_DEMO_ENABLED=true` exige esta autorización explícita; sin ella el arranque falla. |
+
+**Orígenes** (nunca se mezclan): `POS` (solo lectura de `ElectronicDocument` ACCEPTED para RVIE y de
+`PurchaseInvoice` CONFIRMED para RCE) y `DEMO_FIXTURES` (conjunto versionado `demo-fixtures-v1`, sin acceso a la
+base de datos; la propuesta guarda su versión y nunca se sustituye por otra).
+
+**Rutas** (`/api/v1/sire-demo`, 8): `context`, `registers/:register/documents`, `registers/:register/sample-file`,
+`POST proposals`, `GET proposals`, `POST proposals/:id/discard`, `GET proposals/:id/reconciliation`,
+`GET proposals/:id/reconciliation/export.xlsx`. ADMIN y ACCOUNTANT leen y escriben; MANAGEMENT solo lee;
+SELLER y WAREHOUSE no tienen acceso.
+
+**Cómo ejecutar la demostración** (sin tocar datos comerciales):
+
+1. En `.env`: `SIRE_DEMO_ENABLED=true` y `SIRE_DEMO_FIXTURES_ENABLED=true`; reiniciar el backend.
+2. Descargar el archivo de ejemplo: `GET /api/v1/sire-demo/registers/rvie/sample-file?source=DEMO_FIXTURES&period=202601`.
+3. Cargarlo: `POST /api/v1/sire-demo/proposals` (multipart: `file`, `source=DEMO_FIXTURES`, `register=RVIE`, `period=202601`).
+4. Conciliar: `GET /api/v1/sire-demo/proposals/:id/reconciliation` y, si se desea, `.../export.xlsx`.
+   Los fixtures incluyen las 8 clasificaciones (coincidentes, faltantes, diferencias de monto/contraparte/fecha,
+   duplicado e insuficiencia de datos). Igual para `rce`.
+
+**Formato DEMO_V1** (propio de esta demostración; **no** es un layout oficial de SUNAT): `.txt` UTF-8 delimitado por
+`|`, máximo 2 MB y 5000 filas. Primera línea `#DEMO_V1|SOURCE=<POS|DEMO_FIXTURES>|REGISTER=<RVIE|RCE>|PERIOD=<YYYYMM>`
+(más `|FIXTURE=<versión>` con DEMO_FIXTURES); segunda línea `#COLUMNS|docTypeCode|series|number|issueDate|cpDocTypeCode|cpDocNumber|cpName|currency|taxableBase|igv|total`;
+luego una fila de 11 campos por documento (`01|F001|00000012|05/01/2026|6|99999000001|NOMBRE|PEN|847.46|152.54|1000.00`):
+fecha `DD/MM/YYYY`, importes con punto y hasta 2 decimales, moneda `PEN`. Se rechaza el archivo completo si una fila es inválida.
+
+**Limitaciones frente al SIRE oficial**: sin integración con SUNAT (ni PSE, XML/UBL, CDR, firma, QR); sin notas de
+crédito/débito; sin multimoneda (solo se suma PEN); los códigos de comprobante (`01`, `03`) e identidad (RUC→6, DNI→1,
+CE→4, PASSPORT→7) y la regla del periodo (RVIE: fecha de emisión en America/Lima; RCE: fecha contable) son
+**provisionales**; no valida ningún layout ni propuesta oficial.
+
 ## Límites de la facturación electrónica
 
 - Proveedor actual: **`mock`** (`ELECTRONIC_INVOICING_PROVIDER=mock`),

@@ -590,6 +590,16 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'register',
     'period',
   ],
+  [AuditAction.SIRE_DEMO_PROPOSAL_EXPORTED]: [
+    'proposalId',
+    'source',
+    'register',
+    'period',
+    'fixtureSetVersion',
+    'classification',
+    'rowCount',
+    'resultDigest',
+  ],
 };
 
 function isPlainObject(

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   Param,
   ParseUUIDPipe,
@@ -9,6 +10,7 @@ import {
   Query,
   Req,
   Res,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -35,6 +37,10 @@ import { RoleName } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import {
+  XLSX_CONTENT_TYPE,
+  excelFileResponse,
+} from '../common/excel/excel-file-response';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import type { SireRegister } from './core/types';
@@ -50,6 +56,11 @@ import {
   UploadSireProposalDto,
 } from './dto/sire-demo-proposal.dto';
 import {
+  SireReconciliationExportQueryDto,
+  SireReconciliationQueryDto,
+  SireReconciliationResponseDto,
+} from './dto/sire-demo-reconciliation.dto';
+import {
   SireContextResponseDto,
   SireCurrencyTotalsDto,
   SireDocumentsResponseDto,
@@ -60,6 +71,7 @@ import {
 } from './sire-demo.guards';
 import { SIRE_DEMO_MAX_FILE_BYTES } from './sire-demo.constants';
 import { SireDemoProposalsService } from './sire-demo-proposals.service';
+import { SireDemoReconciliationService } from './sire-demo-reconciliation.service';
 import { SireDemoService } from './sire-demo.service';
 
 /**
@@ -89,6 +101,7 @@ export class SireDemoController {
   constructor(
     private readonly sireDemoService: SireDemoService,
     private readonly proposalsService: SireDemoProposalsService,
+    private readonly reconciliationService: SireDemoReconciliationService,
   ) {}
 
   @ApiOperation({
@@ -235,5 +248,64 @@ export class SireDemoController {
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
+  }
+
+  @ApiOperation({
+    summary: 'Conciliar una propuesta contra el origen guardado',
+    description:
+      'Compara la propuesta IMPORTED contra los documentos de SU origen (POS o DEMO_FIXTURES, con la fixtureSetVersion con la que se importó) usando el motor único de conciliación. `summary` y `counts` cubren siempre el conjunto completo; `classification`, `page` y `pageSize` solo afectan a `items`. Importes como strings con 2 decimales; solo se suma PEN (sin conversión). `resultDigest` es determinista y coincide con el del Excel. Una propuesta DISCARDED responde 409.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: SireReconciliationResponseDto })
+  @ApiNotFoundResponse({ description: 'SIRE_PROPOSAL_NOT_FOUND.' })
+  @ApiConflictResponse({
+    description:
+      'SIRE_PROPOSAL_DISCARDED o FIXTURE_SET_UNAVAILABLE (la versión de fixtures guardada ya no existe).',
+  })
+  @Roles(...READ_ROLES)
+  @Get('proposals/:id/reconciliation')
+  reconcileProposal(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: SireReconciliationQueryDto,
+  ): Promise<SireReconciliationResponseDto> {
+    return this.reconciliationService.reconcile(id, query);
+  }
+
+  @ApiOperation({
+    summary: 'Exportar la conciliación a Excel (.xlsx)',
+    description:
+      'Exporta TODAS las filas del resultado (con el filtro `classification`, si se indica), no solo una página. Usa el mismo cálculo que la ruta JSON. Cada fila incluye modo DEMO — SIN VALIDEZ ANTE SUNAT, registro, periodo, origen, versión de fixtures y resultDigest. Audita SIRE_DEMO_PROPOSAL_EXPORTED sin datos sensibles.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiProduces(XLSX_CONTENT_TYPE)
+  @ApiOkResponse({
+    description: 'Archivo .xlsx (attachment).',
+    content: {
+      [XLSX_CONTENT_TYPE]: { schema: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'SIRE_PROPOSAL_NOT_FOUND.' })
+  @ApiConflictResponse({
+    description: 'SIRE_PROPOSAL_DISCARDED o FIXTURE_SET_UNAVAILABLE.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'classification inválida o resultado por encima del máximo exportable.',
+  })
+  @Roles(...READ_ROLES)
+  @Get('proposals/:id/reconciliation/export.xlsx')
+  @Header('Content-Type', XLSX_CONTENT_TYPE)
+  async exportReconciliation(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: SireReconciliationExportQueryDto,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() request: Request,
+  ): Promise<StreamableFile> {
+    const { buffer, baseFileName } =
+      await this.reconciliationService.exportXlsx(id, query, {
+        actorUserId: actor.id,
+        ipAddress: request.ip ?? null,
+      });
+    return excelFileResponse(buffer, baseFileName);
   }
 }
