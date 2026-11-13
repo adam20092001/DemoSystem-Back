@@ -62,14 +62,15 @@ describe('independencia del módulo SIRE DEMO respecto de la integración oficia
     }
   });
 
-  it('solo el origen POS y el servicio de propuestas (S2) conocen PrismaService; los fixtures no tienen acceso a base de datos', () => {
+  it('solo el origen POS y los servicios de propuestas (S2) y de conciliación (S3, solo lectura) conocen PrismaService; los fixtures no tienen acceso a base de datos', () => {
     expect(FixtureTaxDocumentSource.length).toBe(0);
     for (const file of files) {
       const text = readFileSync(file, 'utf8');
       const usesPrismaService = /PrismaService/.test(text);
       const allowed =
         file.endsWith('pos-tax-document.source.ts') ||
-        file.endsWith('sire-demo-proposals.service.ts');
+        file.endsWith('sire-demo-proposals.service.ts') ||
+        file.endsWith('sire-demo-reconciliation.service.ts');
       expect({
         file,
         usesPrismaService: usesPrismaService && !allowed,

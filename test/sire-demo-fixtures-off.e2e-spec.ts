@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import {
@@ -6,6 +7,7 @@ import {
   E2E_ADMIN_USERNAME,
 } from './helpers/constants';
 import { login } from './helpers/http';
+import { createTestPrismaClient } from './helpers/prisma-test-client';
 import {
   createSireDemoE2eApp,
   snapshotSireDemoEnv,
@@ -16,10 +18,12 @@ const BASE = '/api/v1/sire-demo';
 describe('SIRE DEMO — módulo activo con el origen DEMO_FIXTURES deshabilitado (e2e)', () => {
   let app: INestApplication<App>;
   let adminCookie: string;
+  let prisma: PrismaClient;
   let restoreEnv: () => void;
 
   beforeAll(async () => {
     restoreEnv = snapshotSireDemoEnv();
+    prisma = createTestPrismaClient();
     app = await createSireDemoE2eApp({ enabled: true });
     const adminLogin = await login(
       app.getHttpServer(),
@@ -36,6 +40,7 @@ describe('SIRE DEMO — módulo activo con el origen DEMO_FIXTURES deshabilitado
 
   afterAll(async () => {
     await app?.close();
+    await prisma?.$disconnect();
     restoreEnv();
   });
 
@@ -105,5 +110,34 @@ describe('SIRE DEMO — módulo activo con el origen DEMO_FIXTURES deshabilitado
     expect(general.status).toBe(200);
     const items = (general.body as { items: { source: string }[] }).items;
     expect(items.every((p) => p.source === 'POS')).toBe(true);
+  });
+
+  it('S3: conciliar o exportar una propuesta DEMO_FIXTURES ya existente responde 403 con el origen deshabilitado', async () => {
+    const admin = await prisma.user.findUniqueOrThrow({
+      where: { username: E2E_ADMIN_USERNAME },
+    });
+    const proposal = await prisma.sireDemoProposal.create({
+      data: {
+        source: 'DEMO_FIXTURES',
+        register: 'RVIE',
+        period: '202601',
+        fixtureSetVersion: 'demo-fixtures-v1',
+        fileName: 'e2e-s3-off.txt',
+        fileSizeBytes: 10,
+        fileHash: 'a'.repeat(64),
+        rowCount: 1,
+        createdByUserId: admin.id,
+      },
+    });
+    try {
+      for (const suffix of ['', '/export.xlsx']) {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/proposals/${proposal.id}/reconciliation${suffix}`)
+          .set('Cookie', adminCookie);
+        expect(res.status).toBe(403);
+      }
+    } finally {
+      await prisma.sireDemoProposal.delete({ where: { id: proposal.id } });
+    }
   });
 });

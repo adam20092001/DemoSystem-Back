@@ -279,4 +279,6 @@ export enum AuditAction {
   // demostración, sin validez ante SUNAT. Nunca RUC, nombres ni importes.
   SIRE_DEMO_PROPOSAL_IMPORTED = 'SIRE_DEMO_PROPOSAL_IMPORTED',
   SIRE_DEMO_PROPOSAL_DISCARDED = 'SIRE_DEMO_PROPOSAL_DISCARDED',
+  // S3: exportación a Excel de la conciliación. Nunca RUC, nombres ni importes.
+  SIRE_DEMO_PROPOSAL_EXPORTED = 'SIRE_DEMO_PROPOSAL_EXPORTED',
 }

@@ -88,6 +88,8 @@ Reglas de capas:
 18. **Proveedores** (Fase A5.1) — maestro de datos de proveedor (`SuppliersModule`, `/api/v1/suppliers*`): alta, edición, activación/desactivación (borrado lógico), con prevención de duplicados reforzada en base de datos (documento normalizado mayúsculas/espacios). Sin ningún vínculo todavía a Compras/Cuentas por pagar más allá de la validación de existencia+estado `ACTIVE` que usa el módulo 19.
 19. **Facturas de compra** (Fase A5.2a) — documento universal de compra (`PurchaseInvoicesModule`, `/api/v1/purchase-invoices*`) con ciclo de vida DRAFT→CONFIRMED→CANCELLED, líneas mixtas (bienes de catálogo, bienes/servicios libres) y contabilización vía el mismo `AccountingEngine`. Ver §11 para el detalle completo — en particular, qué queda bloqueado mientras ADMIN no configure los mapeos contables correspondientes. **Nunca** mueve inventario ni registra pagos a proveedor en esta fase (eso depende de una futura Fase A5.2b/A5.3, no iniciada).
 
+20. **SIRE DEMO** (S1–S3, solo demostración) — `SireDemoModule` (`/api/v1/sire-demo*`, 8 rutas): previsualización de documentos RVIE/RCE, archivo de ejemplo, carga/listado/descarte de propuestas DEMO_V1, conciliación y exportación a Excel. **Sin comunicación con SUNAT ni validez fiscal.** Apagado por defecto (ver §11 "SIRE DEMO").
+
 ---
 
 ## 5. Roles
@@ -96,7 +98,7 @@ Reglas de capas:
 - `SELLER` — cotizaciones, ventas, pagos, clientes, comprobantes electrónicos y reportes/dashboard comerciales, pero **restringido a sus propios registros** (`Sale.sellerId`/`Quote.sellerId`) desde P1–P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11). No tiene acceso a Contabilidad básica ni a Auditoría.
 - `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes.
 - `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones, no crea/confirma/anula facturas de compra (ver §11, cierre P6-E4 y Fase A5.2a).
-- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura — nunca crea, edita, confirma ni anula una: esa escritura es exclusiva de ADMIN en esta fase). Sin acceso a ningún otro módulo fuera de estos (ventas, inventario, usuarios, configuración, etc. responden 403).
+- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura — nunca crea, edita, confirma ni anula una: esa escritura es exclusiva de ADMIN en esta fase). Desde SIRE DEMO también carga/descarta propuestas (`/api/v1/sire-demo*`). Sin acceso a ningún otro módulo fuera de estos (ventas, inventario, usuarios, configuración, etc. responden 403).
 
 La autorización se resuelve **siempre en el backend** mediante guards y decoradores de rol.
 El frontend puede ocultar opciones, pero eso **no** cuenta como control de acceso.
@@ -1088,6 +1090,48 @@ ningún endpoint de este módulo llama a `StockMovementEngine`.
   `PURCHASE_*` debe mapear a una cuenta de tránsito o a una cuenta final
   (decisión de mapeo contable, nunca de código); validación formal de las
   reglas de crédito fiscal peruano aplicadas a `creditableTaxAmount`.
+
+**SIRE DEMO — S1 a S3** (PR #47 `feat/sire-demo-s1-core-queries`, PR #48
+`feat/sire-demo-s2-proposals` y `feat/sire-demo-s3-reconciliation`;
+**solo demostración comercial, sin contrato ni comunicación con SUNAT**).
+Contratos para el frontend: `docs/sire-demo-api.md`; guía de uso en README
+("SIRE DEMO"). Código en `src/sire-demo/`:
+
+- **Seguridad fail-closed.** `SIRE_DEMO_ENABLED`, `SIRE_DEMO_FIXTURES_ENABLED`
+  y `SIRE_DEMO_ALLOW_IN_PRODUCTION` (todas `false` por defecto, solo literales
+  `true`/`false`). `SireDemoModule.register()` queda vacío si está apagado (rutas
+  404, sin Swagger). FIXTURES sin ENABLED hace fallar el arranque; producción +
+  ENABLED sin ALLOW también. `SireDemoBootCheck` contrasta lo montado con la
+  configuración ya validada.
+- **Núcleo puro (`core/`).** Normalizador tributario, parser DEMO_V1 (único),
+  motor único `computeReconciliation` (Decimal exacto, solo PEN, `resultDigest`
+  SHA-256 determinista, invariantes I1–I14) y generador de archivo de ejemplo.
+  Nada de esto usa Prisma ni red.
+- **Orígenes separados.** `PosTaxDocumentSource` (solo lectura, REPEATABLE READ:
+  ElectronicDocument `ACCEPTED` para RVIE; PurchaseInvoice `CONFIRMED` para RCE) y
+  `FixtureTaxDocumentSource` (sin acceso a BD; fixtures inmutables y versionados,
+  `demo-fixtures-v1` con digest verificado por prueba). Una propuesta guarda su
+  origen y `fixtureSetVersion`; nunca se sustituye por otra versión.
+- **Propuestas (S2).** Tablas `sire_demo_proposals`/`sire_demo_proposal_lines`
+  (migración `20261028000000_add_sire_demo_proposals`, aditiva). Idempotencia por
+  SHA-256 (índice único parcial `status='IMPORTED'`), tope de 10 activas por
+  origen+registro+periodo serializado con `pg_advisory_xact_lock`, descarte
+  lógico. Auditoría `SIRE_DEMO_PROPOSAL_IMPORTED/DISCARDED/EXPORTED` sin RUC,
+  nombres ni importes.
+- **Conciliación y Excel (S3).** `GET proposals/:id/reconciliation` y
+  `.../export.xlsx` reutilizan el motor y `ExcelExportService`; el Excel exporta
+  todas las filas filtradas del mismo cálculo. Propuesta DISCARDED responde 409,
+  versión de fixtures inexistente 409 `FIXTURE_SET_UNAVAILABLE`, origen
+  deshabilitado 403. S3 no agrega migraciones.
+- **RBAC.** ADMIN/ACCOUNTANT leen y escriben; MANAGEMENT solo lee; SELLER y
+  WAREHOUSE 403.
+- **Reglas PROVISIONALES (sin validación de contador ni SUNAT):** códigos 01/03,
+  identidades RUC=6/DNI=1/CE=4/PASSPORT=7 (OTHER y FOREIGN_TAX_ID sin mapear),
+  periodo RVIE = mes de `issuedAt` en America/Lima y RCE = `accountingDate`.
+  Sin notas de crédito/débito ni FX.
+- **Pendiente conocido:** el camino RCE con `PurchaseInvoice` `CONFIRMED` real no
+  tiene E2E con datos reales (requiere mapeos contables); está cubierto con dobles
+  de Prisma y con fixtures.
 
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
