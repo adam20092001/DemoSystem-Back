@@ -13,6 +13,9 @@ export const SIRE_DEMO_MAX_ROWS = 5000;
 export const SIRE_DEMO_MAX_LINE_LENGTH = 1000;
 export const SIRE_DEMO_MAX_PARSE_ERRORS = 50;
 
+/** Máximo de propuestas IMPORTED por origen + registro + periodo. */
+export const SIRE_DEMO_MAX_ACTIVE_PROPOSALS = 10;
+
 export const SIRE_DEMO_DEFAULT_PAGE_SIZE = 50;
 export const SIRE_DEMO_MAX_PAGE_SIZE = 200;
 

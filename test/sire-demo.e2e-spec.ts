@@ -692,7 +692,7 @@ describe('SIRE DEMO S1 — contexto, documentos y archivo de ejemplo (e2e)', () 
   });
 
   describe('documentación y aislamiento', () => {
-    it('las tres rutas aparecen en OpenAPI cuando el módulo está activo', async () => {
+    it('las rutas de S1 y S2 aparecen en OpenAPI cuando el módulo está activo', async () => {
       const docs = await request(app.getHttpServer()).get('/api/docs-json');
       const paths = Object.keys(
         (docs.body as { paths: Record<string, unknown> }).paths,
@@ -701,6 +701,8 @@ describe('SIRE DEMO S1 — contexto, documentos y archivo de ejemplo (e2e)', () 
         .sort();
       expect(paths).toEqual([
         '/api/v1/sire-demo/context',
+        '/api/v1/sire-demo/proposals',
+        '/api/v1/sire-demo/proposals/{id}/discard',
         '/api/v1/sire-demo/registers/{register}/documents',
         '/api/v1/sire-demo/registers/{register}/sample-file',
       ]);

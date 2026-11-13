@@ -62,12 +62,14 @@ describe('independencia del módulo SIRE DEMO respecto de la integración oficia
     }
   });
 
-  it('solo el origen POS conoce PrismaService; los fixtures no tienen acceso a base de datos', () => {
+  it('solo el origen POS y el servicio de propuestas (S2) conocen PrismaService; los fixtures no tienen acceso a base de datos', () => {
     expect(FixtureTaxDocumentSource.length).toBe(0);
     for (const file of files) {
       const text = readFileSync(file, 'utf8');
       const usesPrismaService = /PrismaService/.test(text);
-      const allowed = file.endsWith('pos-tax-document.source.ts');
+      const allowed =
+        file.endsWith('pos-tax-document.source.ts') ||
+        file.endsWith('sire-demo-proposals.service.ts');
       expect({
         file,
         usesPrismaService: usesPrismaService && !allowed,
@@ -85,16 +87,23 @@ describe('independencia del módulo SIRE DEMO respecto de la integración oficia
     }
   });
 
-  it('ningún archivo del módulo escribe en base de datos (sin create/update/delete/upsert)', () => {
+  it('las únicas escrituras del módulo son sobre las tablas propias de propuestas (S2); nunca sobre tablas comerciales o contables', () => {
+    const writePattern =
+      /(?:prisma|tx)\.(\w+)\.(?:create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(/g;
+    const ownModels = new Set(['sireDemoProposal', 'sireDemoProposalLine']);
     for (const file of files) {
       const text = readFileSync(file, 'utf8');
-      expect({
-        file,
-        writes:
-          /(prisma|tx)\.\w+\.(create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(/.test(
-            text,
-          ),
-      }).toEqual({ file, writes: false });
+      const foreignWrites = [...text.matchAll(writePattern)]
+        .map((match) => match[1])
+        .filter((model) => !ownModels.has(model));
+      expect({ file, foreignWrites }).toEqual({ file, foreignWrites: [] });
+      if (!file.endsWith('sire-demo-proposals.service.ts')) {
+        expect({ file, writes: writePattern.test(text) }).toEqual({
+          file,
+          writes: false,
+        });
+        writePattern.lastIndex = 0;
+      }
     }
   });
 });

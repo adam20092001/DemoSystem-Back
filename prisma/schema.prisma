@@ -242,6 +242,8 @@ model User {
   // crea y, si aplica, quien lo cancela/desvincula).
   createdImportReceiptLinks   ImportReceiptLink[] @relation("ImportReceiptLinkCreatedBy")
   cancelledImportReceiptLinks ImportReceiptLink[] @relation("ImportReceiptLinkCancelledBy")
+  createdSireDemoProposals    SireDemoProposal[]  @relation("SireDemoProposalCreatedBy")
+  discardedSireDemoProposals  SireDemoProposal[]  @relation("SireDemoProposalDiscardedBy")
 
   @@index([status])
   @@map("users")
@@ -3330,4 +3332,84 @@ model ImportReceiptLink {
   @@index([importShipmentLineId])
   @@index([purchaseReceiptLineId])
   @@map("import_receipt_links")
+}
+
+// --- SIRE DEMO (S2): propuestas importadas -------------------------------------
+// Solo demostración: sin validez ante SUNAT. Estas tablas son independientes
+// de ventas, compras, inventario y contabilidad (ninguna FK hacia ellas).
+
+enum SireDemoSource {
+  POS
+  DEMO_FIXTURES
+}
+
+enum SireDemoRegister {
+  RVIE
+  RCE
+}
+
+enum SireDemoProposalStatus {
+  IMPORTED
+  DISCARDED
+}
+
+/// Archivo DEMO_V1 importado (cabecera). El descarte es lógico: las líneas se
+/// conservan. La idempotencia (mismo archivo activo) se refuerza con un índice
+/// único PARCIAL (status = 'IMPORTED') y el límite de propuestas activas se
+/// serializa con un advisory lock transaccional; ambos se agregan a mano en
+/// migration.sql junto con los CHECK.
+model SireDemoProposal {
+  id String @id @default(uuid()) @db.Uuid
+
+  source   SireDemoSource
+  register SireDemoRegister
+  period   String           @db.VarChar(6)
+
+  // NULL salvo source = DEMO_FIXTURES (CHECK en migration.sql).
+  fixtureSetVersion String? @map("fixture_set_version") @db.VarChar(40)
+
+  fileName      String @map("file_name") @db.VarChar(255)
+  fileSizeBytes Int    @map("file_size_bytes")
+  fileHash      String @map("file_hash") @db.VarChar(64)
+  rowCount      Int    @map("row_count")
+
+  status SireDemoProposalStatus @default(IMPORTED)
+
+  createdByUserId String   @map("created_by_user_id") @db.Uuid
+  createdBy       User     @relation("SireDemoProposalCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  discardedAt       DateTime? @map("discarded_at")
+  discardedByUserId String?   @map("discarded_by_user_id") @db.Uuid
+  discardedBy       User?     @relation("SireDemoProposalDiscardedBy", fields: [discardedByUserId], references: [id], onDelete: Restrict)
+
+  lines SireDemoProposalLine[]
+
+  @@index([source, register, period, status])
+  @@index([createdAt])
+  @@map("sire_demo_proposals")
+}
+
+model SireDemoProposalLine {
+  id String @id @default(uuid()) @db.Uuid
+
+  proposalId String           @map("proposal_id") @db.Uuid
+  proposal   SireDemoProposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+
+  lineNumber Int @map("line_number")
+
+  docTypeCode   String   @map("doc_type_code") @db.VarChar(2)
+  series        String   @db.VarChar(20)
+  number        String   @db.VarChar(20)
+  issueDate     DateTime @map("issue_date") @db.Date
+  cpDocTypeCode String?  @map("cp_doc_type_code") @db.VarChar(1)
+  cpDocNumber   String?  @map("cp_doc_number") @db.VarChar(20)
+  cpName        String?  @map("cp_name") @db.VarChar(150)
+  currencyCode  String   @map("currency_code") @db.VarChar(3)
+  taxableBase   Decimal  @map("taxable_base") @db.Decimal(14, 2)
+  igv           Decimal  @db.Decimal(14, 2)
+  total         Decimal  @db.Decimal(14, 2)
+
+  @@unique([proposalId, lineNumber])
+  @@map("sire_demo_proposal_lines")
 }

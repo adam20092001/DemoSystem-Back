@@ -275,4 +275,8 @@ export enum AuditAction {
   // solo vincula y previsualiza) — solo identificadores/cantidades.
   IMPORT_RECEIPT_LINK_CREATED = 'IMPORT_RECEIPT_LINK_CREATED',
   IMPORT_RECEIPT_LINK_CANCELLED = 'IMPORT_RECEIPT_LINK_CANCELLED',
+  // SIRE DEMO (S2). SireDemoProposalsService es su único emisor. Solo
+  // demostración, sin validez ante SUNAT. Nunca RUC, nombres ni importes.
+  SIRE_DEMO_PROPOSAL_IMPORTED = 'SIRE_DEMO_PROPOSAL_IMPORTED',
+  SIRE_DEMO_PROPOSAL_DISCARDED = 'SIRE_DEMO_PROPOSAL_DISCARDED',
 }
