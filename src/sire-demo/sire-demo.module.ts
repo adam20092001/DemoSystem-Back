@@ -6,6 +6,7 @@ import {
   resolveSireDemoFlagsFailClosed,
 } from './sire-demo.flags';
 import { SireDemoBootCheck, SireDemoEnabledGuard } from './sire-demo.guards';
+import { SireDemoProposalsService } from './sire-demo-proposals.service';
 import { SireDemoService } from './sire-demo.service';
 import { FixtureTaxDocumentSource } from './sources/fixture-tax-document.source';
 import { PosTaxDocumentSource } from './sources/pos-tax-document.source';
@@ -40,6 +41,7 @@ export class SireDemoModule {
         ...base.providers,
         SireDemoEnabledGuard,
         SireDemoService,
+        SireDemoProposalsService,
         PosTaxDocumentSource,
         FixtureTaxDocumentSource,
       ],

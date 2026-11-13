@@ -1,10 +1,29 @@
-import { Controller, Get, Param, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBadRequestResponse,
+  ApiBody,
   ApiConflictResponse,
+  ApiConsumes,
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiExtraModels,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
@@ -13,14 +32,23 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { RoleName } from '@prisma/client';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { COOKIE_AUTH_NAME } from '../config/swagger';
 import type { SireRegister } from './core/types';
 import {
   SireDocumentsQueryDto,
   SireSampleFileQueryDto,
 } from './dto/sire-demo-query.dto';
+import {
+  ListSireProposalsQueryDto,
+  SireProposalListResponseDto,
+  SireProposalResponseDto,
+  UploadSireProposalBodyDto,
+  UploadSireProposalDto,
+} from './dto/sire-demo-proposal.dto';
 import {
   SireContextResponseDto,
   SireCurrencyTotalsDto,
@@ -30,11 +58,13 @@ import {
   ParseSireRegisterPipe,
   SireDemoEnabledGuard,
 } from './sire-demo.guards';
+import { SIRE_DEMO_MAX_FILE_BYTES } from './sire-demo.constants';
+import { SireDemoProposalsService } from './sire-demo-proposals.service';
 import { SireDemoService } from './sire-demo.service';
 
 /**
- * ADMIN y ACCOUNTANT consultan (y cargarán propuestas en S2); MANAGEMENT solo
- * consulta. SELLER y WAREHOUSE no acceden a información tributaria de
+ * ADMIN y ACCOUNTANT consultan y cargan/descartan propuestas (S2); MANAGEMENT
+ * solo consulta. SELLER y WAREHOUSE no acceden a información tributaria de
  * conciliación. Alcance global (sin restricción por vendedor).
  */
 const READ_ROLES = [
@@ -42,6 +72,8 @@ const READ_ROLES = [
   RoleName.ACCOUNTANT,
   RoleName.MANAGEMENT,
 ] as const;
+
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.ACCOUNTANT] as const;
 
 @ApiTags('SIRE Demo')
 @ApiCookieAuth(COOKIE_AUTH_NAME)
@@ -54,7 +86,10 @@ const READ_ROLES = [
 @UseGuards(SireDemoEnabledGuard)
 @Controller('sire-demo')
 export class SireDemoController {
-  constructor(private readonly sireDemoService: SireDemoService) {}
+  constructor(
+    private readonly sireDemoService: SireDemoService,
+    private readonly proposalsService: SireDemoProposalsService,
+  ) {}
 
   @ApiOperation({
     summary: 'Contexto del módulo SIRE DEMO',
@@ -120,5 +155,85 @@ export class SireDemoController {
     );
     res.setHeader('X-Sire-Mode', 'DEMO');
     return file.content;
+  }
+
+  @ApiOperation({
+    summary: 'Cargar una propuesta DEMO_V1',
+    description:
+      'multipart/form-data con `file` (.txt, máx. 2 MB / 5000 filas) y `source`, `register`, `period`. Valida TODO el archivo antes de persistir (todo o nada), es idempotente por SHA-256 (un archivo activo ya importado responde 200 con reused=true, sin duplicar) y admite hasta 10 propuestas activas por origen, registro y periodo. Con DEMO_FIXTURES la cabecera debe declarar una versión de fixtures existente que incluya el periodo.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ type: UploadSireProposalBodyDto })
+  @ApiCreatedResponse({ type: SireProposalResponseDto })
+  @ApiOkResponse({
+    type: SireProposalResponseDto,
+    description: 'Archivo ya importado y activo (reused=true).',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Archivo o formulario inválido (SIRE_FILE_REQUIRED, SIRE_FILE_EXTENSION_INVALID, SIRE_FILE_INVALID, FIXTURE_VERSION_UNKNOWN, FIXTURE_PERIOD_UNAVAILABLE).',
+  })
+  @ApiConflictResponse({
+    description:
+      'Ya hay 10 propuestas activas para el origen/registro/periodo (SIRE_PROPOSAL_LIMIT_REACHED).',
+  })
+  @Roles(...WRITE_ROLES)
+  @Post('proposals')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: SIRE_DEMO_MAX_FILE_BYTES, files: 1, fields: 10 },
+    }),
+  )
+  async uploadProposal(
+    @Body() dto: UploadSireProposalDto,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() request: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SireProposalResponseDto> {
+    const { response, created } = await this.proposalsService.upload(
+      dto,
+      file,
+      { actorUserId: actor.id, ipAddress: request.ip ?? null },
+    );
+    res.status(created ? 201 : 200);
+    return response;
+  }
+
+  @ApiOperation({
+    summary: 'Listar propuestas importadas',
+    description:
+      'Paginado, con filtros opcionales. `reconcilable` indica si está IMPORTED y su origen está disponible. Sin `source`, las propuestas DEMO_FIXTURES solo aparecen si ese origen está habilitado.',
+  })
+  @ApiOkResponse({ type: SireProposalListResponseDto })
+  @Roles(...READ_ROLES)
+  @Get('proposals')
+  listProposals(
+    @Query() query: ListSireProposalsQueryDto,
+  ): Promise<SireProposalListResponseDto> {
+    return this.proposalsService.list(query);
+  }
+
+  @ApiOperation({
+    summary: 'Descartar una propuesta (descarte lógico)',
+    description:
+      'Marca la propuesta como DISCARDED registrando fecha y usuario; conserva sus líneas. Un segundo descarte responde 409.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: SireProposalResponseDto })
+  @ApiNotFoundResponse({ description: 'SIRE_PROPOSAL_NOT_FOUND.' })
+  @ApiConflictResponse({ description: 'SIRE_PROPOSAL_ALREADY_DISCARDED.' })
+  @Roles(...WRITE_ROLES)
+  @Post('proposals/:id/discard')
+  @HttpCode(200)
+  discardProposal(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() request: Request,
+  ): Promise<SireProposalResponseDto> {
+    return this.proposalsService.discard(id, {
+      actorUserId: actor.id,
+      ipAddress: request.ip ?? null,
+    });
   }
 }

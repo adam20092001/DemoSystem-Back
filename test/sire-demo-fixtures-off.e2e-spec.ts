@@ -82,4 +82,28 @@ describe('SIRE DEMO — módulo activo con el origen DEMO_FIXTURES deshabilitado
       items: [],
     });
   });
+
+  it('S2: cargar o listar propuestas DEMO_FIXTURES responde 403 y el listado general omite ese origen', async () => {
+    const upload = await request(app.getHttpServer())
+      .post(`${BASE}/proposals`)
+      .set('Cookie', adminCookie)
+      .field('source', 'DEMO_FIXTURES')
+      .field('register', 'RVIE')
+      .field('period', '202601')
+      .attach('file', Buffer.from('x'), 'e2e-s2-off.txt');
+    expect(upload.status).toBe(403);
+    expect(upload.body).toMatchObject({ code: 'SIRE_SOURCE_DISABLED' });
+
+    const filtered = await request(app.getHttpServer())
+      .get(`${BASE}/proposals?source=DEMO_FIXTURES`)
+      .set('Cookie', adminCookie);
+    expect(filtered.status).toBe(403);
+
+    const general = await request(app.getHttpServer())
+      .get(`${BASE}/proposals?pageSize=200`)
+      .set('Cookie', adminCookie);
+    expect(general.status).toBe(200);
+    const items = (general.body as { items: { source: string }[] }).items;
+    expect(items.every((p) => p.source === 'POS')).toBe(true);
+  });
 });

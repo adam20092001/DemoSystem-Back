@@ -573,6 +573,23 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'importReceiptLinkId',
   ],
   [AuditAction.IMPORT_RECEIPT_LINK_CANCELLED]: ['importReceiptLinkId'],
+  // SIRE_DEMO_PROPOSAL_* (S2). Solo identificadores y conteos: nunca RUC,
+  // nombres de clientes/proveedores ni importes.
+  [AuditAction.SIRE_DEMO_PROPOSAL_IMPORTED]: [
+    'proposalId',
+    'source',
+    'register',
+    'period',
+    'fixtureSetVersion',
+    'rowCount',
+    'fileSizeBytes',
+  ],
+  [AuditAction.SIRE_DEMO_PROPOSAL_DISCARDED]: [
+    'proposalId',
+    'source',
+    'register',
+    'period',
+  ],
 };
 
 function isPlainObject(
