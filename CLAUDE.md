@@ -96,9 +96,26 @@ Reglas de capas:
 
 - `ADMIN` — acceso total, configuración y usuarios. Sin restricción de propiedad en ningún módulo.
 - `SELLER` — cotizaciones, ventas, pagos, clientes, comprobantes electrónicos y reportes/dashboard comerciales, pero **restringido a sus propios registros** (`Sale.sellerId`/`Quote.sellerId`) desde P1–P6-E2 (ver §6 "Propiedad y autorización por vendedor" y §11). No tiene acceso a Contabilidad básica ni a Auditoría.
-- `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes.
-- `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones, no crea/confirma/anula facturas de compra (ver §11, cierre P6-E4 y Fase A5.2a).
-- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura — nunca crea, edita, confirma ni anula una: esa escritura es exclusiva de ADMIN en esta fase). Desde SIRE DEMO también carga/descarta propuestas (`/api/v1/sire-demo*`). Sin acceso a ningún otro módulo fuera de estos (ventas, inventario, usuarios, configuración, etc. responden 403).
+- `WAREHOUSE` — productos, categorías, unidades, inventario. En el Dashboard conserva únicamente la sección `lowStock`; el resto de indicadores comerciales permanece oculto (nunca se calculan para este rol). Sin acceso a Ventas, Cotizaciones, Pagos, Cuentas por cobrar, Comprobantes ni Reportes. Desde R1 es además **responsable de la recepción física de mercadería** de compras: identifica las facturas CONFIRMED pendientes (`GET /api/v1/purchase-receiving/invoices*`), registra la recepción (`POST /api/v1/purchase-invoices/:id/receipts`) y lee las recepciones — **siempre sin información financiera** (ver `PURCHASING` y §11 "R1"). Nunca crea/edita/confirma/anula facturas, nunca anula recepciones, nunca registra pagos, y `GET /purchase-invoices*` sigue cerrado para este rol.
+- `MANAGEMENT` — dashboard y reportes (lectura y análisis), con **alcance global sin restricción de propiedad** en todos los módulos de lectura (ventas, cotizaciones, pagos, cuentas por cobrar, comprobantes, reportes, dashboard, Contabilidad básica, Auditoría). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura). **Nunca** adquiere permisos de escritura: no registra ni anula pagos, no emite ni reintenta comprobantes, no modifica ventas ni cotizaciones, no crea ni edita facturas de compra, no recibe mercadería ni anula recepciones (ver §11, cierre P6-E4 y Fase A5.2a). **Única excepción de escritura, aprobada por el propietario en R1:** `MANAGEMENT` **confirma y anula facturas de compra** (`POST /api/v1/purchase-invoices/:id/confirm` y `/cancel`) — nada más; la auditoría registra siempre al usuario real que ejecutó la acción.
+- `ACCOUNTANT` (Fase A4.1) — lectura contable global (plan de cuentas, periodos, asientos, reportes/exportaciones) igual que `MANAGEMENT`, **más** administración completa del ciclo de vida de asientos manuales: crear/editar borradores, contabilizar y revertir (`/api/v1/accounting/manual-entries*`). Desde la Fase A5.2a lee también facturas de compra (`/api/v1/purchase-invoices*`, solo lectura — nunca crea, edita, confirma ni anula una; desde R1 la escritura la reparten ADMIN/PURCHASING —crear y editar DRAFT— y ADMIN/MANAGEMENT —confirmar y anular—, ver la matriz de compras más abajo). Desde SIRE DEMO también carga/descarta propuestas (`/api/v1/sire-demo*`). Sin acceso a ningún otro módulo fuera de estos (ventas, inventario, usuarios, configuración, etc. responden 403).
+- `PURCHASING` (R1) — rol de compras. **Escribe:** crea y edita proveedores (`POST`/`PATCH /api/v1/suppliers*`, sin activar ni desactivar) y crea y edita facturas de compra **solo mientras estén en DRAFT**. **Lee:** productos, categorías, unidades, la configuración POS de solo lectura (`GET /configuration/pos`, para impuestos), proveedores, facturas de compra, recepciones de compra y Cuentas por pagar (`/api/v1/accounts-payable*`, incluidos reportes y exportaciones GET). **Nunca:** activa/desactiva proveedores, confirma ni anula facturas, ejecuta ni anula recepciones, accede a pagos a proveedores (`/supplier-payments*`, ni siquiera lectura), modifica inventario, administra usuarios/roles/configuración, ni toca contabilidad, ventas, clientes o importaciones (todo responde 403). Un usuario cuyo único rol es `PURCHASING` inicia sesión con ese rol (está en `DEFAULT_ACTIVE_ROLE_ORDER`).
+
+**Matriz de compras (R1):**
+
+| Acción | ADMIN | MANAGEMENT | PURCHASING | WAREHOUSE | ACCOUNTANT |
+|---|---|---|---|---|---|
+| Leer factura de compra completa | sí | sí | sí | no | sí |
+| Crear / editar DRAFT | sí | no | sí | no | no |
+| Confirmar / anular factura | sí | sí | no | no | no |
+| Registrar recepción física | sí | no | no | sí | no |
+| Leer recepciones | sí (completa) | sí (completa) | sí (completa) | sí (**sin importes**) | sí (completa) |
+| Vistas `purchase-receiving` | sí | sí | no | sí | sí |
+| Anular recepción | sí | no | no | no | no |
+| Crear/editar proveedor | sí | no | sí | no | no |
+| Activar/desactivar proveedor | sí | no | no | no | no |
+| Leer Cuentas por pagar | sí | sí | sí | no | sí |
+| Pagos a proveedores | sí | lectura | no | no | lectura |
 
 La autorización se resuelve **siempre en el backend** mediante guards y decoradores de rol.
 El frontend puede ocultar opciones, pero eso **no** cuenta como control de acceso.
@@ -1132,6 +1149,68 @@ Contratos para el frontend: `docs/sire-demo-api.md`; guía de uso en README
 - **Pendiente conocido:** el camino RCE con `PurchaseInvoice` `CONFIRMED` real no
   tiene E2E con datos reales (requiere mapeos contables); está cubierto con dobles
   de Prisma y con fixtures.
+
+**R1 — Rol PURCHASING** (rama `feat/r1-purchasing-role`, base `main` en `a5b0119`,
+**implementada y validada, sin commit/push/PR todavía** — pendiente de
+autorización explícita del propietario; migraciones aplicadas EXCLUSIVAMENTE en
+una base descartable, nunca en `pos_db` ni `pos_db_test`). Es un cambio de
+**autorización**: no modifica contabilidad, reconocimiento de deuda, inventario
+(`StockMovementEngine`), recepciones, valorización, bloqueos ni idempotencia.
+
+- **Migraciones (100% aditivas, separadas a propósito).** `20261029000000_add_
+  purchasing_role_enum_value` (M1: `ALTER TYPE "RoleName" ADD VALUE 'PURCHASING'`)
+  y `20261029000100_seed_purchasing_role` (M2: `INSERT ... ON CONFLICT ("name")
+  DO NOTHING` en `roles`, con `gen_random_uuid()` y timestamps explícitos porque
+  `id`/`updated_at` no tienen DEFAULT en base de datos). M2 va aparte porque
+  PostgreSQL no permite usar un valor de enum recién agregado dentro de la
+  misma transacción. Así el rol existe en instalaciones ya inicializadas sin
+  exigir reejecutar el seed (que usa `upsert` con `update: {}`). El seed y
+  `ROLE_DESCRIPTIONS` también lo incluyen.
+- **Sesión multi-rol.** `PURCHASING` entra en `DEFAULT_ACTIVE_ROLE_ORDER`
+  (`SELLER`, `WAREHOUSE`, `PURCHASING`, `MANAGEMENT`, `ACCOUNTANT`, `ADMIN`) —
+  sin eso un usuario solo-PURCHASING no podría iniciar sesión (mismo defecto
+  histórico de ACCOUNTANT en A4.1). `ROLE_PRESENTATION_ORDER` ahora incluye
+  `ACCOUNTANT` (omitido desde A4, quedaba con índice -1 y por tanto primero) y
+  `PURCHASING`. La autorización usa **solo el rol activo** de cada petición:
+  tener `ADMIN` asignado no da permisos de ADMIN mientras el rol activo sea
+  `PURCHASING`.
+- **Doble capa por acción.** Controllers (`@Roles`) y services (`assertCan*`) se
+  separaron por acción donde antes había un único `MANAGE_ROLES` de solo ADMIN:
+  facturas de compra (leer / crear / editar DRAFT / confirmar / anular),
+  recepciones (leer / registrar / anular) y proveedores (leer / crear-editar /
+  activar-desactivar). `SuppliersService.create/update/activate/deactivate`
+  ahora reciben `requesterRole` (antes no tenían ninguna guardia propia).
+- **WAREHOUSE nunca ve importes.** El filtrado ocurre en el backend por rol
+  (`canSeeReceiptFinancials()`, lista blanca ADMIN/MANAGEMENT/ACCOUNTANT/
+  PURCHASING): para cualquier otro rol las claves `reclassifiedAmount` (línea) y
+  `reclassificationEntryId` (encabezado) **no existen** en `POST /purchase-
+  invoices/:id/receipts`, `GET /purchase-invoices/:id/receipts` y `GET
+  /purchase-receipts/:id`. Para los demás roles las respuestas no cambian.
+- **Vistas de almacén.** `PurchaseReceivingController` (prefijo propio
+  `/api/v1/purchase-receiving`, deliberadamente distinto de `purchase-
+  invoices` para no competir con `GET /purchase-invoices/:id` ni abrir la
+  factura completa): `GET /purchase-receiving/invoices` (facturas CONFIRMED con
+  líneas elegibles pendientes, paginado) y `GET /purchase-receiving/invoices/
+  :id` (líneas con SKU, producto, unidad y cantidades facturada/recibida/
+  pendiente). Cero montos ni ids contables. La cantidad pendiente descuenta
+  solo recepciones ACTIVE (anular una la reabre) y reutiliza
+  `computeReceiptLineQuantities()`, extraída de `receipt-line-status.ts` y
+  compartida con `GET /purchase-invoices/:id/receipts` (el filtro del listado
+  se resuelve en SQL con la misma semántica para paginar con totales
+  correctos). Acceso: ADMIN/WAREHOUSE/MANAGEMENT/ACCOUNTANT.
+- **Pruebas.** `test/purchasing-role.e2e-spec.ts` (32 pruebas: matriz completa,
+  login solo-PURCHASING, roles combinados y cambio de rol, excepción de
+  MANAGEMENT, vistas de almacén con recepciones parciales/anuladas, endpoints
+  alternativos y regresión de otros roles). Pruebas existentes actualizadas por
+  decisión funcional aprobada (no por conveniencia): las expectativas de
+  `@Roles`/permisos en specs de facturas, recepciones y cuentas por pagar, y 2
+  E2E (`MANAGEMENT/ACCOUNTANT: leen pero nunca escriben` y `SELLER/WAREHOUSE:
+  403` en recepciones).
+- **Contrato Angular:** `docs/purchasing-role-api.md`.
+- **Pendiente para el documento maestro `.docx`** (no modificado): sección de
+  Roles (agregar `PURCHASING`), matriz de permisos de Compras, la excepción de
+  `MANAGEMENT` en facturas de compra, y la responsabilidad de recepción física
+  de `WAREHOUSE` sin información financiera.
 
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito

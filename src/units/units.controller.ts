@@ -46,6 +46,7 @@ const READ_ROLES = [
   RoleName.SELLER,
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
 ] as const;
 
 @ApiTags('Units')

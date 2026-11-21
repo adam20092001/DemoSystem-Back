@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -36,9 +37,10 @@ import {
 } from './purchase-receipt-calculator';
 import {
   PURCHASE_RECEIPT_SAFE_SELECT,
+  canSeeReceiptFinancials,
   toSafePurchaseReceipt,
 } from './mappers/purchase-receipt.mapper';
-import { computeReceiptLineStatus } from './receipt-line-status';
+import { computeReceiptLineQuantities } from './receipt-line-status';
 import { CancelPurchaseReceiptInput } from './types/cancel-purchase-receipt.input';
 import {
   CreatePurchaseReceiptInput,
@@ -49,15 +51,31 @@ import { SafePurchaseReceipt } from './types/safe-purchase-receipt';
 
 const ZERO = new Prisma.Decimal(0);
 
+/** Mensaje funcional (sin códigos de cuenta ni importes) para roles sin vista financiera. */
+export const WAREHOUSE_ACCOUNTING_CONFIG_MESSAGE =
+  'No se puede registrar la recepción debido a una configuración contable pendiente. Comuníquese con el administrador.';
+
 /** Referencia de documento para StockMovementEngine/InventoryMovement — mismo criterio que SALE_REFERENCE_TYPE en sales.service.ts. */
 const PURCHASE_RECEIPT_REFERENCE_TYPE = 'PurchaseReceipt';
 
-/** ADMIN administra el ciclo de vida completo; MANAGEMENT/ACCOUNTANT solo leen. SELLER/WAREHOUSE sin ningún acceso nuevo (A5.2b kickoff). */
-const MANAGE_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
+/**
+ * R1: la autorización se separa por acción. Registrar la recepción física
+ * (ADMIN, WAREHOUSE); anularla sigue siendo exclusivo de ADMIN. Lectura:
+ * ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING con la vista completa y
+ * WAREHOUSE con una vista SIN campos financieros (ver
+ * canSeeReceiptFinancials en el mapper). SELLER sin ningún acceso.
+ */
+const CREATE_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.WAREHOUSE,
+]);
+const CANCEL_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
+  RoleName.WAREHOUSE,
 ]);
 
 function assertCanRead(requesterRole: RoleName): void {
@@ -68,10 +86,18 @@ function assertCanRead(requesterRole: RoleName): void {
   }
 }
 
-function assertCanManage(requesterRole: RoleName): void {
-  if (!MANAGE_ROLES.has(requesterRole)) {
+function assertCanCreate(requesterRole: RoleName): void {
+  if (!CREATE_ROLES.has(requesterRole)) {
     throw new ForbiddenException(
-      'No tiene permisos para administrar recepciones de compra',
+      'No tiene permisos para registrar recepciones de compra',
+    );
+  }
+}
+
+function assertCanCancel(requesterRole: RoleName): void {
+  if (!CANCEL_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para anular recepciones de compra',
     );
   }
 }
@@ -114,6 +140,8 @@ interface ReclassificationPlanItem {
  */
 @Injectable()
 export class PurchaseReceiptsService {
+  private readonly logger = new Logger(PurchaseReceiptsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
@@ -138,7 +166,7 @@ export class PurchaseReceiptsService {
     if (row === null) {
       throw new NotFoundException('Recepción de compra no encontrada');
     }
-    return toSafePurchaseReceipt(row);
+    return toSafePurchaseReceipt(row, requesterRole);
   }
 
   /**
@@ -189,21 +217,19 @@ export class PurchaseReceiptsService {
 
     const lines = invoice.lines
       .filter((l) => l.isReceiptEligible === true)
-      .map((l) => {
-        const received = receivedMap.get(l.id) ?? ZERO;
-        const pending = l.quantity.minus(received);
-        return {
-          purchaseInvoiceLineId: l.id,
-          invoicedQuantity: l.quantity.toFixed(3),
-          receivedQuantity: received.toFixed(3),
-          pendingQuantity: (pending.lessThan(0) ? ZERO : pending).toFixed(3),
-          status: computeReceiptLineStatus(received, l.quantity),
-        };
-      });
+      .map((l) => ({
+        purchaseInvoiceLineId: l.id,
+        ...computeReceiptLineQuantities(
+          receivedMap.get(l.id) ?? ZERO,
+          l.quantity,
+        ),
+      }));
 
     return {
       purchaseInvoiceId,
-      receipts: receiptRows.map(toSafePurchaseReceipt),
+      receipts: receiptRows.map((row) =>
+        toSafePurchaseReceipt(row, requesterRole),
+      ),
       lines,
     };
   }
@@ -215,7 +241,7 @@ export class PurchaseReceiptsService {
   async create(
     input: CreatePurchaseReceiptInput,
   ): Promise<SafePurchaseReceipt> {
-    assertCanManage(input.requesterRole);
+    assertCanCreate(input.requesterRole);
 
     const receivedDateString = input.receivedDate ?? businessToday();
     const receivedDate = this.normalizeDateOnly(
@@ -252,7 +278,7 @@ export class PurchaseReceiptsService {
         if (existing !== null) {
           // Reintento idempotente real: mismo resultado, sin duplicar
           // ningún efecto (stock/auditoría/contabilidad).
-          return toSafePurchaseReceipt(existing);
+          return toSafePurchaseReceipt(existing, input.requesterRole);
         }
       }
 
@@ -324,6 +350,7 @@ export class PurchaseReceiptsService {
         requested,
         invoiceLock,
         alreadyReceivedMap,
+        input.requesterRole,
       );
 
       const created = await tx.purchaseReceipt.create({
@@ -466,7 +493,7 @@ export class PurchaseReceiptsService {
         client: tx,
       });
 
-      return toSafePurchaseReceipt(finalRow);
+      return toSafePurchaseReceipt(finalRow, input.requesterRole);
     });
   }
 
@@ -484,7 +511,7 @@ export class PurchaseReceiptsService {
   async cancel(
     input: CancelPurchaseReceiptInput,
   ): Promise<SafePurchaseReceipt> {
-    assertCanManage(input.requesterRole);
+    assertCanCancel(input.requesterRole);
 
     const reason = input.reason.trim();
     if (reason.length === 0) {
@@ -618,7 +645,7 @@ export class PurchaseReceiptsService {
         client: tx,
       });
 
-      return toSafePurchaseReceipt(updated);
+      return toSafePurchaseReceipt(updated, input.requesterRole);
     });
   }
 
@@ -707,6 +734,7 @@ export class PurchaseReceiptsService {
     requested: Map<string, Prisma.Decimal>,
     invoiceLock: LockedPurchaseInvoiceRow,
     alreadyReceivedMap: Map<string, Prisma.Decimal>,
+    requesterRole: RoleName,
   ): Promise<ReclassificationPlanItem[]> {
     const purposesInvolved = Array.from(
       new Set(lockedLines.map((row) => row.purchasePurpose)),
@@ -775,8 +803,15 @@ export class PurchaseReceiptsService {
         targetAccount.status !== AccountStatus.ACTIVE ||
         !targetAccount.isPostable
       ) {
+        // R1: WAREHOUSE nunca recibe códigos de cuenta ni detalle contable.
+        // El detalle completo queda siempre en el log interno del servidor.
+        this.logger.warn(
+          `Reclasificación bloqueada: la cuenta destino configurada para "${sourceAccount.code}" no existe o no está activa/postable (factura ${invoiceLock.id}, línea ${row.id})`,
+        );
         throw new ConflictException(
-          `La cuenta de reclasificación configurada para "${sourceAccount.code}" no existe o no está activa/postable`,
+          canSeeReceiptFinancials(requesterRole)
+            ? `La cuenta de reclasificación configurada para "${sourceAccount.code}" no existe o no está activa/postable`
+            : WAREHOUSE_ACCOUNTING_CONFIG_MESSAGE,
         );
       }
       if (targetAccount.receiptReclassificationTargetAccountId !== null) {

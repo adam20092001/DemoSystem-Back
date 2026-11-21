@@ -42,12 +42,22 @@ import { UpdatePurchaseInvoiceDto } from './dto/update-purchase-invoice.dto';
 import { PurchaseInvoicesService } from './purchase-invoices.service';
 import { SafePurchaseInvoice } from './types/safe-purchase-invoice';
 
+/**
+ * R1: la autorización se separa por acción (antes un único conjunto de
+ * solo ADMIN). Lectura: ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING. Crear y
+ * editar DRAFT: ADMIN/PURCHASING. Confirmar y anular: ADMIN/MANAGEMENT
+ * (excepción aprobada a MANAGEMENT como rol de solo lectura; ver CLAUDE.md §5).
+ */
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
-const MANAGE_ROLES = [RoleName.ADMIN] as const;
+const CREATE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
+const EDIT_DRAFT_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
+const CONFIRM_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const CANCEL_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
 
 /**
  * Facturas de compra universales (Fase A5.2a): ciclo de vida
@@ -93,7 +103,7 @@ export class PurchaseInvoicesController {
   }
 
   @ApiOperation({
-    summary: 'Crear una factura de compra (ADMIN; nace DRAFT)',
+    summary: 'Crear una factura de compra (ADMIN, PURCHASING; nace DRAFT)',
     description:
       'Puede crearse sin líneas o con líneas incompletas: toda validación tributaria/de cuadre estricta se exige recién al confirmar. currencyCode siempre se toma de CompanySettings vigente, nunca del cliente.',
   })
@@ -103,7 +113,7 @@ export class PurchaseInvoicesController {
       'Payload inválido, o el proveedor/producto referenciado no existe.',
   })
   @ApiConflictResponse({ description: 'El proveedor indicado no está activo.' })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...CREATE_ROLES)
   @Post()
   create(
     @Body() dto: CreatePurchaseInvoiceDto,
@@ -128,7 +138,8 @@ export class PurchaseInvoicesController {
   }
 
   @ApiOperation({
-    summary: 'Editar una factura de compra (ADMIN; solo mientras status=DRAFT)',
+    summary:
+      'Editar una factura de compra (ADMIN, PURCHASING; solo mientras status=DRAFT)',
     description:
       '`lines`, si se envía, reemplaza el arreglo completo de líneas — nunca un parche línea a línea.',
   })
@@ -137,7 +148,7 @@ export class PurchaseInvoicesController {
   @ApiBadRequestResponse({ description: 'Payload vacío o inválido.' })
   @ApiNotFoundResponse({ description: 'No existe.' })
   @ApiConflictResponse({ description: 'La factura ya no está en DRAFT.' })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...EDIT_DRAFT_ROLES)
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -163,7 +174,7 @@ export class PurchaseInvoicesController {
   }
 
   @ApiOperation({
-    summary: 'Confirmar una factura de compra (ADMIN)',
+    summary: 'Confirmar una factura de compra (ADMIN, MANAGEMENT)',
     description:
       'Congela isReceiptEligible por línea y contabiliza vía AccountingEngine.postPurchaseRecognition(). Falla con 409 si algún mapeo contable requerido (ACCOUNTS_PAYABLE/VAT_RECEIVABLE/PURCHASE_*) todavía no fue configurado por ADMIN.',
   })
@@ -177,7 +188,7 @@ export class PurchaseInvoicesController {
     description:
       'Ya no está en DRAFT, el proveedor no está activo, el periodo contable está CERRADO, o falta un mapeo contable.',
   })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...CONFIRM_ROLES)
   @Post(':id/confirm')
   @HttpCode(HttpStatus.OK)
   confirm(
@@ -194,7 +205,7 @@ export class PurchaseInvoicesController {
   }
 
   @ApiOperation({
-    summary: 'Anular una factura de compra ya confirmada (ADMIN)',
+    summary: 'Anular una factura de compra ya confirmada (ADMIN, MANAGEMENT)',
     description:
       'Revierte el asiento contable ORIGINAL vía AccountingEngine.reverseOriginalForSource(). Nunca modifica inventario (esta fase no mueve stock).',
   })
@@ -203,7 +214,7 @@ export class PurchaseInvoicesController {
   @ApiBadRequestResponse({ description: 'reason faltante o inválido.' })
   @ApiNotFoundResponse({ description: 'No existe.' })
   @ApiConflictResponse({ description: 'La factura no está CONFIRMED.' })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...CANCEL_ROLES)
   @Post(':id/cancel')
   @HttpCode(HttpStatus.OK)
   cancel(

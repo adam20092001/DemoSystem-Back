@@ -128,7 +128,7 @@ describe('PurchaseInvoicesController', () => {
     const mutateRoutes = ['create', 'update', 'confirm', 'cancel'];
 
     it.each(readRoutes)(
-      '%s expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) exactamente',
+      '%s expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT, PURCHASING) exactamente',
       (name) => {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
@@ -138,18 +138,30 @@ describe('PurchaseInvoicesController', () => {
           RoleName.ADMIN,
           RoleName.MANAGEMENT,
           RoleName.ACCOUNTANT,
+          RoleName.PURCHASING,
         ]);
       },
     );
 
-    it.each(mutateRoutes)(
-      '%s expone @Roles(ADMIN) exclusivamente (A5.2a kickoff: MANAGEMENT/ACCOUNTANT nunca escriben aquí)',
+    it.each(['create', 'update'])(
+      'R1: %s expone @Roles(ADMIN, PURCHASING) exactamente (MANAGEMENT/ACCOUNTANT nunca crean ni editan)',
       (name) => {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
           controllerPrototype[name],
         ) as RoleName[];
-        expect(metadata).toEqual([RoleName.ADMIN]);
+        expect(metadata).toEqual([RoleName.ADMIN, RoleName.PURCHASING]);
+      },
+    );
+
+    it.each(['confirm', 'cancel'])(
+      'R1: %s expone @Roles(ADMIN, MANAGEMENT) exactamente (excepción aprobada; PURCHASING nunca confirma ni anula)',
+      (name) => {
+        const metadata = Reflect.getMetadata(
+          ROLES_KEY,
+          controllerPrototype[name],
+        ) as RoleName[];
+        expect(metadata).toEqual([RoleName.ADMIN, RoleName.MANAGEMENT]);
       },
     );
 

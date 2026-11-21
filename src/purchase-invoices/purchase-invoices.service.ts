@@ -54,15 +54,32 @@ const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
-/** ADMIN/MANAGEMENT/ACCOUNTANT leen; SELLER/WAREHOUSE sin ningún acceso nuevo (A5.2a kickoff, §11). */
+/** ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING leen; SELLER/WAREHOUSE sin acceso a la factura completa (A5.2a §11; R1). */
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ]);
 
-/** Solo ADMIN administra el ciclo de vida completo en esta fase (A5.2a kickoff, §11). */
-const MANAGE_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
+/** R1: la autorización se separa por acción (antes un único conjunto de solo ADMIN). */
+const CREATE_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.PURCHASING,
+]);
+const EDIT_DRAFT_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.PURCHASING,
+]);
+/** Excepción aprobada: MANAGEMENT confirma y anula, nunca crea/edita. */
+const CONFIRM_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+]);
+const CANCEL_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+]);
 
 function assertCanRead(requesterRole: RoleName): void {
   if (!READ_ROLES.has(requesterRole)) {
@@ -72,10 +89,34 @@ function assertCanRead(requesterRole: RoleName): void {
   }
 }
 
-function assertCanManage(requesterRole: RoleName): void {
-  if (!MANAGE_ROLES.has(requesterRole)) {
+function assertCanCreate(requesterRole: RoleName): void {
+  if (!CREATE_ROLES.has(requesterRole)) {
     throw new ForbiddenException(
-      'No tiene permisos para administrar facturas de compra',
+      'No tiene permisos para crear facturas de compra',
+    );
+  }
+}
+
+function assertCanEditDraft(requesterRole: RoleName): void {
+  if (!EDIT_DRAFT_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para editar facturas de compra',
+    );
+  }
+}
+
+function assertCanConfirm(requesterRole: RoleName): void {
+  if (!CONFIRM_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para confirmar facturas de compra',
+    );
+  }
+}
+
+function assertCanCancel(requesterRole: RoleName): void {
+  if (!CANCEL_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para anular facturas de compra',
     );
   }
 }
@@ -208,7 +249,7 @@ export class PurchaseInvoicesService {
   async create(
     input: CreatePurchaseInvoiceInput,
   ): Promise<SafePurchaseInvoice> {
-    assertCanManage(input.requesterRole);
+    assertCanCreate(input.requesterRole);
 
     const issueDate = this.normalizeDateOnly(input.issueDate, 'issueDate');
     const registrationDate = this.normalizeDateOnly(
@@ -309,7 +350,7 @@ export class PurchaseInvoicesService {
   async update(
     input: UpdatePurchaseInvoiceInput,
   ): Promise<SafePurchaseInvoice> {
-    assertCanManage(input.requesterRole);
+    assertCanEditDraft(input.requesterRole);
 
     const hasAnyField =
       input.documentType !== undefined ||
@@ -430,7 +471,7 @@ export class PurchaseInvoicesService {
   async confirm(
     input: ConfirmPurchaseInvoiceInput,
   ): Promise<SafePurchaseInvoice> {
-    assertCanManage(input.requesterRole);
+    assertCanConfirm(input.requesterRole);
 
     return this.prisma.$transaction(async (tx) => {
       const locked = await this.lockInvoice(tx, input.purchaseInvoiceId);
@@ -553,7 +594,7 @@ export class PurchaseInvoicesService {
   async cancel(
     input: CancelPurchaseInvoiceInput,
   ): Promise<SafePurchaseInvoice> {
-    assertCanManage(input.requesterRole);
+    assertCanCancel(input.requesterRole);
 
     const reason = input.reason.trim();
     if (reason.length === 0) {

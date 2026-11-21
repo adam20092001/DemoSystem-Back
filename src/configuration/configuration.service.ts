@@ -71,6 +71,7 @@ function assertCanUpdateConfiguration(requesterRole: RoleName): void {
 const POS_READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
   RoleName.SELLER,
 ]);
 

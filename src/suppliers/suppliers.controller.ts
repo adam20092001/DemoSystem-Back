@@ -41,12 +41,18 @@ import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { SafeSupplier } from './types/safe-supplier';
 import { SuppliersService } from './suppliers.service';
 
-/** ADMIN administra el ciclo de vida completo; MANAGEMENT/ACCOUNTANT solo leen. SELLER/WAREHOUSE sin ningún acceso nuevo (A5.1 kickoff, §6). */
-const WRITE_ROLES = [RoleName.ADMIN] as const;
+/**
+ * R1: ADMIN y PURCHASING crean/editan; activar/desactivar (borrado lógico)
+ * sigue siendo exclusivo de ADMIN; MANAGEMENT/ACCOUNTANT/PURCHASING leen.
+ * SELLER/WAREHOUSE sin ningún acceso (A5.1 kickoff, §6).
+ */
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
+const LIFECYCLE_ROLES = [RoleName.ADMIN] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /**
@@ -87,7 +93,7 @@ export class SuppliersController {
   }
 
   @ApiOperation({
-    summary: 'Crear un proveedor (solo ADMIN; nace ACTIVE)',
+    summary: 'Crear un proveedor (ADMIN, PURCHASING; nace ACTIVE)',
     description:
       'documentType=RUC/DNI exige el formato numérico exacto (11/8 dígitos, solo FORMATO — nunca una verificación real contra SUNAT). FOREIGN_TAX_ID/OTHER admiten cualquier texto no vacío, para proveedores extranjeros sin RUC. countryCode por defecto "PE" si se omite.',
   })
@@ -118,15 +124,16 @@ export class SuppliersController {
       address: dto.address,
       internalNotes: dto.internalNotes,
       defaultCurrencyCode: dto.defaultCurrencyCode,
+      requesterRole: actor.role,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
   }
 
   @ApiOperation({
-    summary: 'Actualizar los datos de un proveedor (solo ADMIN)',
+    summary: 'Actualizar los datos de un proveedor (ADMIN, PURCHASING)',
     description:
-      'status es inmutable aquí (usar activate/deactivate). El par documentType/documentNumber solo puede reemplazarse junto por un valor nuevo (nunca limpiarse: un proveedor siempre exige documento).',
+      'status es inmutable aquí: enviarlo produce 400 (whitelist estricta); solo ADMIN cambia el estado con activate/deactivate. El par documentType/documentNumber solo puede reemplazarse junto por un valor nuevo (nunca limpiarse: un proveedor siempre exige documento).',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: SupplierResponseDto })
@@ -160,6 +167,7 @@ export class SuppliersController {
       address: dto.address,
       internalNotes: dto.internalNotes,
       defaultCurrencyCode: dto.defaultCurrencyCode,
+      requesterRole: actor.role,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
@@ -170,7 +178,7 @@ export class SuppliersController {
   @ApiOkResponse({ type: SupplierResponseDto })
   @ApiNotFoundResponse({ description: 'No existe.' })
   @ApiConflictResponse({ description: 'Ya estaba ACTIVE.' })
-  @Roles(...WRITE_ROLES)
+  @Roles(...LIFECYCLE_ROLES)
   @Post(':id/activate')
   @HttpCode(HttpStatus.OK)
   activate(
@@ -180,6 +188,7 @@ export class SuppliersController {
   ): Promise<SafeSupplier> {
     return this.suppliersService.activate({
       supplierId: id,
+      requesterRole: actor.role,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });
@@ -190,7 +199,7 @@ export class SuppliersController {
   @ApiOkResponse({ type: SupplierResponseDto })
   @ApiNotFoundResponse({ description: 'No existe.' })
   @ApiConflictResponse({ description: 'Ya estaba INACTIVE.' })
-  @Roles(...WRITE_ROLES)
+  @Roles(...LIFECYCLE_ROLES)
   @Post(':id/deactivate')
   @HttpCode(HttpStatus.OK)
   deactivate(
@@ -200,6 +209,7 @@ export class SuppliersController {
   ): Promise<SafeSupplier> {
     return this.suppliersService.deactivate({
       supplierId: id,
+      requesterRole: actor.role,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     });

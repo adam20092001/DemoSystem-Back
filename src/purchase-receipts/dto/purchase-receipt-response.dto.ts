@@ -1,11 +1,12 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PurchaseReceiptStatus } from '@prisma/client';
 
 /**
  * Documenta exactamente los campos de SafePurchaseReceiptLine. Nunca
  * incluye costo/monto de factura (CLAUDE.md A5.2b §6) — solo cantidad
- * física y, si aplica, el monto de reclasificación contable (nunca un
- * costo de producto).
+ * física y, para roles con visibilidad financiera, el monto de
+ * reclasificación contable (nunca un costo de producto); WAREHOUSE no lo
+ * recibe (R1).
  */
 export class PurchaseReceiptLineResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -17,13 +18,13 @@ export class PurchaseReceiptLineResponseDto {
   @ApiProperty({ type: String })
   quantity!: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     type: String,
     nullable: true,
     description:
-      'Monto exactamente reclasificado contablemente para esta línea; null cuando no disparó reclasificación (el caso predeterminado y seguro mientras no exista una decisión del contador).',
+      'Monto exactamente reclasificado contablemente para esta línea; null cuando no disparó reclasificación. R1: la clave NO EXISTE en la respuesta para WAREHOUSE (sin visibilidad financiera).',
   })
-  reclassifiedAmount!: string | null;
+  reclassifiedAmount?: string | null;
 }
 
 export class PurchaseReceiptResponseDto {
@@ -57,8 +58,14 @@ export class PurchaseReceiptResponseDto {
   @ApiProperty({ nullable: true, type: String })
   cancellationReason!: string | null;
 
-  @ApiProperty({ format: 'uuid', nullable: true, type: String })
-  reclassificationEntryId!: string | null;
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    type: String,
+    description:
+      'Asiento de reclasificación contable. R1: la clave NO EXISTE en la respuesta para WAREHOUSE (sin visibilidad financiera).',
+  })
+  reclassificationEntryId?: string | null;
 
   @ApiProperty()
   createdAt!: Date;

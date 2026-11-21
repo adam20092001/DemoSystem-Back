@@ -390,6 +390,31 @@ backend ya aplica:
 - `createdByUserId` (cobrador) en `GET /api/v1/payments` y en el reporte
   `payments-by-method`.
 
+## Rol PURCHASING (compras)
+
+El rol `PURCHASING` crea y edita **proveedores** y **facturas de compra en
+borrador**, y consulta productos, categorías, unidades, la configuración POS
+de solo lectura, recepciones y **cuentas por pagar**. No activa/desactiva
+proveedores, no confirma ni anula facturas, no recibe mercadería, no accede a
+pagos a proveedores ni modifica inventario.
+
+- `MANAGEMENT` **confirma y anula** facturas de compra (única excepción de
+  escritura aprobada para ese rol).
+- `WAREHOUSE` registra la **recepción física** y dispone de dos vistas sin
+  importes: `GET /api/v1/purchase-receiving/invoices` (facturas CONFIRMED con
+  líneas pendientes) y `GET /api/v1/purchase-receiving/invoices/:id`
+  (cantidades facturada/recibida/pendiente). Sus respuestas de recepción
+  omiten los campos financieros.
+- La autorización siempre usa el **rol activo** de la sesión.
+
+Las migraciones `20261029000000_add_purchasing_role_enum_value` y
+`20261029000100_seed_purchasing_role` crean el rol también en instalaciones ya
+inicializadas (no hace falta reejecutar `db:seed`). Para asignarlo, `POST` o
+`PATCH /api/v1/users` con `roleNames` que incluya `"PURCHASING"`.
+
+Matriz completa en [CLAUDE.md](CLAUDE.md) §5 y contrato para Angular en
+[docs/purchasing-role-api.md](docs/purchasing-role-api.md).
+
 ## Caja retirada
 
 Por decisión del cliente, el módulo operativo de **Caja / arqueo** fue

@@ -70,7 +70,7 @@ describe('PurchaseInvoiceReceiptsController', () => {
     });
   });
 
-  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) en listReceipts y @Roles(ADMIN) exclusivamente en create', () => {
+  it('R1: expone lectura (ADMIN, MANAGEMENT, ACCOUNTANT, PURCHASING, WAREHOUSE) en listReceipts y @Roles(ADMIN, WAREHOUSE) en create', () => {
     const prototype =
       PurchaseInvoiceReceiptsController.prototype as unknown as Record<
         string,
@@ -80,9 +80,12 @@ describe('PurchaseInvoiceReceiptsController', () => {
       RoleName.ADMIN,
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
+      RoleName.WAREHOUSE,
     ]);
     expect(Reflect.getMetadata(ROLES_KEY, prototype.create)).toEqual([
       RoleName.ADMIN,
+      RoleName.WAREHOUSE,
     ]);
   });
 });
@@ -118,7 +121,7 @@ describe('PurchaseReceiptsController', () => {
     });
   });
 
-  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) en findOne y @Roles(ADMIN) exclusivamente en cancel; ninguno incluye SELLER/WAREHOUSE', () => {
+  it('R1: findOne admite lectura incluida WAREHOUSE (vista sin importes); cancel es @Roles(ADMIN) exclusivamente; ninguno incluye SELLER', () => {
     const prototype = PurchaseReceiptsController.prototype as unknown as Record<
       string,
       object
@@ -135,11 +138,13 @@ describe('PurchaseReceiptsController', () => {
       RoleName.ADMIN,
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
+      RoleName.WAREHOUSE,
     ]);
     expect(writeMetadata).toEqual([RoleName.ADMIN]);
     expect(readMetadata).not.toContain(RoleName.SELLER);
-    expect(readMetadata).not.toContain(RoleName.WAREHOUSE);
     expect(writeMetadata).not.toContain(RoleName.SELLER);
     expect(writeMetadata).not.toContain(RoleName.WAREHOUSE);
+    expect(writeMetadata).not.toContain(RoleName.PURCHASING);
   });
 });

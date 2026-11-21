@@ -42,6 +42,35 @@ describe('resolveDefaultActiveRole', () => {
     ).toBe(RoleName.ACCOUNTANT);
   });
 
+  it('R1: PURCHASING como único rol resuelve a PURCHASING, nunca lanza (el usuario solo-PURCHASING debe poder iniciar sesión)', () => {
+    expect(resolveDefaultActiveRole([RoleName.PURCHASING])).toBe(
+      RoleName.PURCHASING,
+    );
+  });
+
+  it('R1: PURCHASING tiene prioridad sobre MANAGEMENT/ACCOUNTANT/ADMIN (menos privilegiado primero) pero cede ante SELLER y WAREHOUSE', () => {
+    expect(
+      resolveDefaultActiveRole([
+        RoleName.ADMIN,
+        RoleName.ACCOUNTANT,
+        RoleName.MANAGEMENT,
+        RoleName.PURCHASING,
+      ]),
+    ).toBe(RoleName.PURCHASING);
+    expect(
+      resolveDefaultActiveRole([RoleName.PURCHASING, RoleName.WAREHOUSE]),
+    ).toBe(RoleName.WAREHOUSE);
+    expect(
+      resolveDefaultActiveRole([RoleName.PURCHASING, RoleName.SELLER]),
+    ).toBe(RoleName.SELLER);
+  });
+
+  it('todo valor de RoleName tiene un camino de login: cada rol, como único asignado, resuelve a sí mismo', () => {
+    for (const role of Object.values(RoleName)) {
+      expect(resolveDefaultActiveRole([role])).toBe(role);
+    }
+  });
+
   it('ADMIN como único rol resuelve a ADMIN', () => {
     expect(resolveDefaultActiveRole([RoleName.ADMIN])).toBe(RoleName.ADMIN);
   });

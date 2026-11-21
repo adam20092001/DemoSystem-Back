@@ -584,32 +584,54 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
   // RBAC
   // ====================================================================
   describe('RBAC', () => {
-    it('SELLER/WAREHOUSE: 403 en todos los endpoints', async () => {
-      for (const cookie of [sellerCookie, warehouseCookie]) {
-        expect((await listReceipts(NON_EXISTENT_UUID, cookie)).status).toBe(
-          403,
-        );
-        expect((await getReceipt(NON_EXISTENT_UUID, cookie)).status).toBe(403);
-        expect(
-          (
-            await createReceipt(
-              NON_EXISTENT_UUID,
-              {
-                lines: [
-                  {
-                    purchaseInvoiceLineId: NON_EXISTENT_UUID,
-                    quantity: '1.000',
-                  },
-                ],
-              },
-              cookie,
-            )
-          ).status,
-        ).toBe(403);
-        expect(
-          (await cancelReceipt(NON_EXISTENT_UUID, 'motivo', cookie)).status,
-        ).toBe(403);
-      }
+    it('SELLER: 403 en todos los endpoints', async () => {
+      const cookie = sellerCookie;
+      expect((await listReceipts(NON_EXISTENT_UUID, cookie)).status).toBe(403);
+      expect((await getReceipt(NON_EXISTENT_UUID, cookie)).status).toBe(403);
+      expect(
+        (
+          await createReceipt(
+            NON_EXISTENT_UUID,
+            {
+              lines: [
+                {
+                  purchaseInvoiceLineId: NON_EXISTENT_UUID,
+                  quantity: '1.000',
+                },
+              ],
+            },
+            cookie,
+          )
+        ).status,
+      ).toBe(403);
+      expect(
+        (await cancelReceipt(NON_EXISTENT_UUID, 'motivo', cookie)).status,
+      ).toBe(403);
+    });
+
+    it('R1: WAREHOUSE lee y registra la recepción física (atraviesa la guardia: 404 por ids inexistentes), pero nunca la anula (403)', async () => {
+      const cookie = warehouseCookie;
+      expect((await listReceipts(NON_EXISTENT_UUID, cookie)).status).toBe(404);
+      expect((await getReceipt(NON_EXISTENT_UUID, cookie)).status).toBe(404);
+      expect(
+        (
+          await createReceipt(
+            NON_EXISTENT_UUID,
+            {
+              lines: [
+                {
+                  purchaseInvoiceLineId: NON_EXISTENT_UUID,
+                  quantity: '1.000',
+                },
+              ],
+            },
+            cookie,
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (await cancelReceipt(NON_EXISTENT_UUID, 'motivo', cookie)).status,
+      ).toBe(403);
     });
 
     it('MANAGEMENT/ACCOUNTANT: leen pero nunca escriben', async () => {

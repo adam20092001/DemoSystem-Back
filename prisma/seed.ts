@@ -22,6 +22,8 @@ const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   MANAGEMENT: 'Dashboard y reportes de lectura y análisis',
   ACCOUNTANT:
     'Lectura contable global y ciclo de vida completo de asientos manuales',
+  PURCHASING:
+    'Compras: proveedores y facturas de compra en borrador; consulta de recepciones y cuentas por pagar',
 };
 
 /**
@@ -238,7 +240,7 @@ async function seedRoles(): Promise<void> {
     });
   }
   console.log(
-    'Roles verificados: ADMIN, SELLER, WAREHOUSE, MANAGEMENT, ACCOUNTANT',
+    'Roles verificados: ADMIN, SELLER, WAREHOUSE, MANAGEMENT, ACCOUNTANT, PURCHASING',
   );
 }
 

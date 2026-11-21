@@ -6,12 +6,15 @@ import { SafeUser } from '../types/safe-user';
  * Orden estable de PRESENTACIÓN (KAN-18, Bloque A, §12 del kickoff
  * aprobado): únicamente para ordenar el arreglo `roles` en las respuestas
  * de usuario. Deliberadamente DISTINTO del orden de selección del rol
- * ACTIVO por defecto al iniciar sesión (SELLER > WAREHOUSE > MANAGEMENT >
- * ADMIN, ver default-active-role.ts) — nunca confundir ambos.
+ * ACTIVO por defecto al iniciar sesión (ver default-active-role.ts) —
+ * nunca confundir ambos. R1: incluye ACCOUNTANT (omitido por error desde la
+ * Fase A4, lo que lo dejaba con índice -1 y por tanto primero) y PURCHASING.
  */
 const ROLE_PRESENTATION_ORDER: readonly RoleName[] = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
   RoleName.WAREHOUSE,
   RoleName.SELLER,
 ];
