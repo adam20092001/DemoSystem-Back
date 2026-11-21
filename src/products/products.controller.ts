@@ -75,6 +75,7 @@ const READ_ROLES = [
   RoleName.SELLER,
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
 ] as const;
 
 @ApiCookieAuth(COOKIE_AUTH_NAME)

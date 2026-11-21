@@ -54,6 +54,10 @@ enum RoleName {
   // administración de ventas/inventario/usuarios/configuración, que
   // siguen exigiendo ADMIN explícitamente en cada guard propio.
   ACCOUNTANT
+  // R1: compras. Crea/edita proveedores y facturas de compra (solo
+  // DRAFT); lee recepciones y cuentas por pagar. Nunca confirma ni anula
+  // facturas, recibe mercadería, registra pagos ni toca inventario.
+  PURCHASING
 }
 
 enum UserStatus {

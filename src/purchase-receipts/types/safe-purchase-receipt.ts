@@ -5,7 +5,8 @@ export interface SafePurchaseReceiptLine {
   purchaseInvoiceLineId: string;
   quantity: string;
   /** NULL cuando esta línea no disparó reclasificación contable. */
-  reclassifiedAmount: string | null;
+  /** R1: se OMITE (la clave no existe) para roles sin visibilidad financiera (WAREHOUSE). */
+  reclassifiedAmount?: string | null;
 }
 
 /** Respuesta segura de PurchaseReceipt (sin costos/montos de factura). */
@@ -20,7 +21,8 @@ export interface SafePurchaseReceipt {
   cancelledAt: Date | null;
   cancelledByUserId: string | null;
   cancellationReason: string | null;
-  reclassificationEntryId: string | null;
+  /** R1: se OMITE (la clave no existe) para roles sin visibilidad financiera (WAREHOUSE). */
+  reclassificationEntryId?: string | null;
   createdAt: Date;
   updatedAt: Date;
   lines: SafePurchaseReceiptLine[];

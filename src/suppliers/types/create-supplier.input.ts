@@ -1,4 +1,4 @@
-import { SupplierDocumentType } from '@prisma/client';
+import { RoleName, SupplierDocumentType } from '@prisma/client';
 
 /**
  * No expone id, status ni createdAt/updatedAt: son valores de sistema
@@ -18,6 +18,8 @@ export interface CreateSupplierInput {
   address?: string;
   internalNotes?: string;
   defaultCurrencyCode?: string;
+  /** Rol ACTIVO del solicitante (R1): el servicio lo valida de nuevo, independiente de @Roles(). */
+  requesterRole: RoleName;
   actorUserId: string;
   ipAddress?: string | null;
 }

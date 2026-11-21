@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -20,7 +21,10 @@ import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
 import { StockMovementEngine } from '../inventory/stock-movement.engine';
 import { InventoryValuationEngine } from '../inventory-valuation/inventory-valuation.engine';
-import { PurchaseReceiptsService } from './purchase-receipts.service';
+import {
+  PurchaseReceiptsService,
+  WAREHOUSE_ACCOUNTING_CONFIG_MESSAGE,
+} from './purchase-receipts.service';
 
 const ACTOR_ID = '33333333-3333-4333-8333-333333333333';
 const PURCHASE_INVOICE_ID = '99999999-9999-4999-8999-999999999999';
@@ -122,6 +126,16 @@ function createPrismaMock() {
   const tx = createTxMock();
   return {
     tx,
+    purchaseReceipt: {
+      findUnique: jest.fn<Promise<unknown>, [unknown]>(),
+      findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
+    },
+    purchaseInvoice: {
+      findUnique: jest.fn<Promise<unknown>, [unknown]>(),
+    },
+    purchaseReceiptLine: {
+      groupBy: jest.fn<Promise<unknown[]>, [unknown]>(),
+    },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
@@ -219,39 +233,160 @@ describe('PurchaseReceiptsService', () => {
   // Permisos
   // ====================================================================
   describe('permisos', () => {
-    it.each([RoleName.SELLER, RoleName.WAREHOUSE])(
-      '%s no puede leer ni escribir',
+    function cancelInput(role: RoleName) {
+      return {
+        purchaseReceiptId: PURCHASE_RECEIPT_ID,
+        reason: 'motivo',
+        requesterRole: role,
+        actorUserId: ACTOR_ID,
+        ipAddress: null,
+      };
+    }
+
+    it('SELLER no puede leer ni escribir', async () => {
+      await expect(
+        service.findOne(PURCHASE_RECEIPT_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        service.listByInvoice(PURCHASE_INVOICE_ID, RoleName.SELLER),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        service.create(createInput({ requesterRole: RoleName.SELLER })),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        service.cancel(cancelInput(RoleName.SELLER)),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
+    });
+
+    it.each([RoleName.MANAGEMENT, RoleName.ACCOUNTANT, RoleName.PURCHASING])(
+      '%s puede leer pero nunca registrar ni anular',
       async (role) => {
+        prisma.purchaseReceipt.findUnique.mockResolvedValue(
+          makeSafeReceiptRow(),
+        );
         await expect(
           service.findOne(PURCHASE_RECEIPT_ID, role),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        await expect(
-          service.listByInvoice(PURCHASE_INVOICE_ID, role),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).resolves.toBeDefined();
         await expect(
           service.create(createInput({ requesterRole: role })),
         ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(service.cancel(cancelInput(role))).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
         expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
       },
     );
 
-    it.each([RoleName.MANAGEMENT, RoleName.ACCOUNTANT])(
-      '%s puede leer pero nunca escribir',
-      async (role) => {
-        await expect(
-          service.create(createInput({ requesterRole: role })),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        await expect(
-          service.cancel({
-            purchaseReceiptId: PURCHASE_RECEIPT_ID,
-            reason: 'motivo',
-            requesterRole: role,
-            actorUserId: ACTOR_ID,
-            ipAddress: null,
-          }),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-      },
-    );
+    it('R1: WAREHOUSE puede leer y registrar la recepción física, pero nunca anularla', async () => {
+      prisma.purchaseReceipt.findUnique.mockResolvedValue(makeSafeReceiptRow());
+      await expect(
+        service.findOne(PURCHASE_RECEIPT_ID, RoleName.WAREHOUSE),
+      ).resolves.toBeDefined();
+      await expect(
+        service.create(createInput({ requesterRole: RoleName.WAREHOUSE })),
+      ).resolves.toBeDefined();
+      await expect(
+        service.cancel(cancelInput(RoleName.WAREHOUSE)),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('anular es exclusivo de ADMIN: pasa la guardia y llega a la lógica de negocio', async () => {
+      prisma.tx.$queryRaw.mockReset();
+      prisma.tx.$queryRaw.mockResolvedValue([]);
+      await expect(
+        service.cancel(cancelInput(RoleName.ADMIN)),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ====================================================================
+  // R1: protección financiera (WAREHOUSE nunca recibe importes)
+  // ====================================================================
+  describe('R1: visibilidad financiera por rol', () => {
+    const financialRow = () =>
+      makeSafeReceiptRow({
+        reclassificationEntryId: ENTRY_ID,
+        lines: [
+          {
+            id: PURCHASE_RECEIPT_LINE_ID,
+            purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
+            quantity: d('4.000'),
+            reclassifiedAmount: d('33.33'),
+          },
+        ],
+      });
+
+    it('WAREHOUSE: findOne omite reclassificationEntryId y reclassifiedAmount (las claves no existen)', async () => {
+      prisma.purchaseReceipt.findUnique.mockResolvedValue(financialRow());
+      const result = await service.findOne(
+        PURCHASE_RECEIPT_ID,
+        RoleName.WAREHOUSE,
+      );
+      expect(result).not.toHaveProperty('reclassificationEntryId');
+      expect(result.lines[0]).not.toHaveProperty('reclassifiedAmount');
+      expect(JSON.stringify(result)).not.toContain('33.33');
+      expect(JSON.stringify(result)).not.toContain(ENTRY_ID);
+      expect(result.lines[0].quantity).toBe('4.000');
+    });
+
+    it.each([
+      RoleName.ADMIN,
+      RoleName.MANAGEMENT,
+      RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
+    ])('%s: findOne conserva los campos financieros actuales', async (role) => {
+      prisma.purchaseReceipt.findUnique.mockResolvedValue(financialRow());
+      const result = await service.findOne(PURCHASE_RECEIPT_ID, role);
+      expect(result.reclassificationEntryId).toBe(ENTRY_ID);
+      expect(result.lines[0].reclassifiedAmount).toBe('33.33');
+    });
+
+    it('WAREHOUSE: listByInvoice omite los campos financieros de cada recepción anidada', async () => {
+      prisma.purchaseInvoice.findUnique.mockResolvedValue({
+        id: PURCHASE_INVOICE_ID,
+        lines: [
+          {
+            id: PURCHASE_INVOICE_LINE_ID,
+            quantity: d('10.000'),
+            isReceiptEligible: true,
+          },
+        ],
+      });
+      prisma.purchaseReceipt.findMany.mockResolvedValue([financialRow()]);
+      prisma.purchaseReceiptLine.groupBy.mockResolvedValue([
+        {
+          purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
+          _sum: { quantity: d('4.000') },
+        },
+      ]);
+      const result = await service.listByInvoice(
+        PURCHASE_INVOICE_ID,
+        RoleName.WAREHOUSE,
+      );
+      expect(result.receipts[0]).not.toHaveProperty('reclassificationEntryId');
+      expect(result.receipts[0].lines[0]).not.toHaveProperty(
+        'reclassifiedAmount',
+      );
+      expect(result.lines[0]).toEqual({
+        purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
+        invoicedQuantity: '10.000',
+        receivedQuantity: '4.000',
+        pendingQuantity: '6.000',
+        status: 'PARTIAL',
+      });
+    });
+
+    it('WAREHOUSE: create devuelve la recepción creada sin campos financieros, incluso en un reintento idempotente', async () => {
+      prisma.tx.purchaseReceipt.findUniqueOrThrow.mockResolvedValue(
+        financialRow(),
+      );
+      const created = await service.create(
+        createInput({ requesterRole: RoleName.WAREHOUSE }),
+      );
+      expect(created).not.toHaveProperty('reclassificationEntryId');
+      expect(created.lines[0]).not.toHaveProperty('reclassifiedAmount');
+    });
   });
 
   // ====================================================================
@@ -610,6 +745,43 @@ describe('PurchaseReceiptsService', () => {
         await expect(service.create(createInput())).rejects.toBeInstanceOf(
           ConflictException,
         );
+      });
+
+      describe('R1: mensaje 409 según rol (cuenta destino inactiva)', () => {
+        beforeEach(() => {
+          prisma.tx.account.findUnique.mockResolvedValue(
+            makeTargetAccount({ status: AccountStatus.INACTIVE }),
+          );
+        });
+
+        it('WAREHOUSE: 409 con mensaje funcional, sin código de cuenta, y el detalle queda en el log interno', async () => {
+          const warn = jest
+            .spyOn(Logger.prototype, 'warn')
+            .mockImplementation(() => undefined);
+          try {
+            const error: unknown = await service
+              .create(createInput({ requesterRole: RoleName.WAREHOUSE }))
+              .catch((e: unknown) => e);
+            expect(error).toBeInstanceOf(ConflictException);
+            const message = (error as ConflictException).message;
+            expect(message).toBe(WAREHOUSE_ACCOUNTING_CONFIG_MESSAGE);
+            expect(message).not.toContain('PURCH-RESALE');
+            expect(
+              JSON.stringify((error as ConflictException).getResponse()),
+            ).not.toContain('PURCH-RESALE');
+            expect(warn).toHaveBeenCalledWith(
+              expect.stringContaining('PURCH-RESALE'),
+            );
+          } finally {
+            warn.mockRestore();
+          }
+        });
+
+        it('ADMIN: conserva el mensaje original con el código de cuenta', async () => {
+          await expect(
+            service.create(createInput({ requesterRole: RoleName.ADMIN })),
+          ).rejects.toThrow(/PURCH-RESALE/);
+        });
       });
 
       it('cadena de reclasificación (la cuenta destino también tiene su propio objetivo): InternalServerErrorException', async () => {

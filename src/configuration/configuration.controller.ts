@@ -30,6 +30,7 @@ const READ_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
 const POS_READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
   RoleName.SELLER,
 ] as const;
 

@@ -73,6 +73,7 @@ describe('SuppliersController', () => {
         address: undefined,
         internalNotes: undefined,
         defaultCurrencyCode: undefined,
+        requesterRole: RoleName.ADMIN,
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
@@ -131,6 +132,7 @@ describe('SuppliersController', () => {
         address: undefined,
         internalNotes: undefined,
         defaultCurrencyCode: undefined,
+        requesterRole: RoleName.ADMIN,
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
@@ -146,6 +148,7 @@ describe('SuppliersController', () => {
       const result = await controller.activate('supplier-1', ACTOR, request);
       expect(service.activate).toHaveBeenCalledWith({
         supplierId: 'supplier-1',
+        requesterRole: RoleName.ADMIN,
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
@@ -159,6 +162,7 @@ describe('SuppliersController', () => {
       const result = await controller.deactivate('supplier-1', ACTOR, request);
       expect(service.deactivate).toHaveBeenCalledWith({
         supplierId: 'supplier-1',
+        requesterRole: RoleName.ADMIN,
         actorUserId: 'actor-id',
         ipAddress: '203.0.113.5',
       });
@@ -167,7 +171,7 @@ describe('SuppliersController', () => {
   });
 
   describe('matriz exacta de roles', () => {
-    it('list/findOne exponen @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) exactamente', () => {
+    it('list/findOne exponen @Roles(ADMIN, MANAGEMENT, ACCOUNTANT, PURCHASING) exactamente', () => {
       for (const method of ['list', 'findOne']) {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
@@ -177,12 +181,23 @@ describe('SuppliersController', () => {
           RoleName.ADMIN,
           RoleName.MANAGEMENT,
           RoleName.ACCOUNTANT,
+          RoleName.PURCHASING,
         ]);
       }
     });
 
-    it('create/update/activate/deactivate exponen @Roles(ADMIN) exclusivamente', () => {
-      for (const method of ['create', 'update', 'activate', 'deactivate']) {
+    it('R1: create/update exponen @Roles(ADMIN, PURCHASING) exactamente', () => {
+      for (const method of ['create', 'update']) {
+        const metadata = Reflect.getMetadata(
+          ROLES_KEY,
+          controllerPrototype[method],
+        ) as RoleName[];
+        expect(metadata).toEqual([RoleName.ADMIN, RoleName.PURCHASING]);
+      }
+    });
+
+    it('R1: activate/deactivate exponen @Roles(ADMIN) exclusivamente (PURCHASING no activa ni desactiva)', () => {
+      for (const method of ['activate', 'deactivate']) {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
           controllerPrototype[method],

@@ -35,20 +35,47 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 /**
- * Alcance de lectura (A5.1 kickoff, §6): ADMIN/MANAGEMENT/ACCOUNTANT leen;
- * SELLER/WAREHOUSE sin ningún acceso nuevo. `default` también falla cerrado
- * (mismo criterio que CustomersService.visibleStatusesForRole()).
+ * Alcance de lectura (A5.1 kickoff, §6; R1 agrega PURCHASING):
+ * ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING leen; SELLER/WAREHOUSE sin ningún
+ * acceso. `default` también falla cerrado (mismo criterio que
+ * CustomersService.visibleStatusesForRole()).
  */
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ]);
+
+/** R1: ADMIN y PURCHASING crean y editan datos del proveedor. */
+const WRITE_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.PURCHASING,
+]);
+
+/** R1: activar/desactivar (borrado lógico) sigue siendo exclusivo de ADMIN. */
+const LIFECYCLE_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
 
 function assertCanRead(requesterRole: RoleName): void {
   if (!READ_ROLES.has(requesterRole)) {
     throw new ForbiddenException(
       'No tiene permisos para consultar proveedores',
+    );
+  }
+}
+
+function assertCanWrite(requesterRole: RoleName): void {
+  if (!WRITE_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para crear o editar proveedores',
+    );
+  }
+}
+
+function assertCanChangeLifecycle(requesterRole: RoleName): void {
+  if (!LIFECYCLE_ROLES.has(requesterRole)) {
+    throw new ForbiddenException(
+      'No tiene permisos para activar o desactivar proveedores',
     );
   }
 }
@@ -66,6 +93,7 @@ export class SuppliersService {
   ) {}
 
   async create(input: CreateSupplierInput): Promise<SafeSupplier> {
+    assertCanWrite(input.requesterRole);
     const document = this.normalizeDocument(
       input.documentType,
       input.documentNumber,
@@ -207,6 +235,7 @@ export class SuppliersService {
   }
 
   async update(input: UpdateSupplierInput): Promise<SafeSupplier> {
+    assertCanWrite(input.requesterRole);
     const documentTypeProvided = input.documentType !== undefined;
     const documentNumberProvided = input.documentNumber !== undefined;
     if (documentTypeProvided !== documentNumberProvided) {
@@ -344,6 +373,7 @@ export class SuppliersService {
     action: AuditAction,
     conflictMessage: string,
   ): Promise<SafeSupplier> {
+    assertCanChangeLifecycle(input.requesterRole);
     return this.prisma.$transaction(async (tx) => {
       const supplier = await tx.supplier.findUnique({
         where: { id: input.supplierId },

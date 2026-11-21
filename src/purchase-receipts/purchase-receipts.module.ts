@@ -7,6 +7,8 @@ import {
   PurchaseReceiptsController,
 } from './purchase-receipts.controller';
 import { PurchaseReceiptsService } from './purchase-receipts.service';
+import { PurchaseReceivingController } from './purchase-receiving.controller';
+import { PurchaseReceivingService } from './purchase-receiving.service';
 
 /**
  * PrismaService/AuditService llegan de módulos globales (Database, Audit).
@@ -22,7 +24,11 @@ import { PurchaseReceiptsService } from './purchase-receipts.service';
  */
 @Module({
   imports: [AccountingModule, InventoryModule, InventoryValuationModule],
-  controllers: [PurchaseInvoiceReceiptsController, PurchaseReceiptsController],
-  providers: [PurchaseReceiptsService],
+  controllers: [
+    PurchaseInvoiceReceiptsController,
+    PurchaseReceiptsController,
+    PurchaseReceivingController,
+  ],
+  providers: [PurchaseReceiptsService, PurchaseReceivingService],
 })
 export class PurchaseReceiptsModule {}

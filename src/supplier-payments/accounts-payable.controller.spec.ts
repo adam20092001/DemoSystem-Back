@@ -127,7 +127,7 @@ describe('AccountsPayableController', () => {
     expect(result).toBeInstanceOf(StreamableFile);
   });
 
-  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) en TODOS los endpoints, nunca SELLER/WAREHOUSE', () => {
+  it('R1: expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT, PURCHASING) en TODOS los endpoints (solo lectura), nunca SELLER/WAREHOUSE', () => {
     const prototype = AccountsPayableController.prototype as unknown as Record<
       string,
       object
@@ -136,6 +136,7 @@ describe('AccountsPayableController', () => {
       RoleName.ADMIN,
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
     ];
     const methods = [
       'list',

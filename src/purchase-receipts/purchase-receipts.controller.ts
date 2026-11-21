@@ -38,12 +38,21 @@ import { PurchaseReceiptsService } from './purchase-receipts.service';
 import { PurchaseInvoiceReceiptsSummary } from './types/purchase-invoice-receipts-summary';
 import { SafePurchaseReceipt } from './types/safe-purchase-receipt';
 
+/**
+ * R1: lectura completa para ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING; WAREHOUSE
+ * lee la MISMA ruta con una respuesta sin campos financieros (la redacción
+ * ocurre en el servicio según el rol activo). Registrar la recepción física:
+ * ADMIN/WAREHOUSE. Anularla: solo ADMIN.
+ */
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
+  RoleName.WAREHOUSE,
 ] as const;
-const MANAGE_ROLES = [RoleName.ADMIN] as const;
+const CREATE_ROLES = [RoleName.ADMIN, RoleName.WAREHOUSE] as const;
+const CANCEL_ROLES = [RoleName.ADMIN] as const;
 
 /**
  * Historial y creación de recepciones físicas ANIDADAS bajo una factura de
@@ -80,7 +89,7 @@ export class PurchaseInvoiceReceiptsController {
   }
 
   @ApiOperation({
-    summary: 'Registrar una recepción física de mercadería (ADMIN)',
+    summary: 'Registrar una recepción física de mercadería (ADMIN, WAREHOUSE)',
     description:
       'Solo contra una factura CONFIRMED y únicamente líneas con isReceiptEligible=true. Admite recepciones parciales; la suma de cantidades ACTIVE nunca supera lo facturado. `idempotencyKey` opcional: reenviarla en un reintento devuelve la misma recepción ya creada.',
   })
@@ -95,7 +104,7 @@ export class PurchaseInvoiceReceiptsController {
     description:
       'La factura no está CONFIRMED, la cantidad excede lo facturado, o no se puede determinar con seguridad la cuenta de reclasificación.',
   })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...CREATE_ROLES)
   @Post(':id/receipts')
   create(
     @Param('id', ParseUUIDPipe) id: string,
@@ -153,7 +162,7 @@ export class PurchaseReceiptsController {
     description:
       'La recepción no está ACTIVE, o anularla dejaría stock negativo.',
   })
-  @Roles(...MANAGE_ROLES)
+  @Roles(...CANCEL_ROLES)
   @Post(':id/cancel')
   @HttpCode(HttpStatus.OK)
   cancel(

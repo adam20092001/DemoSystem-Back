@@ -1,4 +1,4 @@
-import { SupplierDocumentType } from '@prisma/client';
+import { RoleName, SupplierDocumentType } from '@prisma/client';
 
 /**
  * status es inmutable desde update() (cambia solo por activate()/
@@ -21,6 +21,8 @@ export interface UpdateSupplierInput {
   address?: string | null;
   internalNotes?: string | null;
   defaultCurrencyCode?: string | null;
+  /** Rol ACTIVO del solicitante (R1): el servicio lo valida de nuevo, independiente de @Roles(). */
+  requesterRole: RoleName;
   actorUserId: string;
   ipAddress?: string | null;
 }

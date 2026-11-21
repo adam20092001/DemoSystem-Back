@@ -236,21 +236,45 @@ describe('PurchaseInvoicesService', () => {
       },
     );
 
-    it.each([RoleName.ADMIN, RoleName.MANAGEMENT, RoleName.ACCOUNTANT])(
-      '%s puede leer',
-      async (role) => {
-        await expect(service.listDrafts({}, role)).resolves.toBeDefined();
-      },
-    );
-
     it.each([
+      RoleName.ADMIN,
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
-      RoleName.SELLER,
-      RoleName.WAREHOUSE,
-    ])(
-      '%s nunca puede escribir (solo ADMIN administra el ciclo de vida en A5.2a)',
-      async (role) => {
+      RoleName.PURCHASING,
+    ])('%s puede leer', async (role) => {
+      await expect(service.listDrafts({}, role)).resolves.toBeDefined();
+    });
+
+    // R1: matriz por acción. Un rol AUTORIZADO atraviesa la guardia y llega
+    // a la validación de negocio (nunca ForbiddenException); uno NO
+    // autorizado se rechaza antes de tocar Prisma.
+    describe('R1: crear / editar DRAFT (ADMIN, PURCHASING)', () => {
+      it.each([RoleName.ADMIN, RoleName.PURCHASING])(
+        '%s atraviesa la guardia de crear y editar',
+        async (role) => {
+          prisma.tx.supplier.findUnique.mockResolvedValue(null);
+          await expect(
+            service.create(makeCreateInput({ requesterRole: role })),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          prisma.tx.$queryRaw.mockResolvedValue([]);
+          await expect(
+            service.update({
+              purchaseInvoiceId: PURCHASE_INVOICE_ID,
+              documentNumber: 'X',
+              requesterRole: role,
+              actorUserId: ACTOR_ID,
+              ipAddress: null,
+            }),
+          ).rejects.toBeInstanceOf(NotFoundException);
+        },
+      );
+
+      it.each([
+        RoleName.MANAGEMENT,
+        RoleName.ACCOUNTANT,
+        RoleName.SELLER,
+        RoleName.WAREHOUSE,
+      ])('%s no puede crear ni editar', async (role) => {
         await expect(
           service.create(makeCreateInput({ requesterRole: role })),
         ).rejects.toBeInstanceOf(ForbiddenException);
@@ -263,6 +287,42 @@ describe('PurchaseInvoicesService', () => {
             ipAddress: null,
           }),
         ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(prisma.tx.purchaseInvoice.create).not.toHaveBeenCalled();
+        expect(prisma.tx.purchaseInvoice.update).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('R1: confirmar / anular (ADMIN, MANAGEMENT)', () => {
+      it.each([RoleName.ADMIN, RoleName.MANAGEMENT])(
+        '%s atraviesa la guardia de confirmar y anular',
+        async (role) => {
+          prisma.tx.$queryRaw.mockResolvedValue([]);
+          await expect(
+            service.confirm({
+              purchaseInvoiceId: PURCHASE_INVOICE_ID,
+              requesterRole: role,
+              actorUserId: ACTOR_ID,
+              ipAddress: null,
+            }),
+          ).rejects.toBeInstanceOf(NotFoundException);
+          await expect(
+            service.cancel({
+              purchaseInvoiceId: PURCHASE_INVOICE_ID,
+              reason: 'motivo',
+              requesterRole: role,
+              actorUserId: ACTOR_ID,
+              ipAddress: null,
+            }),
+          ).rejects.toBeInstanceOf(NotFoundException);
+        },
+      );
+
+      it.each([
+        RoleName.PURCHASING,
+        RoleName.ACCOUNTANT,
+        RoleName.SELLER,
+        RoleName.WAREHOUSE,
+      ])('%s no puede confirmar ni anular', async (role) => {
         await expect(
           service.confirm({
             purchaseInvoiceId: PURCHASE_INVOICE_ID,
@@ -280,9 +340,10 @@ describe('PurchaseInvoicesService', () => {
             ipAddress: null,
           }),
         ).rejects.toBeInstanceOf(ForbiddenException);
-        expect(prisma.tx.purchaseInvoice.create).not.toHaveBeenCalled();
-      },
-    );
+        expect(prisma.tx.$queryRaw).not.toHaveBeenCalled();
+        expect(accountingEngine.postPurchaseRecognition).not.toHaveBeenCalled();
+      });
+    });
   });
 
   function makeCreateInput(

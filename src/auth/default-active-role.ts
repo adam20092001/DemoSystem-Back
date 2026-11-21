@@ -15,6 +15,13 @@ import { RoleName } from '@prisma/client';
 const DEFAULT_ACTIVE_ROLE_ORDER: readonly RoleName[] = [
   RoleName.SELLER,
   RoleName.WAREHOUSE,
+  // R1: PURCHASING es un rol operativo de oficina con permisos de escritura
+  // acotados (proveedores y facturas en borrador); se ubica antes de
+  // MANAGEMENT/ACCOUNTANT/ADMIN, con el mismo sesgo "menos privilegiado
+  // primero". Imprescindible: un usuario cuyo ÚNICO rol sea PURCHASING no
+  // podría iniciar sesión si faltara aquí (mismo defecto histórico que
+  // tuvo ACCOUNTANT en la Fase A4.1).
+  RoleName.PURCHASING,
   RoleName.MANAGEMENT,
   // Fase A4.1: ACCOUNTANT es un rol de oficina especializado (lectura
   // contable global + ciclo de vida de asientos manuales), nunca un rol

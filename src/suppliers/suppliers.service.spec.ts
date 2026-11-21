@@ -87,6 +87,7 @@ function makeCreateInput(overrides: Partial<Record<string, unknown>> = {}) {
     documentType: SupplierDocumentType.RUC,
     documentNumber: '20123456789',
     legalName: 'Importaciones Acme S.A.C.',
+    requesterRole: RoleName.ADMIN,
     actorUserId: ACTOR_ID,
     ipAddress: '10.0.0.1',
     ...overrides,
@@ -181,18 +182,96 @@ describe('SuppliersService', () => {
   });
 
   // ====================================================================
-  // Permisos de lectura
+  // R1: matriz de escritura (defensa en profundidad, independiente de @Roles)
   // ====================================================================
-  describe('permisos de lectura', () => {
-    it.each([RoleName.ADMIN, RoleName.MANAGEMENT, RoleName.ACCOUNTANT])(
-      '%s: puede listar y consultar',
+  describe('permisos de escritura (R1)', () => {
+    const createInput = (role: RoleName) => ({
+      documentType: SupplierDocumentType.RUC,
+      documentNumber: '20123456789',
+      legalName: 'Importaciones Acme S.A.C.',
+      requesterRole: role,
+      actorUserId: ACTOR_ID,
+    });
+
+    it.each([RoleName.ADMIN, RoleName.PURCHASING])(
+      '%s: puede crear y editar',
       async (role) => {
-        await expect(service.list({}, role)).resolves.toBeDefined();
+        await expect(service.create(createInput(role))).resolves.toBeDefined();
         await expect(
-          service.findOne('supplier-1', role),
+          service.update({
+            supplierId: 'supplier-1',
+            legalName: 'Nuevo nombre',
+            requesterRole: role,
+            actorUserId: ACTOR_ID,
+          }),
         ).resolves.toBeDefined();
       },
     );
+
+    it.each([
+      RoleName.MANAGEMENT,
+      RoleName.ACCOUNTANT,
+      RoleName.SELLER,
+      RoleName.WAREHOUSE,
+    ])(
+      '%s: crear/editar lanza ForbiddenException sin tocar Prisma',
+      async (role) => {
+        await expect(service.create(createInput(role))).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
+        await expect(
+          service.update({
+            supplierId: 'supplier-1',
+            legalName: 'Nuevo nombre',
+            requesterRole: role,
+            actorUserId: ACTOR_ID,
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      RoleName.PURCHASING,
+      RoleName.MANAGEMENT,
+      RoleName.ACCOUNTANT,
+      RoleName.SELLER,
+      RoleName.WAREHOUSE,
+    ])(
+      '%s: activar/desactivar lanza ForbiddenException sin tocar Prisma',
+      async (role) => {
+        await expect(
+          service.activate({
+            supplierId: 'supplier-1',
+            requesterRole: role,
+            actorUserId: ACTOR_ID,
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(
+          service.deactivate({
+            supplierId: 'supplier-1',
+            requesterRole: role,
+            actorUserId: ACTOR_ID,
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  // ====================================================================
+  // Permisos de lectura
+  // ====================================================================
+  describe('permisos de lectura', () => {
+    it.each([
+      RoleName.ADMIN,
+      RoleName.MANAGEMENT,
+      RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
+    ])('%s: puede listar y consultar', async (role) => {
+      await expect(service.list({}, role)).resolves.toBeDefined();
+      await expect(service.findOne('supplier-1', role)).resolves.toBeDefined();
+    });
 
     it.each([RoleName.SELLER, RoleName.WAREHOUSE])(
       '%s: lista vacía sin tocar Prisma; findOne lanza ForbiddenException',
@@ -232,7 +311,11 @@ describe('SuppliersService', () => {
   describe('update', () => {
     it('sin ningún campo: BadRequestException', async () => {
       await expect(
-        service.update({ supplierId: 'supplier-1', actorUserId: ACTOR_ID }),
+        service.update({
+          supplierId: 'supplier-1',
+          requesterRole: RoleName.ADMIN,
+          actorUserId: ACTOR_ID,
+        }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -241,6 +324,7 @@ describe('SuppliersService', () => {
         service.update({
           supplierId: 'supplier-1',
           documentType: SupplierDocumentType.DNI,
+          requesterRole: RoleName.ADMIN,
           actorUserId: ACTOR_ID,
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -252,6 +336,7 @@ describe('SuppliersService', () => {
         service.update({
           supplierId: 'missing-id',
           legalName: 'Nuevo nombre',
+          requesterRole: RoleName.ADMIN,
           actorUserId: ACTOR_ID,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
@@ -262,6 +347,7 @@ describe('SuppliersService', () => {
         supplierId: 'supplier-1',
         documentType: SupplierDocumentType.DNI,
         documentNumber: '12345678',
+        requesterRole: RoleName.ADMIN,
         actorUserId: ACTOR_ID,
       });
       const call = prisma.tx.supplier.update.mock.calls[0][0] as unknown as {
@@ -276,6 +362,7 @@ describe('SuppliersService', () => {
         supplierId: 'supplier-1',
         legalName: 'Nombre actualizado',
         phone: '999999999',
+        requesterRole: RoleName.ADMIN,
         actorUserId: ACTOR_ID,
       });
       const call = auditService.record.mock.calls[0][0] as {
@@ -296,7 +383,11 @@ describe('SuppliersService', () => {
         makeSupplierRow({ status: SupplierStatus.ACTIVE }),
       );
       await expect(
-        service.activate({ supplierId: 'supplier-1', actorUserId: ACTOR_ID }),
+        service.activate({
+          supplierId: 'supplier-1',
+          requesterRole: RoleName.ADMIN,
+          actorUserId: ACTOR_ID,
+        }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -305,7 +396,11 @@ describe('SuppliersService', () => {
         makeSupplierRow({ status: SupplierStatus.INACTIVE }),
       );
       await expect(
-        service.deactivate({ supplierId: 'supplier-1', actorUserId: ACTOR_ID }),
+        service.deactivate({
+          supplierId: 'supplier-1',
+          requesterRole: RoleName.ADMIN,
+          actorUserId: ACTOR_ID,
+        }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -318,6 +413,7 @@ describe('SuppliersService', () => {
       );
       await service.deactivate({
         supplierId: 'supplier-1',
+        requesterRole: RoleName.ADMIN,
         actorUserId: ACTOR_ID,
       });
       const call = auditService.record.mock.calls[0][0] as {
@@ -331,7 +427,11 @@ describe('SuppliersService', () => {
     it('proveedor inexistente: NotFoundException', async () => {
       prisma.tx.supplier.findUnique.mockResolvedValue(null);
       await expect(
-        service.activate({ supplierId: 'missing-id', actorUserId: ACTOR_ID }),
+        service.activate({
+          supplierId: 'missing-id',
+          requesterRole: RoleName.ADMIN,
+          actorUserId: ACTOR_ID,
+        }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
   });

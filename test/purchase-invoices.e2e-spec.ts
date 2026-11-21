@@ -599,7 +599,7 @@ describe('Purchase Invoices — Fase A5.2a (e2e)', () => {
       }
     });
 
-    it('MANAGEMENT/ACCOUNTANT: leen pero nunca escriben (solo ADMIN administra en A5.2a)', async () => {
+    it('MANAGEMENT/ACCOUNTANT: leen pero nunca crean ni editan facturas', async () => {
       for (const cookie of [managementCookie, accountantCookie]) {
         expect((await listInvoices({}, cookie)).status).toBe(200);
         expect(
@@ -616,13 +616,24 @@ describe('Purchase Invoices — Fase A5.2a (e2e)', () => {
             )
           ).status,
         ).toBe(403);
-        expect((await confirmInvoice(NON_EXISTENT_UUID, cookie)).status).toBe(
-          403,
-        );
-        expect(
-          (await cancelInvoice(NON_EXISTENT_UUID, 'motivo', cookie)).status,
-        ).toBe(403);
       }
+    });
+
+    it('R1: ACCOUNTANT nunca confirma ni anula; MANAGEMENT sí atraviesa la guardia (excepción aprobada: 404 por factura inexistente, no 403)', async () => {
+      expect(
+        (await confirmInvoice(NON_EXISTENT_UUID, accountantCookie)).status,
+      ).toBe(403);
+      expect(
+        (await cancelInvoice(NON_EXISTENT_UUID, 'motivo', accountantCookie))
+          .status,
+      ).toBe(403);
+      expect(
+        (await confirmInvoice(NON_EXISTENT_UUID, managementCookie)).status,
+      ).toBe(404);
+      expect(
+        (await cancelInvoice(NON_EXISTENT_UUID, 'motivo', managementCookie))
+          .status,
+      ).toBe(404);
     });
 
     it('ACCOUNTANT no adquiere acceso a módulos no relacionados', async () => {
