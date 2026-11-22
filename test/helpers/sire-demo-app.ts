@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { App } from 'supertest/types';
+import { assertVerifiedE2eTarget } from './e2e-database-target';
 
 export interface SireDemoE2eEnv {
   /** undefined => la variable se elimina (valor por defecto del módulo: apagado). */
@@ -41,6 +42,8 @@ export function snapshotSireDemoEnv(): () => void {
 export async function createSireDemoE2eApp(
   env: SireDemoE2eEnv,
 ): Promise<INestApplication<App>> {
+  // Antes de importar AppModule / crear PrismaService (INC-E2E-database-guard).
+  assertVerifiedE2eTarget();
   for (const [field, key] of Object.entries(ENV_KEYS) as [
     keyof SireDemoE2eEnv,
     string,
