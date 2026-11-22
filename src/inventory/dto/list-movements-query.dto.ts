@@ -40,6 +40,15 @@ export class ListMovementsQueryDto {
   @IsUUID()
   productId?: string;
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'R2-B1b: solo movimientos de esa ubicación (también si está inactiva). Los históricos sin ubicación solo aparecen sin este filtro.',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
   @ApiPropertyOptional({ enum: InventoryMovementType })
   @IsOptional()
   @IsEnum(InventoryMovementType)

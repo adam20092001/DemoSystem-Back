@@ -1318,6 +1318,22 @@ PostgreSQL 16 descartables, nunca en `pos_db` ni `pos_db_test`). Decisiones apro
   `migrate resolve --rolled-back` y reaplicación.
 
 
+**R2-B1b — inventario manual por ubicación** (rama `feat/r2-b1b-manual-inventory-locations`,
+base `main` en `0223a97`, **implementada y validada, sin commit/push/PR todavía — NO integrada en `main` ni
+desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable). Requiere R2-ACT aplicado.
+
+- `locationId` opcional (UUID) en saldo inicial, entrada, salida y ajustes ±; sin él, `MAIN/DEFAULT` (solicitudes
+  antiguas idénticas). Validaciones y bloqueos del motor sin cambios (ubicación inexistente 404, almacén/ubicación
+  inactivos 409, insuficiencia por ubicación 409, UUID inválido 400). Todas las operaciones son deltas (sin ajustes
+  absolutos); el saldo inicial sigue siendo único por producto y se coloca en la ubicación indicada.
+- Excepción expresa y aprobada a D3, limitada al módulo de inventario y aditiva: las respuestas de movimientos incluyen
+  `location` (`null` en históricos), `GET /inventory/movements` y el kardex por producto aceptan `locationId`, y
+  `GET /inventory/products/:productId/stock-by-location` devuelve consolidado + desglose (solo ubicaciones con cantidad
+  > 0; instantánea `REPEATABLE READ`; solo lectura; mismos roles que `…/stock`).
+- Sin cambios en permisos, reglas de desactivación (D4), costos, valorización ni COGS. **Las ventas y recepciones siguen
+  usando `MAIN/DEFAULT`**; no hay transferencias (R2-C) ni selección de ubicación en ventas/recepciones (R2-B posteriores).
+- Contrato para Angular: `docs/inventory-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.9.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

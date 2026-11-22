@@ -36,6 +36,7 @@ import {
   PaginatedMovementsResponseDto,
 } from './dto/movement-response.dto';
 import { PaginatedLowStockResponseDto } from './dto/low-stock-item-response.dto';
+import { ProductStockByLocationResponseDto } from './dto/product-stock-by-location-response.dto';
 import { ProductStockResponseDto } from './dto/product-stock-response.dto';
 import { RegisterAdjustmentInDto } from './dto/register-adjustment-in.dto';
 import { RegisterAdjustmentOutDto } from './dto/register-adjustment-out.dto';
@@ -47,6 +48,7 @@ import { ListMovementsQuery } from './types/list-movements.query';
 import { RegisterMovementInput } from './types/register-movement.input';
 import { SafeInventoryMovement } from './types/safe-inventory-movement';
 import { SafeLowStockItem, SafeProductStock } from './types/safe-product-stock';
+import { SafeProductStockByLocation } from './types/safe-product-stock-by-location';
 
 const WRITE_ROLES = [RoleName.ADMIN, RoleName.WAREHOUSE] as const;
 const READ_ROLES = [
@@ -72,14 +74,16 @@ export class InventoryController {
   @ApiOperation({
     summary: 'Registrar el saldo inicial de un producto',
     description:
-      'Solo válido cuando el producto tiene stockCurrent="0.000" y no registra movimientos previos.',
+      'Solo válido cuando el producto tiene stockCurrent="0.000" y no registra movimientos previos. Es único por producto (no por ubicación); con locationId se registra en esa ubicación, sin él en MAIN/DEFAULT.',
   })
   @ApiCreatedResponse({ type: MovementResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @ApiConflictResponse({
     description:
-      'El producto ya tiene stock distinto de cero, o ya registra movimientos.',
+      'El producto ya tiene stock distinto de cero, o ya registra movimientos; o la ubicación/almacén no está activo.',
   })
   @Roles(...WRITE_ROLES)
   @Post('initial-balances')
@@ -96,9 +100,12 @@ export class InventoryController {
   @ApiOperation({ summary: 'Registrar una entrada manual de stock' })
   @ApiCreatedResponse({ type: MovementResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @ApiConflictResponse({
-    description: 'El producto/categoría/unidad no está activo.',
+    description:
+      'El producto/categoría/unidad no está activo, o la ubicación/almacén no está activo.',
   })
   @Roles(...WRITE_ROLES)
   @Post('entries')
@@ -115,9 +122,12 @@ export class InventoryController {
   @ApiOperation({ summary: 'Registrar una salida manual de stock' })
   @ApiCreatedResponse({ type: MovementResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @ApiConflictResponse({
-    description: 'Stock insuficiente, o producto/categoría/unidad inactivo.',
+    description:
+      'Stock insuficiente (consolidado o de la ubicación), producto/categoría/unidad inactivo, o ubicación/almacén inactivo.',
   })
   @Roles(...WRITE_ROLES)
   @Post('exits')
@@ -134,9 +144,12 @@ export class InventoryController {
   @ApiOperation({ summary: 'Registrar un ajuste positivo de stock' })
   @ApiCreatedResponse({ type: MovementResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @ApiConflictResponse({
-    description: 'El producto/categoría/unidad no está activo.',
+    description:
+      'El producto/categoría/unidad no está activo, o la ubicación/almacén no está activo.',
   })
   @Roles(...WRITE_ROLES)
   @Post('adjustments/in')
@@ -153,9 +166,12 @@ export class InventoryController {
   @ApiOperation({ summary: 'Registrar un ajuste negativo de stock' })
   @ApiCreatedResponse({ type: MovementResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @ApiConflictResponse({
-    description: 'Stock insuficiente, o producto/categoría/unidad inactivo.',
+    description:
+      'Stock insuficiente (consolidado o de la ubicación), producto/categoría/unidad inactivo, o ubicación/almacén inactivo.',
   })
   @Roles(...WRITE_ROLES)
   @Post('adjustments/out')
@@ -201,7 +217,9 @@ export class InventoryController {
   })
   @ApiParam({ name: 'productId', format: 'uuid' })
   @ApiOkResponse({ type: PaginatedMovementsResponseDto })
-  @ApiNotFoundResponse({ description: 'El producto no existe.' })
+  @ApiNotFoundResponse({
+    description: 'El producto o la ubicación indicada no existe.',
+  })
   @Roles(...READ_ROLES)
   @Get('products/:productId/movements')
   async listProductMovements(
@@ -240,6 +258,29 @@ export class InventoryController {
   }
 
   @ApiOperation({
+    summary: 'Consultar el stock de un producto por ubicación (R2-B1b)',
+    description:
+      'Devuelve el consolidado (stockCurrent) y su desglose por ubicación, leídos en una misma instantánea transaccional (la suma de locations[].quantity es igual a stockCurrent). Solo se listan ubicaciones con existencias > 0; las demás se omiten. Solo lectura. Mismos permisos y reglas de acceso que GET /inventory/products/:productId/stock. Las ventas y recepciones siguen operando solo sobre MAIN/DEFAULT.',
+  })
+  @ApiParam({ name: 'productId', format: 'uuid' })
+  @ApiOkResponse({ type: ProductStockByLocationResponseDto })
+  @ApiBadRequestResponse({
+    description: 'El producto es SERVICE o no controla inventario.',
+  })
+  @ApiNotFoundResponse({ description: 'No existe, o SELLER sin acceso.' })
+  @Roles(...STOCK_READ_ROLES)
+  @Get('products/:productId/stock-by-location')
+  getProductStockByLocation(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<SafeProductStockByLocation> {
+    return this.inventoryService.getProductStockByLocation(
+      productId,
+      user.role,
+    );
+  }
+
+  @ApiOperation({
     summary: 'Listar productos con stock bajo (paginado)',
     description:
       'stockCurrent <= stockMinimum, con categoría y unidad ACTIVE. NR-04: cada elemento incluye stockStatus (LOW_STOCK u OUT_OF_STOCK).',
@@ -267,6 +308,7 @@ export class InventoryController {
       quantity: string;
       reason: string;
       notes?: string;
+      locationId?: string;
     },
     actor: AuthenticatedUser,
     request: Request,
@@ -276,6 +318,7 @@ export class InventoryController {
       quantity: dto.quantity,
       reason: dto.reason,
       notes: dto.notes ?? null,
+      locationId: dto.locationId,
       actorUserId: actor.id,
       ipAddress: request.ip ?? null,
     };
@@ -286,6 +329,7 @@ export class InventoryController {
       page: dto.page,
       limit: dto.limit,
       productId: dto.productId,
+      locationId: dto.locationId,
       movementType: dto.movementType,
       origin: dto.origin,
       createdByUserId: dto.createdByUserId,

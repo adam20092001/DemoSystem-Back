@@ -14,6 +14,14 @@ const MOVEMENT_CREATED_BY_SUMMARY_SELECT = {
   lastName: true,
 } satisfies Prisma.UserSelect;
 
+/** R2-B1b: resumen mínimo de la ubicación (sin estado, sin descripción). */
+const MOVEMENT_LOCATION_SUMMARY_SELECT = {
+  id: true,
+  code: true,
+  name: true,
+  warehouse: { select: { id: true, code: true } },
+} satisfies Prisma.WarehouseLocationSelect;
+
 /**
  * Select explícito y seguro de un movimiento de inventario: nunca
  * passwordHash/roleId/failedLoginAttempts del autor, nunca
@@ -30,6 +38,7 @@ export const INVENTORY_MOVEMENT_SAFE_SELECT = {
   reason: true,
   notes: true,
   createdBy: { select: MOVEMENT_CREATED_BY_SUMMARY_SELECT },
+  location: { select: MOVEMENT_LOCATION_SUMMARY_SELECT },
   createdAt: true,
 } satisfies Prisma.InventoryMovementSelect;
 
@@ -52,6 +61,8 @@ export function toSafeInventoryMovement(
     reason: row.reason,
     notes: row.notes,
     createdBy: row.createdBy,
+    // R2-B1b: null en movimientos históricos (anteriores a R2-ACT).
+    location: row.location,
     createdAt: row.createdAt,
   };
 }

@@ -27,6 +27,29 @@ export class MovementCreatedByResponseDto {
   lastName!: string;
 }
 
+export class MovementLocationWarehouseResponseDto {
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty()
+  code!: string;
+}
+
+/** R2-B1b: ubicación afectada por un movimiento. */
+export class MovementLocationResponseDto {
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty()
+  code!: string;
+
+  @ApiProperty()
+  name!: string;
+
+  @ApiProperty({ type: MovementLocationWarehouseResponseDto })
+  warehouse!: MovementLocationWarehouseResponseDto;
+}
+
 export class MovementResponseDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;
@@ -69,6 +92,14 @@ export class MovementResponseDto {
 
   @ApiProperty({ type: MovementCreatedByResponseDto })
   createdBy!: MovementCreatedByResponseDto;
+
+  @ApiProperty({
+    type: MovementLocationResponseDto,
+    nullable: true,
+    description:
+      'R2-B1b. Ubicación afectada. null en movimientos históricos anteriores a R2-ACT (nunca reescritos).',
+  })
+  location!: MovementLocationResponseDto | null;
 
   @ApiProperty()
   createdAt!: Date;

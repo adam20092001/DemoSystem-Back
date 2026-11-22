@@ -60,6 +60,7 @@ function makeSafeMovement(
       firstName: 'Juan',
       lastName: 'Doe',
     },
+    location: null,
     createdAt: NOW,
     ...overrides,
   };
@@ -92,6 +93,9 @@ function createPrismaMock() {
     ),
     product: {
       findUnique: jest.fn<Promise<unknown>, [ProductFindUniqueArgs]>(),
+    },
+    stockBalance: {
+      findMany: jest.fn<Promise<unknown[]>, [Record<string, unknown>]>(),
     },
     inventoryMovement: {
       findUnique: jest.fn<Promise<unknown>, [MovementFindUniqueArgs]>(),
@@ -127,6 +131,7 @@ function makeMovementRow(overrides: Partial<Record<string, unknown>> = {}) {
       firstName: 'Juan',
       lastName: 'Doe',
     },
+    location: null,
     createdAt: NOW,
     ...overrides,
   };
@@ -587,6 +592,237 @@ describe('InventoryService', () => {
 
       expect(result.stockCurrent).toBe('1.000');
       expect(result.stockMinimum).toBe('0.000');
+    });
+  });
+
+  describe('R2-B1b: locationId en los movimientos manuales', () => {
+    const LOCATION_ID = '22222222-2222-4222-8222-222222222222';
+    const operations: [
+      string,
+      (
+        s: InventoryService,
+        i: RegisterMovementInput,
+      ) => Promise<SafeInventoryMovement>,
+    ][] = [
+      ['registerInitialBalance', (s, i) => s.registerInitialBalance(i)],
+      ['registerEntry', (s, i) => s.registerEntry(i)],
+      ['registerExit', (s, i) => s.registerExit(i)],
+      ['registerPositiveAdjustment', (s, i) => s.registerPositiveAdjustment(i)],
+      ['registerNegativeAdjustment', (s, i) => s.registerNegativeAdjustment(i)],
+    ];
+
+    it.each(operations)(
+      '%s propaga locationId al comando del motor',
+      async (_name, op) => {
+        engine.apply.mockResolvedValue(makeSafeMovement());
+
+        await op(service, makeInput({ locationId: LOCATION_ID }));
+
+        const [, command] = engine.apply.mock.calls[0];
+        expect(command.locationId).toBe(LOCATION_ID);
+      },
+    );
+
+    it.each(operations)(
+      '%s sin locationId deja el comando sin ubicación (el motor usa MAIN/DEFAULT)',
+      async (_name, op) => {
+        engine.apply.mockResolvedValue(makeSafeMovement());
+
+        await op(service, makeInput());
+
+        const [, command] = engine.apply.mock.calls[0];
+        expect(command.locationId).toBeUndefined();
+      },
+    );
+  });
+
+  describe('R2-B1b: ubicación en la respuesta y filtro por locationId', () => {
+    it('mapea la ubicación del movimiento', async () => {
+      const location = {
+        id: 'loc-1',
+        code: 'A1',
+        name: 'Estante A1',
+        warehouse: { id: 'wh-1', code: 'MAIN' },
+      };
+      prisma.inventoryMovement.findMany.mockResolvedValue([
+        makeMovementRow({ location }),
+      ]);
+      prisma.inventoryMovement.count.mockResolvedValue(1);
+
+      const result = await service.listMovements({});
+
+      expect(result.data[0].location).toEqual(location);
+    });
+
+    it('un movimiento histórico sin ubicación se devuelve con location null', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([
+        makeMovementRow({ location: null }),
+      ]);
+      prisma.inventoryMovement.count.mockResolvedValue(1);
+
+      const result = await service.listMovements({});
+
+      expect(result.data[0].location).toBeNull();
+    });
+
+    it('el select seguro incluye solo id/code/name/warehouse{id,code} de la ubicación', () => {
+      expect(INVENTORY_MOVEMENT_SAFE_SELECT.location).toEqual({
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          warehouse: { select: { id: true, code: true } },
+        },
+      });
+    });
+
+    it('filtra por locationId y sin él no filtra por ubicación (no oculta históricos)', async () => {
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listMovements({ locationId: 'loc-1' });
+      await service.listMovements({});
+
+      const withFilter = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      const withoutFilter = prisma.inventoryMovement.findMany.mock.calls[1][0];
+      expect(withFilter.where).toEqual({ locationId: 'loc-1' });
+      expect(withoutFilter.where).toEqual({});
+    });
+
+    it('el kardex por producto combina productId y locationId', async () => {
+      prisma.product.findUnique.mockResolvedValue({ id: PRODUCT_ID });
+      prisma.inventoryMovement.findMany.mockResolvedValue([]);
+      prisma.inventoryMovement.count.mockResolvedValue(0);
+
+      await service.listProductMovements(PRODUCT_ID, { locationId: 'loc-1' });
+
+      const args = prisma.inventoryMovement.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({
+        productId: PRODUCT_ID,
+        locationId: 'loc-1',
+      });
+    });
+  });
+
+  describe('getProductStockByLocation (R2-B1b)', () => {
+    const loc = (id: string, wh: string, code: string) => ({
+      id,
+      code,
+      name: `Ubicación ${code}`,
+      warehouse: { id: `wh-${wh}`, code: wh },
+    });
+
+    function useRealTransaction(): { options: unknown[] } {
+      const options: unknown[] = [];
+      prisma.$transaction.mockImplementation(
+        (callback: (tx: unknown) => unknown, opts?: unknown) => {
+          options.push(opts);
+          return callback(prisma);
+        },
+      );
+      return { options };
+    }
+
+    it('lee producto y saldos en una transacción REPEATABLE READ', async () => {
+      const { options } = useRealTransaction();
+      prisma.product.findUnique.mockResolvedValue(makeProductStockRow());
+      prisma.stockBalance.findMany.mockResolvedValue([]);
+
+      await service.getProductStockByLocation(PRODUCT_ID, RoleName.ADMIN);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(options[0]).toEqual({
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      });
+    });
+
+    it('devuelve consolidado y desglose ordenado por almacén y ubicación, con 3 decimales', async () => {
+      useRealTransaction();
+      prisma.product.findUnique.mockResolvedValue(makeProductStockRow());
+      prisma.stockBalance.findMany.mockResolvedValue([
+        {
+          quantity: new Prisma.Decimal('3'),
+          location: loc('l3', 'MAIN', 'B2'),
+        },
+        {
+          quantity: new Prisma.Decimal('6.5'),
+          location: loc('l1', 'MAIN', 'DEFAULT'),
+        },
+        {
+          quantity: new Prisma.Decimal('0.5'),
+          location: loc('l2', 'ALT', 'Z'),
+        },
+      ]);
+
+      const result = await service.getProductStockByLocation(
+        PRODUCT_ID,
+        RoleName.ADMIN,
+      );
+
+      expect(result.productId).toBe(PRODUCT_ID);
+      expect(result.stockCurrent).toBe('10.000');
+      expect(result.unitAbbreviation).toBe('un');
+      expect(result.allowDecimal).toBe(true);
+      expect(result.locations.map((row) => row.location.id)).toEqual([
+        'l2',
+        'l3',
+        'l1',
+      ]);
+      expect(result.locations.map((row) => row.quantity)).toEqual([
+        '0.500',
+        '3.000',
+        '6.500',
+      ]);
+      expect(result).not.toHaveProperty('stockMinimum');
+    });
+
+    it('solo consulta saldos con cantidad > 0 y nunca escribe', async () => {
+      useRealTransaction();
+      prisma.product.findUnique.mockResolvedValue(makeProductStockRow());
+      prisma.stockBalance.findMany.mockResolvedValue([]);
+
+      const result = await service.getProductStockByLocation(
+        PRODUCT_ID,
+        RoleName.ADMIN,
+      );
+
+      const args = prisma.stockBalance.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({
+        productId: PRODUCT_ID,
+        quantity: { gt: 0 },
+      });
+      expect(result.locations).toEqual([]);
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['inexistente', null, RoleName.ADMIN, NotFoundException],
+      [
+        'SERVICE',
+        makeProductStockRow({ productType: ProductType.SERVICE }),
+        RoleName.ADMIN,
+        BadRequestException,
+      ],
+      [
+        'sin control de inventario',
+        makeProductStockRow({ isInventoryTracked: false }),
+        RoleName.ADMIN,
+        BadRequestException,
+      ],
+      [
+        'SELLER con producto inactivo',
+        makeProductStockRow({ status: ProductStatus.INACTIVE }),
+        RoleName.SELLER,
+        NotFoundException,
+      ],
+    ])('%s → mismo error que getProductStock', async (_n, row, role, Err) => {
+      useRealTransaction();
+      prisma.product.findUnique.mockResolvedValue(row);
+
+      await expect(
+        service.getProductStockByLocation(PRODUCT_ID, role),
+      ).rejects.toBeInstanceOf(Err);
+      expect(prisma.stockBalance.findMany).not.toHaveBeenCalled();
     });
   });
 

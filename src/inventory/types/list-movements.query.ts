@@ -9,6 +9,7 @@ export interface ListMovementsQuery {
   page?: number;
   limit?: number;
   productId?: string;
+  locationId?: string;
   movementType?: InventoryMovementType;
   origin?: InventoryMovementOrigin;
   createdByUserId?: string;
