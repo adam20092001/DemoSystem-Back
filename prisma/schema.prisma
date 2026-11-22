@@ -345,6 +345,10 @@ model Product {
   specifications        ProductSpecification[]
   images                ProductImage[]
   movements             InventoryMovement[]
+  // R2-A1 (EXPAND): saldos por ubicación. Hoy NUNCA se escriben ni se leen
+  // para decidir nada; Product.stockCurrent sigue siendo la única cantidad
+  // operativa. Se activan en R2-ACT.
+  stockBalances         StockBalance[]
   // Fase A6.1: historial inmutable de eventos de valorización de este
   // producto (ORIGINAL por recepción, REVERSAL por cancelación). Nunca
   // una fuente de verdad alternativa a stockCurrent: el saldo FÍSICO
@@ -440,6 +444,16 @@ model InventoryMovement {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  // R2-A1 (EXPAND): ubicación y saldos de ubicación del movimiento. Las
+  // tres columnas son NULL en TODO movimiento (histórico y nuevo) hasta que
+  // R2-ACT active el stock por ubicación; previousStock/newStock conservan
+  // su significado CONSOLIDADO. CHECK a mano: las tres nulas o las tres no
+  // nulas.
+  locationId            String?            @map("location_id") @db.Uuid
+  location              WarehouseLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  locationPreviousStock Decimal?           @map("location_previous_stock") @db.Decimal(14, 3)
+  locationNewStock      Decimal?           @map("location_new_stock") @db.Decimal(14, 3)
+
   // Fase A6.1: a lo sumo UN evento de valorización por movimiento físico
   // (ORIGINAL si este ENTRY se valorizó al recibirse; REVERSAL si este
   // EXIT compensa el costo de una recepción cancelada) — la unicidad de
@@ -456,7 +470,89 @@ model InventoryMovement {
   @@index([productId, createdAt])
   @@index([createdAt])
   @@index([createdByUserId, createdAt])
+  @@index([locationId])
   @@map("inventory_movements")
+}
+
+// --- Almacenes y ubicaciones (R2-A1, solo EXPAND) ---------------------------
+//
+// Estructura preparatoria del stock por ubicación. INERTE respecto al
+// inventario: StockMovementEngine y Product.stockCurrent no cambian, ningún
+// flujo lee StockBalance para aprobar o rechazar una operación, y la
+// migración NO hace backfill (stock_balances nace VACÍA). La activación
+// (motor por ubicación, backfill de existencias a MAIN/DEFAULT, invariante
+// stockCurrent = Σ saldos) pertenece a R2-ACT.
+//
+// CHECK, índices únicos parciales y normalización de códigos se agregan a
+// mano en migration.sql (el DSL de Prisma no los expresa):
+//   - warehouses.code y warehouse_locations.code = UPPER(BTRIM(code)).
+//   - Un solo almacén predeterminado: índice único parcial (is_default)
+//     WHERE is_default.
+//   - Una sola ubicación DEFAULT por almacén: índice único parcial
+//     (warehouse_id) WHERE is_default, y (code = 'DEFAULT') = is_default.
+//   - stock_balances.quantity >= 0.
+enum WarehouseStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Warehouse {
+  id          String          @id @default(uuid()) @db.Uuid
+  code        String          @unique @db.VarChar(20)
+  name        String          @db.VarChar(100)
+  description String?         @db.VarChar(300)
+  status      WarehouseStatus @default(ACTIVE)
+  // Almacén principal (código MAIN en la migración). R2-A1 no expone
+  // ningún endpoint para cambiarlo.
+  isDefault   Boolean         @default(false) @map("is_default")
+
+  locations WarehouseLocation[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("warehouses")
+}
+
+model WarehouseLocation {
+  id          String          @id @default(uuid()) @db.Uuid
+  warehouseId String          @map("warehouse_id") @db.Uuid
+  warehouse   Warehouse       @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  code        String          @db.VarChar(30)
+  name        String          @db.VarChar(100)
+  description String?         @db.VarChar(300)
+  status      WarehouseStatus @default(ACTIVE)
+  // La ubicación técnica DEFAULT del almacén (código DEFAULT, una por
+  // almacén). Nunca cambia de código ni se desactiva por separado.
+  isDefault   Boolean         @default(false) @map("is_default")
+
+  balances             StockBalance[]
+  inventoryMovements   InventoryMovement[]
+  saleItems            SaleItem[]
+  purchaseReceiptLines PurchaseReceiptLine[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([warehouseId, code])
+  @@map("warehouse_locations")
+}
+
+// Saldo por producto y ubicación. En R2-A1 la tabla queda VACÍA y nada la
+// escribe: NO representa las existencias actuales (siguen consolidadas en
+// Product.stockCurrent).
+model StockBalance {
+  id         String            @id @default(uuid()) @db.Uuid
+  productId  String            @map("product_id") @db.Uuid
+  product    Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  locationId String            @map("location_id") @db.Uuid
+  location   WarehouseLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  quantity   Decimal           @db.Decimal(14, 3)
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+
+  @@unique([productId, locationId])
+  @@index([locationId])
+  @@map("stock_balances")
 }
 
 // --- Valorización de inventario (Fase A6.1) ---------------------------------
@@ -1127,6 +1223,11 @@ model PurchaseReceiptLine {
   // anular: la reversión usa este valor tal cual.
   reclassifiedAmount Decimal? @map("reclassified_amount") @db.Decimal(14, 2)
 
+  // R2-A1 (EXPAND): ubicación de destino de esta línea. Siempre NULL hasta
+  // R2-ACT; ninguna lógica de recepción la lee ni la escribe.
+  locationId String?            @map("location_id") @db.Uuid
+  location   WarehouseLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   // Fase A6.1: hasta dos filas (ORIGINAL al recibir + REVERSAL si la
@@ -1143,6 +1244,7 @@ model PurchaseReceiptLine {
   @@unique([purchaseReceiptId, purchaseInvoiceLineId])
   @@index([purchaseReceiptId])
   @@index([purchaseInvoiceLineId])
+  @@index([locationId])
   @@map("purchase_receipt_lines")
 }
 
@@ -1619,6 +1721,11 @@ model SaleItem {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  // R2-A1 (EXPAND): ubicación de origen del stock de esta línea. Siempre
+  // NULL hasta R2-ACT; ninguna lógica de venta la lee ni la escribe.
+  locationId String?            @map("location_id") @db.Uuid
+  location   WarehouseLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
   // Fase A6.2: hasta dos filas (ORIGINAL al confirmar la venta + REVERSAL
   // si la venta se anula) cuando Product.valuationMethod está configurado
   // — vacío para un ítem de producto sin valorización habilitada (cero
@@ -1636,6 +1743,7 @@ model SaleItem {
   // descuento se agregan a mano en migration.sql.
   @@unique([saleId, productId])
   @@index([productId])
+  @@index([locationId])
   @@map("sale_items")
 }
 

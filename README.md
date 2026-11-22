@@ -415,6 +415,29 @@ inicializadas (no hace falta reejecutar `db:seed`). Para asignarlo, `POST` o
 Matriz completa en [CLAUDE.md](CLAUDE.md) §5 y contrato para Angular en
 [docs/purchasing-role-api.md](docs/purchasing-role-api.md).
 
+## Almacenes y ubicaciones (R2-A1, solo estructura)
+
+Primera etapa del futuro stock por ubicación: catálogo administrativo de
+**almacenes** y **ubicaciones** (`/api/v1/warehouses*`, ver Swagger, etiqueta
+*Warehouses*) y la estructura de base de datos que lo prepara (migración
+`20261030000000_add_warehouses_locations_expand`, aditiva). **Es inerte
+respecto al inventario**: `Product.stockCurrent` sigue siendo la única cantidad
+operativa, `StockMovementEngine`/ventas/recepciones no cambian, no hay backfill
+ni saldos por ubicación (`stock_balances` nace vacía) y el frontend **no** debe
+usar todavía ubicaciones en operaciones de stock (reservado a R2-ACT).
+
+- La migración crea el almacén principal `MAIN` y su ubicación técnica
+  `DEFAULT` (solo catálogo, sin cantidades). Cada almacén nuevo se crea con su
+  `DEFAULT`.
+- Roles: ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen;
+  PURCHASING y ACCOUNTANT reciben 403.
+- `MAIN` no puede desactivarse; `DEFAULT` no cambia de código ni se desactiva
+  por separado; nada se elimina; durante esta etapa solo se desactiva lo que no
+  tiene ningún rastro (saldos, movimientos, líneas de venta o recepción).
+
+Contrato para Angular: [docs/warehouses-locations-api.md](docs/warehouses-locations-api.md).
+Plan y verificaciones de R2: [docs/r2-migration-plan.md](docs/r2-migration-plan.md).
+
 ## Caja retirada
 
 Por decisión del cliente, el módulo operativo de **Caja / arqueo** fue

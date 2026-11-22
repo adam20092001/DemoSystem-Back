@@ -225,6 +225,17 @@ export enum AuditAction {
   SUPPLIER_UPDATED = 'SUPPLIER_UPDATED',
   SUPPLIER_ACTIVATED = 'SUPPLIER_ACTIVATED',
   SUPPLIER_DEACTIVATED = 'SUPPLIER_DEACTIVATED',
+  // R2-A1 (catálogo de almacenes y ubicaciones, solo EXPAND).
+  // WarehousesService/WarehouseLocationsService son sus únicos emisores. Sin
+  // ningún vínculo con inventario: solo metadatos estructurales del catálogo.
+  WAREHOUSE_CREATED = 'WAREHOUSE_CREATED',
+  WAREHOUSE_UPDATED = 'WAREHOUSE_UPDATED',
+  WAREHOUSE_ACTIVATED = 'WAREHOUSE_ACTIVATED',
+  WAREHOUSE_DEACTIVATED = 'WAREHOUSE_DEACTIVATED',
+  LOCATION_CREATED = 'LOCATION_CREATED',
+  LOCATION_UPDATED = 'LOCATION_UPDATED',
+  LOCATION_ACTIVATED = 'LOCATION_ACTIVATED',
+  LOCATION_DEACTIVATED = 'LOCATION_DEACTIVATED',
   // Fase A5.2a (facturas de compra universales). PurchaseInvoicesService es
   // su único emisor. Nunca se audita descriptionSnapshot de línea ni el
   // nombre legal del proveedor (PII/negocio) — solo metadatos estructurales,
