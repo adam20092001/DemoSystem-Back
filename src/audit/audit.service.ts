@@ -476,6 +476,16 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.SUPPLIER_UPDATED]: ['updatedFields'],
   [AuditAction.SUPPLIER_ACTIVATED]: ['previousStatus'],
   [AuditAction.SUPPLIER_DEACTIVATED]: ['previousStatus'],
+  // R2-A1: catálogo de almacenes/ubicaciones. Solo metadatos estructurales
+  // (códigos técnicos, ids y campos tocados); nunca nombres ni descripciones.
+  [AuditAction.WAREHOUSE_CREATED]: ['code', 'defaultLocationId'],
+  [AuditAction.WAREHOUSE_UPDATED]: ['updatedFields'],
+  [AuditAction.WAREHOUSE_ACTIVATED]: ['previousStatus'],
+  [AuditAction.WAREHOUSE_DEACTIVATED]: ['previousStatus'],
+  [AuditAction.LOCATION_CREATED]: ['warehouseId', 'code'],
+  [AuditAction.LOCATION_UPDATED]: ['warehouseId', 'updatedFields'],
+  [AuditAction.LOCATION_ACTIVATED]: ['warehouseId', 'previousStatus'],
+  [AuditAction.LOCATION_DEACTIVATED]: ['warehouseId', 'previousStatus'],
   // PURCHASE_INVOICE_ (Fase A5.2a). PurchaseInvoicesService es su único
   // emisor. Nunca descriptionSnapshot de línea ni datos del proveedor: solo
   // identificadores y montos estructurales ya conocidos por el propio

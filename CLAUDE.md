@@ -90,6 +90,8 @@ Reglas de capas:
 
 20. **SIRE DEMO** (S1–S3, solo demostración) — `SireDemoModule` (`/api/v1/sire-demo*`, 8 rutas): previsualización de documentos RVIE/RCE, archivo de ejemplo, carga/listado/descarte de propuestas DEMO_V1, conciliación y exportación a Excel. **Sin comunicación con SUNAT ni validez fiscal.** Apagado por defecto (ver §11 "SIRE DEMO").
 
+21. **Almacenes y ubicaciones** (R2-A1, solo EXPAND; **rama `feat/r2-a1-warehouses-locations-expand`, aún no integrada en `main`**) — catálogo administrativo (`WarehousesModule`, `/api/v1/warehouses*`, 12 rutas): almacenes y ubicaciones con códigos normalizados y únicos, almacén principal `MAIN` y ubicación técnica `DEFAULT` en cada almacén. ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen; PURCHASING y ACCOUNTANT reciben 403. **Inerte respecto al inventario:** no mueve, valida ni lee stock (ver §6 y §11 "R2-A1").
+
 ---
 
 ## 5. Roles
@@ -132,6 +134,7 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - **No se permite stock negativo**: si no hay stock suficiente, la operación falla.
 - El stock **solo cambia mediante movimientos de inventario**; nunca por escritura directa del saldo.
 - Los **servicios no inventariables no descuentan stock**.
+- **Stock por ubicación (R2-A1, EXPAND):** `Product.stockCurrent` sigue siendo la **única cantidad operativa** (consolidada) y `StockMovementEngine` el único escritor del stock. `StockBalance` existe pero está **vacía** y **no participa** en ninguna validación ni operación; no se ha hecho backfill; las columnas `locationId` de movimientos, líneas de venta y líneas de recepción son siempre NULL. Nada de esto cambia hasta R2-ACT.
 
 **Ventas, clientes y pagos**
 - Una **venta con deuda no puede usar al cliente Público general** (ese cliente solo admite ventas pagadas al contado).
@@ -191,7 +194,7 @@ No implementar, ni preparar abstracciones anticipadas para:
 - Facturación electrónica SUNAT **real** (PSE, XML/UBL, CDR, firma digital, certificado, QR, notas de crédito/débito, conciliación con proveedor externo). La demostración con proveedor MOCK sí existe (ver §4, módulo 16) y no debe confundirse con esto.
 - Compras y proveedores completos
 - Kardex valorizado
-- Multi-almacén
+- Multi-almacén **operativo** (stock por almacén/ubicación en ventas, compras, recepciones y transferencias), salvo lo expresamente aprobado en la nota «Stock por ubicación» siguiente
 - Multi-moneda
 - CRM avanzado
 - Ecommerce
@@ -201,6 +204,8 @@ No implementar, ni preparar abstracciones anticipadas para:
 Si una tarea parece requerir algo de esta lista, **detenerse y consultar** antes de implementar.
 
 > **Nota (Fase A0, ver §11):** el cliente aprobó un roadmap de Contabilidad empresarial (PCGE, periodos, libros, compras/cuentas por pagar, multimoneda) que algún día alcanzará varios puntos de esta lista (Compras y proveedores, Kardex valorizado, Multi-moneda). Esa aprobación es de **dirección estratégica**, no de implementación: cada capacidad sigue fuera de alcance hasta que se apruebe puntualmente y se implemente en una fase dedicada. Un futuro módulo de Importaciones (no iniciado) dependerá de esa base contable. Facturación electrónica SUNAT real, Alquileres, CRM avanzado, Ecommerce, Aplicación móvil e Integraciones externas no forman parte de este roadmap y siguen fuera de alcance sin excepción.
+
+> **Nota (Stock por ubicación, ver §11):** el cliente aprobó por etapas el stock por almacén y ubicación. Nombre de trabajo: «R2-A1/ACT/B/C» (almacenes y ubicaciones; **no confundir** con el requerimiento histórico «R2 — Precios e IGV» de §6). **R2-A1** (estructura EXPAND y catálogos de almacenes y ubicaciones) está implementada en la rama `feat/r2-a1-warehouses-locations-expand`, **pendiente de commit/PR y todavía no integrada en `main`**. **R2-ACT** (migración de las existencias y activación del stock por ubicación), **R2-B** (operaciones por ubicación en inventario, recepciones y ventas) y **R2-C** (transferencias) **siguen pendientes y fuera de alcance** hasta aprobarse e implementarse cada una en su propia fase. Mientras tanto, `Product.stockCurrent` es la única cantidad operativa consolidada.
 
 ---
 
@@ -1212,6 +1217,49 @@ una base descartable, nunca en `pos_db` ni `pos_db_test`). Es un cambio de
   `MANAGEMENT` en facturas de compra, y la responsabilidad de recepción física
   de `WAREHOUSE` sin información financiera.
 
+**R2-A1 — Almacenes y ubicaciones, solo EXPAND** (rama `feat/r2-a1-warehouses-locations-expand`,
+base `main` en `d616e5a`, **implementada y validada, sin commit/push/PR todavía — NO integrada en
+`main`**; pendiente de autorización explícita del propietario). Nombre de trabajo de la serie de
+stock por ubicación (R2-A1/ACT/B/C); **no confundir** con «R2 — Precios e IGV» de §6.
+
+- **Alcance (R2-A1):** estructura aditiva y catálogos. Migración
+  `20261030000000_add_warehouses_locations_expand`: enum `WarehouseStatus`; tablas `warehouses`,
+  `warehouse_locations` y `stock_balances` (**vacía**); columnas **nullable** `location_id` (más
+  `location_previous_stock`/`location_new_stock`) en `inventory_movements` y `location_id` en
+  `sale_items` y `purchase_receipt_lines` (FK `RESTRICT`); restricciones a mano (códigos
+  normalizados, un solo almacén predeterminado, una `DEFAULT` por almacén, `quantity >= 0`, CHECK
+  todo-o-nada de las columnas de ubicación del movimiento); datos de **catálogo** `MAIN` y su
+  `DEFAULT` (nunca cantidades). Todo el archivo va en una transacción explícita `BEGIN/COMMIT`.
+- **Qué NO hace:** **sin backfill**; sin triggers ni funciones; `Product.stockCurrent` sigue siendo la
+  única cantidad operativa consolidada; `StockBalance` **no participa** en el inventario operativo
+  (nada la lee ni la escribe); `StockMovementEngine`, ventas, recepciones, valorización y COGS **no
+  cambian**; ningún movimiento recibe ubicación.
+- **API (12 rutas, ver `docs/warehouses-locations-api.md`):** `/api/v1/warehouses` y
+  `/api/v1/warehouses/:warehouseId/locations` (las ubicaciones siempre bajo su almacén; una ubicación
+  de otro almacén responde 404). ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen;
+  PURCHASING y ACCOUNTANT 403. `MAIN` no se desactiva; `DEFAULT` no cambia de código ni se desactiva
+  por separado; nada se elimina; no existe endpoint para cambiar el almacén predeterminado. La
+  desactivación se bloquea ante cualquier saldo ≠ 0, movimiento, línea de venta o línea de recepción
+  asociados (no puede demostrarse "stock cero" mientras los saldos no sean la fuente de verdad).
+  Auditoría: `WAREHOUSE_*` y `LOCATION_*`.
+- **Garantías:** la unicidad y la forma de `MAIN`/`DEFAULT` están en la base de datos (índices y
+  CHECK); que **todo almacén tenga su `DEFAULT`** y que `MAIN` exista lo garantiza solo el servicio
+  (no hay trigger).
+- **Estado de despliegue:** la migración **no se ha aplicado** ni desplegado en `pos_db` ni en
+  `pos_db_test` (solo en PostgreSQL 16 descartable). Hasta fusionar y desplegar, `main` y las bases
+  existentes siguen en 32 migraciones.
+- **Validación:** 143 suites / 4208 pruebas unitarias; 64 pruebas E2E de almacenes; 86 de scripts;
+  migración probada en base nueva y con datos (sin deriva), con fallos inyectados en copias
+  temporales (rollback total) y recuperación con `migrate resolve --rolled-back`. La suite E2E
+  completa tiene **13 pruebas fallando en 6 suites, las mismas 13 que en `main`** sin estos cambios
+  (incidencia independiente, sin corregir). Detalle y límites de lo verificado:
+  `docs/r2-migration-plan.md`.
+- **Pendiente (no implementado, fuera de alcance):** **R2-ACT** (backfill de las existencias a
+  `MAIN/DEFAULT`, invariante `stockCurrent = Σ saldos`, motor por ubicación, trigger diferido y CHECK
+  de corte —ambos con aprobación pendiente—, fixtures E2E), **R2-B** (`locationId` en inventario,
+  recepciones y ventas; anulaciones; ubicaciones inactivas) y **R2-C** (transferencias, consultas por
+  ubicación, reconciliación).
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;
@@ -1245,7 +1293,12 @@ específico debe fijarlo como fixture propio, nunca asumirlo (ver Fase
 A5.2a); 11 errores preexistentes en `tsc --noEmit`; el frontend todavía
 depende de Caja; no hay CI en GitHub.
 
-Migraciones totales: **22**, las 20 anteriores en `main` (A1 vía PR #31, A2
+Migraciones totales **del código de la rama `feat/r2-a1-warehouses-locations-expand`: 33**
+(las 32 anteriores más `20261030000000_add_warehouses_locations_expand`, R2-A1). **Solo 32 están
+integradas hoy en `main`**; la 33 se integra únicamente cuando se fusione el PR de R2-A1, y no
+está aplicada en `pos_db` ni en `pos_db_test`.
+
+Nota histórica (cifra desactualizada, válida hasta A5.2a): migraciones totales: **22**, las 20 anteriores en `main` (A1 vía PR #31, A2
 vía PR #32, A4 vía su propio merge) aplicadas tanto en `pos_db` como en
 `pos_db_test`; la migración 21 (A5.1, Proveedores) está en `main` pero
 `CLAUDE.md` nunca se actualizó en ese momento (ver nota de arriba); la
