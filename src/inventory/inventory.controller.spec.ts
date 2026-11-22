@@ -56,6 +56,7 @@ function createInventoryServiceMock() {
       [string, Record<string, unknown>]
     >(),
     getProductStock: jest.fn<Promise<unknown>, [string, RoleName]>(),
+    getProductStockByLocation: jest.fn<Promise<unknown>, [string, RoleName]>(),
     listLowStock: jest.fn<Promise<unknown>, [Record<string, unknown>]>(),
   };
 }
@@ -175,6 +176,51 @@ describe('InventoryController', () => {
         ipAddress: '203.0.113.5',
       });
       expect(result).toBe(expected);
+    });
+
+    it('R2-B1b: locationId del DTO viaja en RegisterMovementInput (los 5 endpoints)', async () => {
+      const locationId = '22222222-2222-4222-8222-222222222222';
+      const withLocation = { ...dto, locationId };
+      const calls: [jest.Mock, () => Promise<unknown>][] = [
+        [
+          inventoryService.registerInitialBalance,
+          () => controller.registerInitialBalance(withLocation, ACTOR, request),
+        ],
+        [
+          inventoryService.registerEntry,
+          () => controller.registerEntry(withLocation, ACTOR, request),
+        ],
+        [
+          inventoryService.registerExit,
+          () => controller.registerExit(withLocation, ACTOR, request),
+        ],
+        [
+          inventoryService.registerPositiveAdjustment,
+          () =>
+            controller.registerPositiveAdjustment(withLocation, ACTOR, request),
+        ],
+        [
+          inventoryService.registerNegativeAdjustment,
+          () =>
+            controller.registerNegativeAdjustment(withLocation, ACTOR, request),
+        ],
+      ];
+      for (const [mock, invoke] of calls) {
+        mock.mockResolvedValue({});
+        await invoke();
+        expect(mock).toHaveBeenCalledWith(
+          expect.objectContaining({ locationId }),
+        );
+      }
+    });
+
+    it('R2-B1b: sin locationId la entrada no lo define (solicitudes antiguas)', async () => {
+      inventoryService.registerEntry.mockResolvedValue({});
+
+      await controller.registerEntry(dto, ACTOR, request);
+
+      const input = inventoryService.registerEntry.mock.calls[0][0];
+      expect(input.locationId).toBeUndefined();
     });
 
     it('notes ausente y sin request.ip se normalizan a null', async () => {
@@ -334,6 +380,47 @@ describe('InventoryController', () => {
     });
   });
 
+  describe('R2-B1b: consultas por ubicación', () => {
+    it('getProductStockByLocation() delega con el rol del usuario', async () => {
+      const expected = { productId: PRODUCT_ID, locations: [] };
+      inventoryService.getProductStockByLocation.mockResolvedValue(expected);
+
+      const result = await controller.getProductStockByLocation(
+        PRODUCT_ID,
+        ACTOR,
+      );
+
+      expect(inventoryService.getProductStockByLocation).toHaveBeenCalledWith(
+        PRODUCT_ID,
+        RoleName.ADMIN,
+      );
+      expect(result).toBe(expected);
+    });
+
+    it('listMovements() reenvía locationId', async () => {
+      inventoryService.listMovements.mockResolvedValue({});
+
+      await controller.listMovements({ locationId: 'loc-1' });
+
+      expect(inventoryService.listMovements).toHaveBeenCalledWith(
+        expect.objectContaining({ locationId: 'loc-1' }),
+      );
+    });
+
+    it('listProductMovements() reenvía locationId', async () => {
+      inventoryService.listProductMovements.mockResolvedValue({});
+
+      await controller.listProductMovements(PRODUCT_ID, {
+        locationId: 'loc-1',
+      });
+
+      expect(inventoryService.listProductMovements).toHaveBeenCalledWith(
+        PRODUCT_ID,
+        expect.objectContaining({ locationId: 'loc-1' }),
+      );
+    });
+  });
+
   describe('roles por ruta (matriz aprobada)', () => {
     it.each([
       ['registerInitialBalance', [RoleName.ADMIN, RoleName.WAREHOUSE]],
@@ -355,6 +442,15 @@ describe('InventoryController', () => {
       ],
       [
         'getProductStock',
+        [
+          RoleName.ADMIN,
+          RoleName.WAREHOUSE,
+          RoleName.MANAGEMENT,
+          RoleName.SELLER,
+        ],
+      ],
+      [
+        'getProductStockByLocation',
         [
           RoleName.ADMIN,
           RoleName.WAREHOUSE,

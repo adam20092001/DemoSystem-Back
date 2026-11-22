@@ -26,6 +26,7 @@ import { ListMovementsQuery } from './types/list-movements.query';
 import { RegisterMovementInput } from './types/register-movement.input';
 import { SafeInventoryMovement } from './types/safe-inventory-movement';
 import { SafeLowStockItem, SafeProductStock } from './types/safe-product-stock';
+import { SafeProductStockByLocation } from './types/safe-product-stock-by-location';
 import { StockMovementCommand } from './types/stock-movement-command';
 
 const DEFAULT_PAGE = 1;
@@ -145,17 +146,99 @@ export class InventoryService {
     return this.queryMovements({ ...query, productId });
   }
 
+  /** Stock consolidado. Reglas de acceso por rol: ver loadStockableProduct. */
+  async getProductStock(
+    productId: string,
+    requesterRole: RoleName,
+  ): Promise<SafeProductStock> {
+    const product = await this.loadStockableProduct(
+      this.prisma,
+      productId,
+      requesterRole,
+    );
+    return {
+      productId: product.id,
+      sku: product.sku,
+      name: product.name,
+      stockCurrent: product.stockCurrent.toFixed(3),
+      stockMinimum: product.stockMinimum.toFixed(3),
+      unitAbbreviation: product.unit.abbreviation,
+      allowDecimal: product.unit.allowDecimal,
+    };
+  }
+
+  /**
+   * R2-B1b: consolidado + desglose por ubicación. Solo lectura: nunca crea ni
+   * corrige saldos. Producto y saldos se leen en UNA transacción REPEATABLE
+   * READ (misma instantánea), así el desglose suma siempre el consolidado
+   * aunque haya movimientos concurrentes. Mismas reglas de acceso que
+   * getProductStock. Las ubicaciones sin existencias (> 0) se omiten.
+   */
+  async getProductStockByLocation(
+    productId: string,
+    requesterRole: RoleName,
+  ): Promise<SafeProductStockByLocation> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const product = await this.loadStockableProduct(
+          tx,
+          productId,
+          requesterRole,
+        );
+        const balances = await tx.stockBalance.findMany({
+          where: { productId, quantity: { gt: 0 } },
+          select: {
+            quantity: true,
+            location: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                warehouse: { select: { id: true, code: true } },
+              },
+            },
+          },
+        });
+        const locations = balances
+          .map((row) => ({
+            location: row.location,
+            quantity: row.quantity.toFixed(3),
+          }))
+          .sort(
+            (a, b) =>
+              compareText(
+                a.location.warehouse.code,
+                b.location.warehouse.code,
+              ) ||
+              compareText(a.location.code, b.location.code) ||
+              compareText(a.location.id, b.location.id),
+          );
+        return {
+          productId: product.id,
+          sku: product.sku,
+          name: product.name,
+          stockCurrent: product.stockCurrent.toFixed(3),
+          unitAbbreviation: product.unit.abbreviation,
+          allowDecimal: product.unit.allowDecimal,
+          locations,
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
+  }
+
   /**
    * SELLER solo ve stock de productos operativos (producto, categoría y
    * unidad ACTIVE); en cualquier otro caso, 404 genérico sin revelar cuál
    * de los tres está inactivo. ADMIN/WAREHOUSE/MANAGEMENT consultan sin esa
    * restricción (administración e histórico).
    */
-  async getProductStock(
+  private async loadStockableProduct(
+    db: Prisma.TransactionClient | PrismaService,
     productId: string,
     requesterRole: RoleName,
-  ): Promise<SafeProductStock> {
-    const product = await this.prisma.product.findUnique({
+  ) {
+    const product = await db.product.findUnique({
       where: { id: productId },
       select: {
         id: true,
@@ -190,15 +273,7 @@ export class InventoryService {
         throw new NotFoundException('Producto no encontrado');
       }
     }
-    return {
-      productId: product.id,
-      sku: product.sku,
-      name: product.name,
-      stockCurrent: product.stockCurrent.toFixed(3),
-      stockMinimum: product.stockMinimum.toFixed(3),
-      unitAbbreviation: product.unit.abbreviation,
-      allowDecimal: product.unit.allowDecimal,
-    };
+    return product;
   }
 
   /**
@@ -323,6 +398,9 @@ export class InventoryService {
     if (query.productId !== undefined) {
       where.productId = query.productId;
     }
+    if (query.locationId !== undefined) {
+      where.locationId = query.locationId;
+    }
     if (query.movementType !== undefined) {
       where.movementType = query.movementType;
     }
@@ -381,6 +459,7 @@ export class InventoryService {
       origin,
       reason: input.reason,
       notes: input.notes ?? null,
+      locationId: input.locationId,
       actorUserId: input.actorUserId,
       ipAddress: input.ipAddress ?? null,
       referenceType: null,
@@ -409,6 +488,10 @@ export class InventoryService {
       );
     }
   }
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function normalizePage(page: number | undefined): number {

@@ -44,4 +44,13 @@ export class RegisterExitDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'R2-B1b: ubicación de inventario afectada. Si se omite, se usa MAIN/DEFAULT. Debe existir y, junto con su almacén, estar ACTIVE.',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }

@@ -2477,7 +2477,7 @@ describe('Inventory (e2e)', () => {
   // 28. Regresión de Swagger y rutas (lo no cubierto por app.e2e-spec.ts)
   // ============================================================
   describe('regresión de Swagger', () => {
-    it('el documento OpenAPI conserva exactamente las 10 operaciones de Inventory, sin PATCH/DELETE', async () => {
+    it('el documento OpenAPI conserva exactamente las 11 operaciones de Inventory, sin PATCH/DELETE', async () => {
       const response = await request(app.getHttpServer()).get('/api/docs-json');
       expect(response.status).toBe(200);
 
@@ -2495,7 +2495,7 @@ describe('Inventory (e2e)', () => {
         (path) =>
           path.includes('/inventory') && !path.includes('/inventory/valuation'),
       );
-      expect(inventoryPaths).toHaveLength(10);
+      expect(inventoryPaths).toHaveLength(11);
       for (const path of inventoryPaths) {
         const methods = Object.keys(document.paths[path]);
         expect(methods).not.toContain('patch');

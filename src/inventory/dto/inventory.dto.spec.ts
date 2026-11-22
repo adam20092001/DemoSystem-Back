@@ -19,6 +19,7 @@ type WriteDto = {
   quantity: string;
   reason: string;
   notes?: string;
+  locationId?: string;
 };
 type WriteDtoCtor = new () => WriteDto;
 
@@ -200,6 +201,64 @@ describe('DTOs de escritura de inventario', () => {
       };
       expect(body.message.join(' ')).toMatch(/origin/);
     }
+  });
+});
+
+describe('R2-B1b: locationId en los DTOs de escritura', () => {
+  const base = { productId: VALID_UUID, quantity: '5.000', reason: 'Motivo' };
+  const LOCATION_UUID = '22222222-2222-4222-8222-222222222222';
+
+  it.each(WRITE_DTOS)(
+    '%s: locationId UUID válido es aceptado',
+    async (_n, Dto) => {
+      const errors = await validate(
+        plainToInstance(Dto, { ...base, locationId: LOCATION_UUID }),
+      );
+      expect(errors).toHaveLength(0);
+    },
+  );
+
+  it.each(WRITE_DTOS)('%s: locationId es opcional', async (_n, Dto) => {
+    const errors = await validate(plainToInstance(Dto, base));
+    expect(errors).toHaveLength(0);
+  });
+
+  it.each(WRITE_DTOS)('%s: locationId malformado → error', async (_n, Dto) => {
+    const errors = await validate(
+      plainToInstance(Dto, { ...base, locationId: 'no-es-uuid' }),
+    );
+    expect(errors.some((e) => e.property === 'locationId')).toBe(true);
+  });
+
+  it.each(WRITE_DTOS)(
+    '%s: el pipe global acepta locationId y rechaza campos extra',
+    async (_n, Dto) => {
+      const pipe = createValidationPipe();
+      const meta = { type: 'body' as const, metatype: Dto };
+      await expect(
+        pipe.transform({ ...base, locationId: LOCATION_UUID }, meta),
+      ).resolves.toBeDefined();
+      await expect(
+        pipe.transform({ ...base, warehouseId: LOCATION_UUID }, meta),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    },
+  );
+});
+
+describe('ListMovementsQueryDto locationId (R2-B1b)', () => {
+  it('acepta UUID, es opcional y rechaza un valor malformado', async () => {
+    const ok = await validate(
+      plainToInstance(ListMovementsQueryDto, {
+        locationId: '22222222-2222-4222-8222-222222222222',
+      }),
+    );
+    const none = await validate(plainToInstance(ListMovementsQueryDto, {}));
+    const bad = await validate(
+      plainToInstance(ListMovementsQueryDto, { locationId: 'x' }),
+    );
+    expect(ok).toHaveLength(0);
+    expect(none).toHaveLength(0);
+    expect(bad.some((e) => e.property === 'locationId')).toBe(true);
   });
 });
 

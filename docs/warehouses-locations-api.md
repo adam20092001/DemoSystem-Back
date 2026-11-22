@@ -9,7 +9,12 @@ Base: `/api/v1`. Autenticación: cookie HttpOnly de sesión. Fechas ISO 8601. Ca
 > **IMPORTANTE — para el frontend, el contrato NO cambia con R2-ACT.** Crear, editar, activar o desactivar
 > almacenes/ubicaciones **no mueve existencias**, y `Product.stockCurrent` sigue siendo la **única** cantidad que expone
 > la API (consolidada). Internamente (R2-ACT, ver §7) el inventario ya se mantiene por ubicación sobre `MAIN/DEFAULT`, pero
-> ningún endpoint lo expone ni acepta ubicaciones.
+> ningún endpoint de `main` lo expone ni acepta ubicaciones.
+
+> **R2-B1b (rama `feat/r2-b1b-manual-inventory-locations`, NO integrada en `main` ni desplegada):** añade `locationId`
+> opcional a los cinco movimientos manuales de inventario, `location` en las respuestas de movimientos, el filtro
+> `locationId` del kardex y `GET /inventory/products/:productId/stock-by-location`. Ver
+> [`inventory-locations-api.md`](inventory-locations-api.md). Las ventas y recepciones siguen usando `MAIN/DEFAULT`.
 
 ---
 
@@ -20,9 +25,10 @@ ubicaciones).
 
 **NO debe consumir todavía** (reservado a R2-B/R2-C, no existe en la API):
 
-- Selector de ubicación en entradas, salidas, ajustes, recepciones de compra o ventas (`locationId` **no** se acepta
-  en esos endpoints; enviarlo produce 400 por la validación estricta).
-- Saldos por ubicación (existen internamente desde R2-ACT, pero ninguna API los expone).
+- Selector de ubicación en recepciones de compra o ventas (`locationId` **no** se acepta en esos endpoints; enviarlo
+  produce 400 por la validación estricta). *(Entradas, salidas, ajustes y saldo inicial: ver R2-B1b, aún no integrado.)*
+- Saldos por ubicación: en `main` ninguna API los expone; R2-B1b (no integrado) añade
+  `GET /inventory/products/:productId/stock-by-location`.
 - Transferencias entre ubicaciones.
 - `isDefault` como "almacén/ubicación de destino por defecto de operaciones": hoy es solo informativo.
 - Cualquier cálculo de disponibilidad por almacén. La disponibilidad sigue siendo el stock consolidado.
@@ -146,3 +152,11 @@ Qué cambia por dentro (relevante para entender los 409 de desactivación):
 
 **Reservado a R2-B / R2-C (no implementado):** `locationId` opcional en inventario/recepciones/ventas, elegir otra
 ubicación, designar otro almacén predeterminado, transferencias y consultas/reportes por ubicación.
+
+### R2-B1b (no integrado en `main`)
+
+La rama `feat/r2-b1b-manual-inventory-locations` revisa parte de lo anterior: los movimientos manuales de inventario
+aceptan `locationId` y sus respuestas devuelven `location` (excepción expresa y aprobada a la decisión D3, limitada al
+módulo de inventario y aditiva). Contrato completo en [`inventory-locations-api.md`](inventory-locations-api.md). Las reglas
+de desactivación (D4) **no cambian**: una ubicación con movimientos sigue sin poder desactivarse. Recepciones, ventas y
+transferencias siguen reservadas a R2-B posteriores y R2-C.

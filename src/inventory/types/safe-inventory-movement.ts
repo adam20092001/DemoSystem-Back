@@ -15,6 +15,14 @@ export interface MovementCreatedBySummary {
   lastName: string;
 }
 
+/** R2-B1b: ubicación afectada por el movimiento. */
+export interface MovementLocationSummary {
+  id: string;
+  code: string;
+  name: string;
+  warehouse: { id: string; code: string };
+}
+
 /**
  * Forma segura de un movimiento de inventario para salir del dominio (la
  * usará el mapper del Bloque C). Los campos Decimal (quantity, previousStock,
@@ -33,5 +41,7 @@ export interface SafeInventoryMovement {
   reason: string;
   notes: string | null;
   createdBy: MovementCreatedBySummary;
+  /** R2-B1b (aditivo): null en movimientos históricos sin ubicación. */
+  location: MovementLocationSummary | null;
   createdAt: Date;
 }

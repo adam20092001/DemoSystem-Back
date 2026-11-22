@@ -206,7 +206,7 @@ no tiene "down"); mientras no haya operaciones posteriores a la migración, el r
 
 ### 5.6 Decisiones abiertas
 
-1. R2-B: ubicación explícita en inventario, recepciones y ventas; revisar las reglas de desactivación (D4).
+1. R2-B: ubicación explícita en inventario (**R2-B1b implementado en rama, ver §5.9**), recepciones y ventas; revisar las reglas de desactivación (D4).
 2. Endpoint para designar otro almacén predeterminado (hoy inexistente a propósito).
 3. Si algún día se desea `VALIDATE CONSTRAINT`, hay que decidir qué hacer con los movimientos históricos sin ubicación
    (hoy no se reescriben).
@@ -376,6 +376,26 @@ rm -f "$REPO/.env.test.local" "$REPO/test/manual-r2-act/.state.json"   # solo es
 `.state.json` solo se necesita entre las Etapas A–C; es seguro borrarlo, y se regenera ejecutando de nuevo la Etapa A.
 Limitación: el paso A debe ejecutarse una sola vez por base; para repetir el escenario se crea otra base descartable
 (`DB` y contenedor nuevos) porque la migración 34 es irreversible sin restaurar un respaldo.
+
+## 5.9 R2-B1b — inventario manual por ubicación (rama `feat/r2-b1b-manual-inventory-locations`; NO integrada ni desplegada)
+
+Primera entrega de R2-B, sobre R2-ACT (que debe estar aplicado antes de desplegar). **Sin migraciones nuevas** y sin
+cambios en `StockMovementEngine` (ya soportaba `locationId` desde R2-ACT): es cableado de contrato.
+
+- **Movimientos manuales:** `locationId` opcional en saldo inicial, entrada, salida y ajustes ±; propagado
+  DTO → controller → `RegisterMovementInput` → `InventoryService.run()` → `StockMovementCommand`. Sin él, `MAIN/DEFAULT`
+  (comportamiento previo intacto). Las validaciones (existe → 404, almacén y ubicación activos → 409, insuficiencia por
+  **ubicación** → 409, UUID → 400) y los bloqueos son los del motor, sin cambios.
+- **Cantidades:** todas las operaciones son deltas; no hay ajustes absolutos. El saldo inicial sigue siendo único por
+  producto (consolidado 0 y sin movimientos previos), colocado en la ubicación indicada; una segunda carga es una entrada.
+- **Excepción aprobada a D3:** las respuestas de movimientos exponen `location: { id, code, name, warehouse: { id, code } } | null`
+  (`null` en históricos) y `GET /inventory/movements` + kardex por producto aceptan el filtro `locationId`. Aditivo.
+- **`GET /inventory/products/:productId/stock-by-location`:** consolidado + desglose, leídos en una transacción
+  `REPEATABLE READ`; solo ubicaciones con cantidad > 0 (las demás se omiten); solo lectura; mismos roles que `…/stock`.
+- **Sin cambios:** permisos, reglas de desactivación (D4), costos, valorización y COGS. Ventas y recepciones siguen en
+  `MAIN/DEFAULT`; no hay transferencias.
+- **Pruebas:** unitarias (DTOs, controller, servicio) y `test/inventory-locations.e2e-spec.ts` (37 pruebas contra
+  PostgreSQL descartable, incluida concurrencia real). Contrato para Angular: `docs/inventory-locations-api.md`.
 
 ## 6. Riesgos y límites conocidos de R2-A1 (los puntos sobre inercia quedan superados por R2-ACT, §5)
 

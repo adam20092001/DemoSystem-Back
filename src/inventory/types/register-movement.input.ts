@@ -11,6 +11,8 @@ export interface RegisterMovementInput {
   quantity: string;
   reason: string;
   notes?: string | null;
+  /** R2-B1b: ubicación; ausente => MAIN/DEFAULT (decide el motor). */
+  locationId?: string;
   actorUserId: string;
   ipAddress?: string | null;
 }
