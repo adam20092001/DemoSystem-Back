@@ -23,6 +23,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Suite dedicada de integración cruzada Configuration <-> Quotes/Sales
@@ -215,7 +216,7 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: 'E2ECFG-P1',
         name: 'Producto E2E Config Comercial',
@@ -366,7 +367,7 @@ describe('Configuration — Commercial Integration (Bloque 10, B) (e2e)', () => 
       });
 
       if (createdProductIds.length > 0) {
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }

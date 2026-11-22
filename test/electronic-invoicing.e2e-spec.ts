@@ -37,6 +37,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Suite dedicada al motor de emisión fiscal interna (Fase 11, Bloque C).
@@ -239,7 +240,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `E2EEIV-P-${Date.now()}`,
         name: 'Producto E2E Facturacion',
@@ -379,7 +380,7 @@ describe('Electronic Invoicing — motor de emisión fiscal interna (Fase 11, Bl
         await prisma.customer.deleteMany({ where: { id: rucCustomerId } });
       }
       if (productId) {
-        await prisma.product.deleteMany({ where: { id: productId } });
+        await deleteProductRows(prisma, { where: { id: productId } });
       }
       if (unitId) {
         await prisma.unit.deleteMany({ where: { id: unitId } });

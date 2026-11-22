@@ -22,6 +22,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase A5.2b — Recepciones físicas de mercadería. Suite dedicada y
@@ -285,7 +286,7 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
    */
   async function createDedicatedTrackedProduct(): Promise<string> {
     const suffix = nextSuffix();
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `A52B-D-${suffix}`,
         name: `Producto dedicado E2E A5.2b ${suffix}`,
@@ -436,7 +437,7 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
     unitId = unit.id;
 
     const suffix = nextSuffix();
-    const trackedProduct = await prisma.product.create({
+    const trackedProduct = await createProductRow(prisma, {
       data: {
         sku: `A52B-T-${suffix}`,
         name: `Producto rastreado E2E A5.2b ${suffix}`,
@@ -452,7 +453,7 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
     trackedProductId = trackedProduct.id;
     createdProductIds.push(trackedProductId);
 
-    const serviceProduct = await prisma.product.create({
+    const serviceProduct = await createProductRow(prisma, {
       data: {
         sku: `A52B-S-${suffix}`,
         name: `Servicio E2E A5.2b ${suffix}`,
@@ -538,7 +539,7 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

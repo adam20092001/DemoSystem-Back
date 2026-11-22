@@ -51,6 +51,24 @@ import { SafePurchaseReceipt } from './types/safe-purchase-receipt';
 
 const ZERO = new Prisma.Decimal(0);
 
+/**
+ * Orden determinista para bloquear productos (D1): productId ascendente y,
+ * ante el mismo producto, id de línea ascendente. Un productId nulo no
+ * debería existir en una línea elegible; se ordena al final y el invariante
+ * interno lo rechaza más adelante.
+ */
+function compareProductThenLine(
+  productA: string | null,
+  lineA: string,
+  productB: string | null,
+  lineB: string,
+): number {
+  const a = productA ?? '￿';
+  const b = productB ?? '￿';
+  if (a !== b) return a < b ? -1 : 1;
+  return lineA < lineB ? -1 : lineA > lineB ? 1 : 0;
+}
+
 /** Mensaje funcional (sin códigos de cuenta ni importes) para roles sin vista financiera. */
 export const WAREHOUSE_ACCOUNTING_CONFIG_MESSAGE =
   'No se puede registrar la recepción debido a una configuración contable pendiente. Comuníquese con el administrador.';
@@ -314,6 +332,13 @@ export class PurchaseReceiptsService {
         }
       }
 
+      // R2-ACT: orden global de bloqueos — documento (factura y sus líneas,
+      // ya bloqueadas arriba) -> Warehouse/Location FOR SHARE -> productos.
+      // La ubicación es siempre MAIN/DEFAULT en esta etapa (R2-B habilita
+      // elegirla); el motor la reutiliza sin costo adicional.
+      const [receiptLocationId] =
+        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+
       const alreadyReceived = await tx.purchaseReceiptLine.groupBy({
         by: ['purchaseInvoiceLineId'],
         where: {
@@ -368,7 +393,11 @@ export class PurchaseReceiptsService {
                   'Línea bloqueada sin cantidad solicitada; invariante interno roto',
                 );
               }
-              return { purchaseInvoiceLineId: row.id, quantity: qty };
+              return {
+                purchaseInvoiceLineId: row.id,
+                quantity: qty,
+                locationId: receiptLocationId,
+              };
             }),
           },
         },
@@ -381,7 +410,14 @@ export class PurchaseReceiptsService {
       // Capa física: SIEMPRE, sin importar el resultado contable — la
       // elegibilidad congelada (isReceiptEligible=true) ya garantiza
       // productId no nulo.
-      for (const row of lockedLines) {
+      // D1 (aprobada): los productos se procesan en orden ascendente de
+      // productId (desempate por id de línea) — nunca en el orden en que
+      // llegaron las líneas — para que dos recepciones con productos
+      // solapados en orden inverso no formen un ciclo de bloqueos.
+      const linesInProductOrder = [...lockedLines].sort((a, b) =>
+        compareProductThenLine(a.productId, a.id, b.productId, b.id),
+      );
+      for (const row of linesInProductOrder) {
         const qty = requested.get(row.id);
         if (qty === undefined || row.productId === null) {
           throw new InternalServerErrorException(
@@ -399,6 +435,7 @@ export class PurchaseReceiptsService {
           ipAddress: input.ipAddress,
           referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
           referenceId: created.id,
+          locationId: receiptLocationId,
         });
 
         // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si
@@ -571,10 +608,28 @@ export class PurchaseReceiptsService {
           id: true,
           purchaseInvoiceLine: { select: { productId: true } },
           quantity: true,
+          locationId: true,
         },
       });
 
-      for (const line of lines) {
+      // D1 (aprobada): productos en orden ascendente de productId (desempate
+      // por id de línea), igual que al recibir.
+      const linesInProductOrder = [...lines].sort((a, b) =>
+        compareProductThenLine(
+          a.purchaseInvoiceLine.productId,
+          a.id,
+          b.purchaseInvoiceLine.productId,
+          b.id,
+        ),
+      );
+      // R2-ACT: la salida sale de la ubicación de cada línea (histórica sin
+      // ubicación = MAIN/DEFAULT). Catálogo FOR SHARE antes de los productos.
+      await this.stockMovementEngine.lockLocationsShared(
+        tx,
+        linesInProductOrder.map((line) => line.locationId),
+      );
+
+      for (const line of linesInProductOrder) {
         const productId = line.purchaseInvoiceLine.productId;
         if (productId === null) {
           throw new InternalServerErrorException(
@@ -592,6 +647,7 @@ export class PurchaseReceiptsService {
           ipAddress: input.ipAddress,
           referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
           referenceId: locked.id,
+          locationId: line.locationId ?? undefined,
         });
 
         // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si

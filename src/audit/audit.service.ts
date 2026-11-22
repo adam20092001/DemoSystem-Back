@@ -127,6 +127,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'newStock',
     'movementType',
     'origin',
+    'locationId',
   ],
   [AuditAction.INVENTORY_ENTRY_CREATED]: [
     'movementId',
@@ -136,6 +137,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'newStock',
     'movementType',
     'origin',
+    'locationId',
   ],
   [AuditAction.INVENTORY_EXIT_CREATED]: [
     'movementId',
@@ -145,6 +147,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'newStock',
     'movementType',
     'origin',
+    'locationId',
   ],
   [AuditAction.INVENTORY_ADJUSTMENT_IN_CREATED]: [
     'movementId',
@@ -154,6 +157,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'newStock',
     'movementType',
     'origin',
+    'locationId',
   ],
   [AuditAction.INVENTORY_ADJUSTMENT_OUT_CREATED]: [
     'movementId',
@@ -163,6 +167,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'newStock',
     'movementType',
     'origin',
+    'locationId',
   ],
   // Nunca se audita PII (documentNumber, name, tradeName, contactName,
   // email, phone, address, internalNotes): solo metadatos estructurales.

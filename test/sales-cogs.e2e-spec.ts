@@ -26,6 +26,11 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import {
+  createProductRow,
+  deleteProductRows,
+  setProductStock,
+} from './helpers/stock-fixtures';
 
 /**
  * Fase A6.2 — Costo de ventas (COGS). Suite dedicada y aislada (mismo
@@ -156,7 +161,7 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
     valuationMethod: InventoryValuationMethod | null = InventoryValuationMethod.MOVING_WEIGHTED_AVERAGE,
   ): Promise<string> {
     const suffix = nextSuffix();
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `A62-${suffix}`,
         name: `Producto E2E A6.2 ${suffix}`,
@@ -241,12 +246,13 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
     unitCost: string,
     purpose: PurchasePurpose = PurchasePurpose.RESALE_INVENTORY,
   ): Promise<void> {
-    const { invoiceId, invoiceLineId } = await createConfirmedInvoiceWithGoodLine(
-      quantity,
-      unitCost,
-      productId,
-      purpose,
-    );
+    const { invoiceId, invoiceLineId } =
+      await createConfirmedInvoiceWithGoodLine(
+        quantity,
+        unitCost,
+        productId,
+        purpose,
+      );
     await receiveFullLine(invoiceId, invoiceLineId, quantity);
   }
 
@@ -378,12 +384,17 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
       await prisma.saleItem.deleteMany({ where: { saleId: { in: saleIds } } });
 
       const cogsEntries = await prisma.accountingEntry.findMany({
-        where: { sourceType: AccountingSourceType.COGS, sourceId: { in: saleIds } },
+        where: {
+          sourceType: AccountingSourceType.COGS,
+          sourceId: { in: saleIds },
+        },
         select: { id: true },
       });
       const saleEntries = await prisma.accountingEntry.findMany({
         where: {
-          sourceType: { in: [AccountingSourceType.SALE, AccountingSourceType.PAYMENT] },
+          sourceType: {
+            in: [AccountingSourceType.SALE, AccountingSourceType.PAYMENT],
+          },
           sourceId: { in: saleIds },
         },
         select: { id: true },
@@ -462,7 +473,7 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
         where: { id: { in: createdSupplierIds } },
       });
       await prisma.customer.deleteMany({ where: { id: customerId } });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });
@@ -492,7 +503,9 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
       const after = await prisma.product.findUniqueOrThrow({
         where: { id: productId },
       });
-      expect(after.stockCurrent.toFixed(3)).toBe(before.stockCurrent.toFixed(3));
+      expect(after.stockCurrent.toFixed(3)).toBe(
+        before.stockCurrent.toFixed(3),
+      );
       const sales = await prisma.sale.findMany({ where: { customerId } });
       expect(sales).toHaveLength(0);
     });
@@ -559,9 +572,10 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
       const sale = created.body as SafeSaleBody;
       createdSaleIds.push(sale.id);
 
-      const originalValuation = await prisma.inventoryValuation.findFirstOrThrow({
-        where: { productId, sourceType: 'SALE', eventType: 'ORIGINAL' },
-      });
+      const originalValuation =
+        await prisma.inventoryValuation.findFirstOrThrow({
+          where: { productId, sourceType: 'SALE', eventType: 'ORIGINAL' },
+        });
 
       const cancelled = await cancelSale(sale.id);
       expect(cancelled.status).toBe(200);
@@ -611,10 +625,7 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
       // Aumenta el stock físico MÁS ALLÁ de lo valorizado, sin pasar por
       // valorización (simulación de un ajuste/entrada no costeada) para
       // que el bloqueo sea exclusivamente por falta de costo, no de stock.
-      await prisma.product.update({
-        where: { id: productId },
-        data: { stockCurrent: '20.000' },
-      });
+      await setProductStock(prisma, productId, '20.000');
 
       const response = await createDirectSale(productId, '8.000');
       expect(response.status).toBe(409);
@@ -631,10 +642,7 @@ describe('Ventas — Costo de ventas (COGS, Fase A6.2) (e2e)', () => {
 
     it('producto SIN valuationMethod configurado: la venta funciona exactamente igual que antes de A6.2, sin postear ningún COGS', async () => {
       const productId = await createValuedProduct(null);
-      await prisma.product.update({
-        where: { id: productId },
-        data: { stockCurrent: '20.000' },
-      });
+      await setProductStock(prisma, productId, '20.000');
 
       const response = await createDirectSale(productId, '2.000');
       expect(response.status).toBe(201);

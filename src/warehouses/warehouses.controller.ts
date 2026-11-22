@@ -62,10 +62,10 @@ const READ_ROLES = [
 const MANAGE_ROLES = [RoleName.ADMIN] as const;
 
 /**
- * Catálogo de almacenes y ubicaciones (R2-A1, solo EXPAND). INERTE respecto
- * al inventario: ningún endpoint de este controlador lee ni modifica stock,
- * movimientos ni saldos, y el frontend NO debe usarlo todavía para operar
- * existencias (reservado a R2-ACT). Las ubicaciones viven bajo su almacén:
+ * Catálogo de almacenes y ubicaciones (R2-A1). Ningún endpoint de este
+ * controlador mueve stock, y el frontend NO debe usarlo todavía para operar
+ * existencias (la selección de ubicación en operaciones es R2-B; R2-ACT no
+ * cambia este contrato). Las ubicaciones viven bajo su almacén:
  * una ubicación de otro almacén responde 404.
  */
 @ApiTags('Warehouses')

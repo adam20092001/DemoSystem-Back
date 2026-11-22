@@ -25,6 +25,7 @@ import { binaryParser } from './helpers/excel-download';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase B4 — Reportes y reconciliación de importaciones. Suite dedicada y
@@ -478,7 +479,7 @@ describe('Import Reports — Fase B4 (e2e)', () => {
       },
     });
     unitId = unit.id;
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `B4-${shortSuffix}`,
         name: `Producto E2E B4 ${shortSuffix}`,
@@ -623,7 +624,7 @@ describe('Import Reports — Fase B4 (e2e)', () => {
         where: { id: { in: remainingMovementIds } },
       });
 
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

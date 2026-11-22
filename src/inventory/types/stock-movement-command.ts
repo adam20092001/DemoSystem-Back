@@ -24,4 +24,12 @@ export interface StockMovementCommand {
   ipAddress: string | null;
   referenceType: string | null;
   referenceId: string | null;
+  /**
+   * R2-ACT: ubicación donde ocurre el movimiento. Opcional: si se omite se
+   * usa la ubicación DEFAULT del almacén predeterminado (MAIN/DEFAULT).
+   * Ningún endpoint público la expone todavía (selección explícita = R2-B);
+   * solo los servicios internos pueden fijarla (p. ej. una reversa que
+   * reingresa a la ubicación del movimiento original).
+   */
+  locationId?: string;
 }

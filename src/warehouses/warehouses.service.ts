@@ -37,14 +37,12 @@ const WAREHOUSE_NOT_FOUND = 'Almacén no encontrado';
 /**
  * Catálogo de almacenes (R2-A1, EXPAND).
  *
- * INERTE respecto al inventario: nada aquí lee ni escribe stock, movimientos
- * ni saldos. Reglas de protección del almacén principal (MAIN):
+ * Nada aquí mueve stock (eso es StockMovementEngine). Reglas de protección del almacén principal (MAIN):
  *  - `code`, `status` e `isDefault` nunca se editan por PATCH; el estado solo
  *    cambia con activate()/deactivate().
- *  - El almacén predeterminado no puede desactivarse: en EXPAND todo el stock
- *    sigue consolidado en Product.stockCurrent y no puede demostrarse que ese
- *    almacén esté vacío. No existe endpoint para cambiar el predeterminado
- *    (reservado a R2-ACT).
+ *  - El almacén predeterminado no puede desactivarse (D4: sin cambios con
+ *    R2-ACT; desde R2-ACT todo movimiento lleva ubicación, así que MAIN queda
+ *    siempre con rastro). No existe endpoint para cambiar el predeterminado.
  *  - Un almacén nunca se elimina (sin DELETE): se desactiva.
  */
 @Injectable()

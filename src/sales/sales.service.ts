@@ -210,6 +210,11 @@ interface SaleItemLine {
   discountValue: Prisma.Decimal | null;
   discountAmount: Prisma.Decimal;
   isInventoryTracked: boolean;
+  /**
+   * R2-ACT: ubicación de la salida (MAIN/DEFAULT resuelta internamente);
+   * null en líneas no inventariables (servicios), que nunca mueven stock.
+   */
+  locationId: string | null;
 }
 
 @Injectable()
@@ -274,6 +279,11 @@ export class SalesService {
       const customer = await this.lockCustomerForSale(tx, input.customerId);
       this.assertCustomerUsable(customer);
 
+      // R2-ACT: orden global de bloqueos — Warehouse/Location FOR SHARE
+      // ANTES de bloquear productos (el motor los reutiliza sin costo).
+      const [stockLocationId] =
+        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+
       const productIds = parsedItems.map((item) => item.productId);
       const lockedProducts = await this.lockProductsForSale(tx, productIds);
       for (const productId of productIds) {
@@ -305,6 +315,7 @@ export class SalesService {
           discountValue: null,
           discountAmount: new Prisma.Decimal(0),
           isInventoryTracked: locked.isInventoryTracked,
+          locationId: locked.isInventoryTracked ? stockLocationId : null,
         };
       });
 
@@ -384,6 +395,7 @@ export class SalesService {
               discountType: line.discountType,
               discountValue: line.discountValue,
               discountAmount: line.discountAmount,
+              locationId: line.locationId,
             })),
           },
         },
@@ -574,6 +586,10 @@ export class SalesService {
         );
       }
 
+      // R2-ACT: orden global de bloqueos (catálogo antes de productos).
+      const [stockLocationId] =
+        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+
       const productIds = quoteItems.map((item) => item.productId);
       const lockedProducts = await this.lockProductsForSale(tx, productIds);
       for (const productId of productIds) {
@@ -610,6 +626,7 @@ export class SalesService {
           discountValue: item.discountValue,
           discountAmount: item.discountAmount,
           isInventoryTracked: locked.isInventoryTracked,
+          locationId: locked.isInventoryTracked ? stockLocationId : null,
         };
       });
 
@@ -684,6 +701,7 @@ export class SalesService {
               discountType: line.discountType,
               discountValue: line.discountValue,
               discountAmount: line.discountAmount,
+              locationId: line.locationId,
             })),
           },
         },
@@ -854,9 +872,17 @@ export class SalesService {
           origin: InventoryMovementOrigin.SALE,
           movementType: InventoryMovementType.EXIT,
         },
-        select: { productId: true, quantity: true },
+        select: { productId: true, quantity: true, locationId: true },
         orderBy: [{ productId: 'asc' }, { id: 'asc' }],
       });
+
+      // R2-ACT: la reversa reingresa a la ubicación del movimiento ORIGINAL
+      // (un movimiento histórico sin ubicación usa MAIN/DEFAULT). Orden
+      // global de bloqueos: catálogo FOR SHARE antes de bloquear productos.
+      await this.stockMovementEngine.lockLocationsShared(
+        tx,
+        originalMovements.map((movement) => movement.locationId),
+      );
 
       // Fase A6.2: mapa productId->SaleItem.id de ESTA venta, para revertir
       // el consumo de costo de cada movimiento (si lo tuvo) sin exigir una
@@ -881,6 +907,7 @@ export class SalesService {
           ipAddress: input.ipAddress ?? null,
           referenceType: SALE_REFERENCE_TYPE,
           referenceId: sale.id,
+          locationId: movement.locationId ?? undefined,
         });
 
         const saleItemId = saleItemIdByProductId.get(movement.productId);
@@ -1852,6 +1879,7 @@ export class SalesService {
         ipAddress,
         referenceType: SALE_REFERENCE_TYPE,
         referenceId: saleId,
+        locationId: line.locationId ?? undefined,
       });
 
       const saleItemId = saleItemIdByProductId.get(line.productId);

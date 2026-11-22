@@ -9,3 +9,6 @@ coverage/
 npm-debug.log*
 .DS_Store
 /uploads/
+
+# R2-ACT: estado local de las pruebas históricas manuales (ids de una base descartable)
+test/manual-r2-act/.state.json

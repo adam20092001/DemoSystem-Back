@@ -37,6 +37,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 // ======================================================================
 // Fase 8, Bloque D — Validación end-to-end de Contabilidad básica.
@@ -356,7 +357,7 @@ describe('Basic Accounting (e2e)', () => {
     unitId = unit.id;
     ownedUnitIds.push(unitId);
 
-    const productHundred = await prisma.product.create({
+    const productHundred = await createProductRow(prisma, {
       data: {
         sku: `E2EA-100-${nextSuffix()}`,
         name: `Producto E2E Accounting 100 ${nextSuffix()}`,
@@ -376,7 +377,7 @@ describe('Basic Accounting (e2e)', () => {
     // (CHECK products_sale_price_non_negative admite 0). Es la única vía
     // real (sin tocar producción) para producir una venta subtotal=0 a
     // través del flujo HTTP genuino de Ventas (§13).
-    const productZero = await prisma.product.create({
+    const productZero = await createProductRow(prisma, {
       data: {
         sku: `E2EA-0-${nextSuffix()}`,
         name: `Producto E2E Accounting Cero ${nextSuffix()}`,
@@ -502,7 +503,7 @@ describe('Basic Accounting (e2e)', () => {
         await prisma.inventoryMovement.deleteMany({
           where: { productId: { in: ownedProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: ownedProductIds } },
         });
       }

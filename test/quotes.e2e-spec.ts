@@ -33,6 +33,12 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import {
+  createProductRow,
+  deleteProductRow,
+  deleteProductRows,
+  setProductStock,
+} from './helpers/stock-fixtures';
 
 const SELLER_USERNAME = 'e2e_seller_quotes';
 const SELLER_PASSWORD = 'SellerQuotes123';
@@ -458,7 +464,7 @@ describe('Quotes (e2e)', () => {
       data: Partial<Prisma.ProductUncheckedCreateInput> = {},
     ): Promise<{ id: string; sku: string; salePrice: string }> {
       const suffix = nextSuffix();
-      const row = await prisma.product.create({
+      const row = await createProductRow(prisma, {
         data: {
           sku: `E2EQ-${suffix}`,
           name: `Producto E2E Quotes ${suffix}`,
@@ -644,7 +650,7 @@ describe('Quotes (e2e)', () => {
       });
 
       if (createdProductIds.length > 0) {
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }
@@ -2131,10 +2137,11 @@ describe('Quotes (e2e)', () => {
       expect(body.items[0].stockInfo?.currentStock).toBe('10.000');
       const originalProductName = body.items[0].productName;
 
-      await prisma.product.update({
-        where: { id: productLiveStock.id },
-        data: { stockCurrent: new Prisma.Decimal('50.000') },
-      });
+      await setProductStock(
+        prisma,
+        productLiveStock.id,
+        new Prisma.Decimal('50.000'),
+      );
 
       const response = await request(app.getHttpServer())
         .get(`/api/v1/quotes/${body.id}`)
@@ -4038,7 +4045,7 @@ describe('Quotes (e2e)', () => {
     });
 
     it('no se puede eliminar un Product referenciado por un QuoteItem existente', async () => {
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2EQ-FK-${nextSuffix()}`,
           name: `Producto FK E2E ${nextSuffix()}`,
@@ -4057,7 +4064,7 @@ describe('Quotes (e2e)', () => {
       });
 
       await expectClientFkRejection(() =>
-        prisma.product.delete({ where: { id: dedicatedProduct.id } }),
+        deleteProductRow(prisma, { where: { id: dedicatedProduct.id } }),
       );
     });
   });

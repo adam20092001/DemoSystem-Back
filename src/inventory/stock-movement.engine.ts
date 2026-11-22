@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -12,6 +13,7 @@ import {
   ProductStatus,
   ProductType,
   UnitStatus,
+  WarehouseStatus,
 } from '@prisma/client';
 import { isUUID } from 'class-validator';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -91,6 +93,23 @@ interface LockedProductRow {
   allowDecimal: boolean;
 }
 
+/** Fila de la lectura de resolución de ubicaciones (sin lock). */
+interface LocationRefRow {
+  locationId: string;
+  warehouseId: string;
+}
+
+/** Fila devuelta al bloquear almacén o ubicación (FOR SHARE). */
+interface LockedStatusRow {
+  id: string;
+  status: WarehouseStatus;
+}
+
+/** Fila del saldo por ubicación (FOR UPDATE). */
+interface LockedBalanceRow {
+  quantity: Prisma.Decimal;
+}
+
 /**
  * Único propietario del lock sobre Product/Category/Unit y única vía que
  * escribe Product.stockCurrent, crea InventoryMovement y audita el
@@ -114,6 +133,99 @@ export class StockMovementEngine {
    * Product/Category/Unit, calcula el nuevo saldo y registra auditoría en
    * la misma transacción.
    */
+  /**
+   * R2-ACT — paso previo de bloqueo de catálogo, ORDEN GLOBAL de bloqueos:
+   * documento -> Warehouse FOR SHARE -> WarehouseLocation FOR SHARE ->
+   * Product FOR UPDATE -> fila de StockBalance. Resuelve cada ubicación
+   * pedida (null/undefined = ubicación DEFAULT del almacén predeterminado) y
+   * toma FOR SHARE sobre los almacenes (ids ascendentes) y luego sobre las
+   * ubicaciones (ids ascendentes), validando que ambos estén ACTIVE (409 si
+   * no). Es idempotente dentro de la misma transacción: los llamadores que
+   * mueven stock lo invocan ANTES de bloquear productos (venta, recepción,
+   * anulaciones) para que ningún camino adquiera por primera vez un lock de
+   * catálogo después de uno de producto; apply() lo vuelve a invocar sin
+   * costo adicional. NUNCA toma FOR UPDATE: el catálogo (A1) es quien toma
+   * el lock exclusivo al desactivar, y un FOR UPDATE aquí produce deadlock.
+   *
+   * @returns los ids de ubicación resueltos, en el mismo orden de entrada.
+   */
+  async lockLocationsShared(
+    tx: Prisma.TransactionClient,
+    requested: ReadonlyArray<string | null | undefined>,
+  ): Promise<string[]> {
+    const explicitIds = [
+      ...new Set(
+        requested.filter((id): id is string => id !== null && id !== undefined),
+      ),
+    ];
+    for (const id of explicitIds) {
+      if (typeof id !== 'string' || !isUUID(id)) {
+        throw new BadRequestException(
+          'El identificador de la ubicación no es válido',
+        );
+      }
+    }
+
+    const refs = new Map<string, LocationRefRow>();
+    if (explicitIds.length > 0) {
+      const found = await tx.$queryRaw<LocationRefRow[]>(Prisma.sql`
+        SELECT id AS "locationId", warehouse_id AS "warehouseId"
+        FROM warehouse_locations
+        WHERE id = ANY(${explicitIds}::uuid[])
+      `);
+      for (const row of found) refs.set(row.locationId, row);
+      for (const id of explicitIds) {
+        if (!refs.has(id)) {
+          throw new NotFoundException('Ubicación no encontrada');
+        }
+      }
+    }
+
+    let defaultLocationId: string | undefined;
+    if (requested.some((id) => id === null || id === undefined)) {
+      const rows = await tx.$queryRaw<LocationRefRow[]>(Prisma.sql`
+        SELECT l.id AS "locationId", l.warehouse_id AS "warehouseId"
+        FROM warehouse_locations l
+        JOIN warehouses w ON w.id = l.warehouse_id
+        WHERE w.is_default AND l.is_default
+      `);
+      const row = rows[0];
+      if (row === undefined || rows.length !== 1) {
+        throw new InternalServerErrorException(
+          'La ubicación predeterminada de inventario no está configurada',
+        );
+      }
+      refs.set(row.locationId, row);
+      defaultLocationId = row.locationId;
+    }
+
+    const locationIds = [...refs.keys()].sort();
+    const warehouseIds = [
+      ...new Set([...refs.values()].map((r) => r.warehouseId)),
+    ].sort();
+
+    const warehouses = await tx.$queryRaw<LockedStatusRow[]>(Prisma.sql`
+      SELECT id, status FROM warehouses
+      WHERE id = ANY(${warehouseIds}::uuid[])
+      ORDER BY id
+      FOR SHARE
+    `);
+    if (warehouses.some((w) => w.status !== WarehouseStatus.ACTIVE)) {
+      throw new ConflictException('El almacén debe estar activo');
+    }
+    const locations = await tx.$queryRaw<LockedStatusRow[]>(Prisma.sql`
+      SELECT id, status FROM warehouse_locations
+      WHERE id = ANY(${locationIds}::uuid[])
+      ORDER BY id
+      FOR SHARE
+    `);
+    if (locations.some((l) => l.status !== WarehouseStatus.ACTIVE)) {
+      throw new ConflictException('La ubicación debe estar activa');
+    }
+
+    return requested.map((id) => id ?? (defaultLocationId as string));
+  }
+
   async apply(
     tx: Prisma.TransactionClient,
     command: StockMovementCommand,
@@ -130,6 +242,11 @@ export class StockMovementEngine {
       command.origin,
       command.movementType,
     );
+
+    // R2-ACT: catálogo ANTES del producto (orden global de bloqueos).
+    const [locationId] = await this.lockLocationsShared(tx, [
+      command.locationId,
+    ]);
 
     const rows = await tx.$queryRaw<LockedProductRow[]>(Prisma.sql`
       SELECT
@@ -208,6 +325,35 @@ export class StockMovementEngine {
       );
     }
 
+    // Saldo por ubicación: el lock de producto ya serializa a los escritores
+    // del mismo producto; FOR UPDATE de la fila del saldo es defensa
+    // adicional y fija el "antes" de la ubicación.
+    const balanceRows = await tx.$queryRaw<LockedBalanceRow[]>(Prisma.sql`
+      SELECT quantity FROM stock_balances
+      WHERE product_id = ${command.productId}::uuid
+        AND location_id = ${locationId}::uuid
+      FOR UPDATE
+    `);
+    const locationPreviousStock =
+      balanceRows[0]?.quantity ?? new Prisma.Decimal(0);
+    const locationNewStock =
+      sign === 1
+        ? locationPreviousStock.plus(command.quantity)
+        : locationPreviousStock.minus(command.quantity);
+    if (locationNewStock.lessThan(0)) {
+      throw new ConflictException(
+        'Stock insuficiente para completar el movimiento',
+      );
+    }
+
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO stock_balances (id, product_id, location_id, quantity, updated_at)
+      VALUES (gen_random_uuid(), ${command.productId}::uuid, ${locationId}::uuid,
+              ${locationNewStock}, now())
+      ON CONFLICT (product_id, location_id)
+      DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()
+    `);
+
     await tx.product.update({
       where: { id: command.productId },
       data: { stockCurrent: newStock },
@@ -226,6 +372,9 @@ export class StockMovementEngine {
         referenceType: normalizedReferenceType,
         referenceId: normalizedReferenceId,
         createdByUserId: command.actorUserId,
+        locationId,
+        locationPreviousStock,
+        locationNewStock,
       },
       select: INVENTORY_MOVEMENT_SAFE_SELECT,
     });
@@ -245,6 +394,7 @@ export class StockMovementEngine {
         newStock: newStock.toFixed(3),
         movementType: command.movementType,
         origin: command.origin,
+        locationId,
       },
       ipAddress: command.ipAddress,
       client: tx,

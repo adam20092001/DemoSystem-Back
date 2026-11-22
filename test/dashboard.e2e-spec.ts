@@ -24,6 +24,7 @@ import {
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase 9, Bloque D — E2E final del Dashboard (Bloque C). Un solo ciclo de
@@ -534,7 +535,7 @@ describe('Dashboard (e2e)', () => {
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Product', entityId: { in: createdProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }

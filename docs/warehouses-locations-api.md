@@ -1,4 +1,4 @@
-# Almacenes y ubicaciones (R2-A1, solo EXPAND) — contrato REST para el frontend (Angular)
+# Almacenes y ubicaciones (R2-A1; R2-ACT sin cambios de contrato) — contrato REST para el frontend (Angular)
 
 Primera etapa de **R2** (stock por ubicación): catálogo administrativo de **almacenes** y **ubicaciones** y la
 estructura de base de datos que prepara el stock por ubicación. El cuerpo exacto de cada request/response está en
@@ -6,9 +6,10 @@ Swagger (`/api/docs`, etiqueta **Warehouses**).
 
 Base: `/api/v1`. Autenticación: cookie HttpOnly de sesión. Fechas ISO 8601. Cantidades (cuando existan) como **string**.
 
-> **IMPORTANTE — esta etapa es INERTE respecto al inventario.** Nada de lo descrito aquí cambia cómo se calcula,
-> aprueba o registra el stock. `Product.stockCurrent` sigue siendo la **única** cantidad operativa (consolidada).
-> Crear, editar, activar o desactivar almacenes/ubicaciones **no mueve ni valida existencias**.
+> **IMPORTANTE — para el frontend, el contrato NO cambia con R2-ACT.** Crear, editar, activar o desactivar
+> almacenes/ubicaciones **no mueve existencias**, y `Product.stockCurrent` sigue siendo la **única** cantidad que expone
+> la API (consolidada). Internamente (R2-ACT, ver §7) el inventario ya se mantiene por ubicación sobre `MAIN/DEFAULT`, pero
+> ningún endpoint lo expone ni acepta ubicaciones.
 
 ---
 
@@ -17,11 +18,11 @@ Base: `/api/v1`. Autenticación: cookie HttpOnly de sesión. Fechas ISO 8601. Ca
 **Puede consumir ahora:** los 12 endpoints de catálogo de la sección 3 (administración y consulta de almacenes y
 ubicaciones).
 
-**NO debe consumir todavía** (reservado a R2-ACT, no existe en la API):
+**NO debe consumir todavía** (reservado a R2-B/R2-C, no existe en la API):
 
 - Selector de ubicación en entradas, salidas, ajustes, recepciones de compra o ventas (`locationId` **no** se acepta
   en esos endpoints; enviarlo produce 400 por la validación estricta).
-- Saldos por ubicación (`stock_balances` está vacía y ninguna API la expone).
+- Saldos por ubicación (existen internamente desde R2-ACT, pero ninguna API los expone).
 - Transferencias entre ubicaciones.
 - `isDefault` como "almacén/ubicación de destino por defecto de operaciones": hoy es solo informativo.
 - Cualquier cálculo de disponibilidad por almacén. La disponibilidad sigue siendo el stock consolidado.
@@ -119,7 +120,7 @@ Desactivar un almacén **no** desactiva automáticamente sus ubicaciones.
 ## 6. Invariantes de la estructura
 
 1. Cada ubicación pertenece a exactamente un almacén (sin ubicaciones huérfanas; FK `RESTRICT`).
-2. Un único almacén predeterminado (`MAIN`, `isDefault=true`); no hay endpoint para cambiarlo (reservado a R2-ACT).
+2. Un único almacén predeterminado (`MAIN`, `isDefault=true`); no hay endpoint para cambiarlo (reservado a R2-B).
 3. Cada almacén tiene exactamente una ubicación `DEFAULT` (`isDefault=true`, código `DEFAULT`), creada en la misma
    transacción que el almacén. La garantiza el servicio; la base de datos asegura su unicidad y su forma
    (índice único parcial + CHECK), pero **no** impide por sí sola un almacén sin `DEFAULT` insertado a mano.
@@ -128,13 +129,20 @@ Desactivar un almacén **no** desactiva automáticamente sus ubicaciones.
 6. Las columnas nuevas `locationId` en movimientos de inventario, líneas de venta y líneas de recepción son
    **nulas en todo registro** y ninguna lógica las lee ni las escribe todavía.
 
-## 7. Limitaciones de R2-A1 (EXPAND) y qué queda para R2-ACT
+## 7. R2-ACT: efecto sobre este contrato y qué queda para R2-B/R2-C
 
-Incluido: tablas `warehouses`, `warehouse_locations`, `stock_balances` (vacía), columnas nullable de ubicación, el
-almacén `MAIN` con su ubicación `DEFAULT`, y el catálogo administrativo.
+**Sin cambios de contrato.** Estas rutas y sus respuestas no cambian con R2-ACT (rama
+`feat/r2-act-stock-location-activation`, aún no integrada ni aplicada a ninguna base): ningún endpoint de inventario, venta o
+recepción acepta ni devuelve ubicaciones, y las respuestas de movimientos siguen sin campos de ubicación.
 
-**Reservado a R2-ACT (no implementado):** motor de stock por ubicación (`StockMovementEngine` sin cambios), backfill
-de las existencias actuales a `MAIN/DEFAULT`, la invariante `stockCurrent = Σ saldos` (y su verificación), `locationId`
-opcional en inventario/recepciones/ventas, reglas de ubicaciones inactivas para movimientos, cambiar el almacén
-predeterminado, transferencias y reportes por ubicación. Hasta entonces, los datos de ubicación (`isDefault`,
-saldos) **no tienen significado operativo**.
+Qué cambia por dentro (relevante para entender los 409 de desactivación):
+
+- Toda operación de stock usa `MAIN/DEFAULT`. Los movimientos nuevos y las líneas de venta/recepción inventariables
+  persisten la ubicación; por ello `MAIN` y su `DEFAULT` quedan **permanentemente activos** (tienen movimientos).
+- Una ubicación o un almacén **inactivo** responde 409 a cualquier movimiento sobre él (incluidas las reversas).
+- Las reglas de desactivación de este catálogo no cambian (D4): se bloquea ante cualquier saldo ≠ 0, movimiento, línea de
+  venta o línea de recepción asociados. Se revisarán en R2-B.
+- Los saldos por ubicación son internos: ninguna API los expone todavía.
+
+**Reservado a R2-B / R2-C (no implementado):** `locationId` opcional en inventario/recepciones/ventas, elegir otra
+ubicación, designar otro almacén predeterminado, transferencias y consultas/reportes por ubicación.

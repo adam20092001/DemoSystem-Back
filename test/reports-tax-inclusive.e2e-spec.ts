@@ -22,6 +22,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * R2-B6 — Ventas por producto con semántica de precios mezclada. Inserta
@@ -168,7 +169,7 @@ describe('Reports — ventas por producto con precios finales e históricos (e2e
       ['A', 'productA'],
       ['B', 'productB'],
     ] as const) {
-      const product = await prisma.product.create({
+      const product = await createProductRow(prisma, {
         data: {
           sku: `R2B6-${label}-${RUN_ID}`,
           name: `Producto R2-B6 ${label}`,
@@ -209,7 +210,7 @@ describe('Reports — ventas por producto con precios finales e históricos (e2e
         (id): id is string => id !== undefined,
       );
       if (productIds.length > 0) {
-        await prisma.product.deleteMany({ where: { id: { in: productIds } } });
+        await deleteProductRows(prisma, { where: { id: { in: productIds } } });
       }
       if (unitId) {
         await prisma.unit.deleteMany({ where: { id: unitId } });

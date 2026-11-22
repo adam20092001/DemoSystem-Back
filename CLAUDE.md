@@ -90,7 +90,7 @@ Reglas de capas:
 
 20. **SIRE DEMO** (S1–S3, solo demostración) — `SireDemoModule` (`/api/v1/sire-demo*`, 8 rutas): previsualización de documentos RVIE/RCE, archivo de ejemplo, carga/listado/descarte de propuestas DEMO_V1, conciliación y exportación a Excel. **Sin comunicación con SUNAT ni validez fiscal.** Apagado por defecto (ver §11 "SIRE DEMO").
 
-21. **Almacenes y ubicaciones** (R2-A1, solo EXPAND; **rama `feat/r2-a1-warehouses-locations-expand`, aún no integrada en `main`**) — catálogo administrativo (`WarehousesModule`, `/api/v1/warehouses*`, 12 rutas): almacenes y ubicaciones con códigos normalizados y únicos, almacén principal `MAIN` y ubicación técnica `DEFAULT` en cada almacén. ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen; PURCHASING y ACCOUNTANT reciben 403. **Inerte respecto al inventario:** no mueve, valida ni lee stock (ver §6 y §11 "R2-A1").
+21. **Almacenes y ubicaciones** (R2-A1, integrada en `main` vía PR #53; **R2-ACT implementado en la rama `feat/r2-act-stock-location-activation`, sin commit y NO aplicado a `pos_db` ni `pos_db_test`**) — catálogo administrativo (`WarehousesModule`, `/api/v1/warehouses*`, 12 rutas): almacenes y ubicaciones con códigos normalizados y únicos, almacén principal `MAIN` y ubicación técnica `DEFAULT` en cada almacén. ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen; PURCHASING y ACCOUNTANT reciben 403. El **catálogo** no mueve stock (R2-A1); el inventario por ubicación lo mantiene `StockMovementEngine` desde R2-ACT, solo sobre `MAIN/DEFAULT` (ver §6 y §11 "R2-A1" / "R2-ACT").
 
 ---
 
@@ -134,7 +134,7 @@ Estas reglas son invariantes del sistema. Cualquier implementación que las cont
 - **No se permite stock negativo**: si no hay stock suficiente, la operación falla.
 - El stock **solo cambia mediante movimientos de inventario**; nunca por escritura directa del saldo.
 - Los **servicios no inventariables no descuentan stock**.
-- **Stock por ubicación (R2-A1, EXPAND):** `Product.stockCurrent` sigue siendo la **única cantidad operativa** (consolidada) y `StockMovementEngine` el único escritor del stock. `StockBalance` existe pero está **vacía** y **no participa** en ninguna validación ni operación; no se ha hecho backfill; las columnas `locationId` de movimientos, líneas de venta y líneas de recepción son siempre NULL. Nada de esto cambia hasta R2-ACT.
+- **Stock por ubicación (R2-ACT, en la rama `feat/r2-act-stock-location-activation`; aún no integrada ni aplicada a ninguna base existente):** `Product.stockCurrent` sigue siendo la cantidad **consolidada** que exponen la API, los reportes y la validación de ventas, y `StockMovementEngine` el **único escritor** del stock. Invariante: `stockCurrent = Σ StockBalance.quantity` por producto, verificada **al COMMIT** por triggers diferidos de base de datos (no se desactivan en pruebas). Toda operación usa `MAIN/DEFAULT` (la selección de ubicación es R2-B); los movimientos **nuevos** persisten `locationId`/`locationPreviousStock`/`locationNewStock` (CHECK `NOT VALID`); los históricos conservan NULL y nunca se reescriben. La insuficiencia se evalúa también por ubicación. Orden global de bloqueos: documento → Warehouse `FOR SHARE` → Location `FOR SHARE` → Product `FOR UPDATE` (ascendente por `productId`) → saldo; el motor nunca usa `FOR UPDATE` sobre almacén/ubicación. Mientras R2-ACT no se despliegue, `main` conserva el estado R2-A1 (`StockBalance` vacía y sin uso).
 
 **Ventas, clientes y pagos**
 - Una **venta con deuda no puede usar al cliente Público general** (ese cliente solo admite ventas pagadas al contado).
@@ -205,7 +205,7 @@ Si una tarea parece requerir algo de esta lista, **detenerse y consultar** antes
 
 > **Nota (Fase A0, ver §11):** el cliente aprobó un roadmap de Contabilidad empresarial (PCGE, periodos, libros, compras/cuentas por pagar, multimoneda) que algún día alcanzará varios puntos de esta lista (Compras y proveedores, Kardex valorizado, Multi-moneda). Esa aprobación es de **dirección estratégica**, no de implementación: cada capacidad sigue fuera de alcance hasta que se apruebe puntualmente y se implemente en una fase dedicada. Un futuro módulo de Importaciones (no iniciado) dependerá de esa base contable. Facturación electrónica SUNAT real, Alquileres, CRM avanzado, Ecommerce, Aplicación móvil e Integraciones externas no forman parte de este roadmap y siguen fuera de alcance sin excepción.
 
-> **Nota (Stock por ubicación, ver §11):** el cliente aprobó por etapas el stock por almacén y ubicación. Nombre de trabajo: «R2-A1/ACT/B/C» (almacenes y ubicaciones; **no confundir** con el requerimiento histórico «R2 — Precios e IGV» de §6). **R2-A1** (estructura EXPAND y catálogos de almacenes y ubicaciones) está implementada en la rama `feat/r2-a1-warehouses-locations-expand`, **pendiente de commit/PR y todavía no integrada en `main`**. **R2-ACT** (migración de las existencias y activación del stock por ubicación), **R2-B** (operaciones por ubicación en inventario, recepciones y ventas) y **R2-C** (transferencias) **siguen pendientes y fuera de alcance** hasta aprobarse e implementarse cada una en su propia fase. Mientras tanto, `Product.stockCurrent` es la única cantidad operativa consolidada.
+> **Nota (Stock por ubicación, ver §11):** el cliente aprobó por etapas el stock por almacén y ubicación. Nombre de trabajo: «R2-A1/ACT/B/C» (almacenes y ubicaciones; **no confundir** con el requerimiento histórico «R2 — Precios e IGV» de §6). **R2-A1** (estructura EXPAND y catálogos de almacenes y ubicaciones) está **integrada en `main`** (PR #53). **R2-ACT** (migración de las existencias y activación del stock por ubicación) está implementada en la rama `feat/r2-act-stock-location-activation` (**sin commit, no integrada y no aplicada a `pos_db`/`pos_db_test`**). **R2-B** (selección de ubicación en inventario, recepciones y ventas) y **R2-C** (transferencias) **siguen pendientes y fuera de alcance** hasta aprobarse e implementarse cada una en su propia fase. Mientras R2-ACT no se despliegue, `Product.stockCurrent` es la única cantidad operativa consolidada; después, sigue siendo la consolidada y los saldos por ubicación son internos.
 
 ---
 
@@ -1218,8 +1218,7 @@ una base descartable, nunca en `pos_db` ni `pos_db_test`). Es un cambio de
   de `WAREHOUSE` sin información financiera.
 
 **R2-A1 — Almacenes y ubicaciones, solo EXPAND** (rama `feat/r2-a1-warehouses-locations-expand`,
-base `main` en `d616e5a`, **implementada y validada, sin commit/push/PR todavía — NO integrada en
-`main`**; pendiente de autorización explícita del propietario). Nombre de trabajo de la serie de
+base `main` en `d616e5a`; **integrada en `main` vía PR #53, commit `1b54c61`**). Nombre de trabajo de la serie de
 stock por ubicación (R2-A1/ACT/B/C); **no confundir** con «R2 — Precios e IGV» de §6.
 
 - **Alcance (R2-A1):** estructura aditiva y catálogos. Migración
@@ -1245,20 +1244,79 @@ stock por ubicación (R2-A1/ACT/B/C); **no confundir** con «R2 — Precios e IG
 - **Garantías:** la unicidad y la forma de `MAIN`/`DEFAULT` están en la base de datos (índices y
   CHECK); que **todo almacén tenga su `DEFAULT`** y que `MAIN` exista lo garantiza solo el servicio
   (no hay trigger).
-- **Estado de despliegue:** la migración **no se ha aplicado** ni desplegado en `pos_db` ni en
-  `pos_db_test` (solo en PostgreSQL 16 descartable). Hasta fusionar y desplegar, `main` y las bases
-  existentes siguen en 32 migraciones.
+- **Estado de despliegue:** la migración está en `main` pero **no se ha aplicado** en `pos_db` ni en
+  `pos_db_test` (solo en PostgreSQL 16 descartables).
 - **Validación:** 143 suites / 4208 pruebas unitarias; 64 pruebas E2E de almacenes; 86 de scripts;
   migración probada en base nueva y con datos (sin deriva), con fallos inyectados en copias
   temporales (rollback total) y recuperación con `migrate resolve --rolled-back`. La suite E2E
   completa tiene **13 pruebas fallando en 6 suites, las mismas 13 que en `main`** sin estos cambios
   (incidencia independiente, sin corregir). Detalle y límites de lo verificado:
   `docs/r2-migration-plan.md`.
-- **Pendiente (no implementado, fuera de alcance):** **R2-ACT** (backfill de las existencias a
-  `MAIN/DEFAULT`, invariante `stockCurrent = Σ saldos`, motor por ubicación, trigger diferido y CHECK
-  de corte —ambos con aprobación pendiente—, fixtures E2E), **R2-B** (`locationId` en inventario,
-  recepciones y ventas; anulaciones; ubicaciones inactivas) y **R2-C** (transferencias, consultas por
-  ubicación, reconciliación).
+- **Pendiente tras R2-A1:** **R2-ACT** (implementado en su propia rama, ver la sección siguiente),
+  **R2-B** (`locationId` explícito en inventario, recepciones y ventas; revisar las reglas de
+  desactivación) y **R2-C** (transferencias, consultas por ubicación, reconciliación).
+
+**R2-ACT — Activación del inventario por ubicación** (rama `feat/r2-act-stock-location-activation`,
+base `main` en `1b54c61`, **implementada y validada, sin commit/push/PR todavía — NO integrada en
+`main`**; pendiente de autorización explícita del propietario; migración aplicada **únicamente** en
+PostgreSQL 16 descartables, nunca en `pos_db` ni `pos_db_test`). Decisiones aprobadas: D1 (orden por
+`productId`), D2 (CHECK `NOT VALID` + triggers diferidos), D3 (contrato de movimientos intacto), D4
+(reglas de desactivación de A1 sin cambios; se revisan en R2-B). Detalle y procedimiento operativo:
+`docs/r2-migration-plan.md` §5.
+
+- **Migración `20261031000000_activate_stock_by_location`** (una transacción explícita): precondiciones
+  con `RAISE EXCEPTION` (MAIN/DEFAULT activos y predeterminados, `stock_balances` vacía, sin stock
+  negativo, sin ubicaciones previas en movimientos/líneas); `LOCK TABLE … SHARE ROW EXCLUSIVE`;
+  backfill de **un saldo `MAIN/DEFAULT` por producto con `stock_current > 0`** (cantidad idéntica;
+  stock 0 = sin fila); conciliación antes del COMMIT (por producto, suma global, conteo de productos y
+  movimientos, suma de valorización, ningún histórico con ubicación); función
+  `r2_assert_product_stock_matches_balances()` y **5 `CONSTRAINT TRIGGER … DEFERRABLE INITIALLY
+  DEFERRED`** (productos: `INSERT`/`UPDATE OF stock_current`; saldos: `INSERT`/`UPDATE`/`DELETE`; en un
+  `UPDATE` de saldo se revisan `OLD` y `NEW`); y `CHECK (location_id IS NOT NULL) NOT VALID` sobre
+  `inventory_movements`. No toca `products`, costos, valorización, COGS ni movimientos históricos.
+- **`StockMovementEngine`:** `locationId` opcional en `StockMovementCommand` (por omisión,
+  `MAIN/DEFAULT`; ningún endpoint lo acepta todavía). Cada movimiento: resuelve y bloquea
+  Warehouse/Location `FOR SHARE` (409 si alguno está inactivo, también en reversas históricas) → bloquea
+  el producto → lee el saldo `FOR UPDATE` → rechaza con 409 si el saldo **de la ubicación** quedaría
+  negativo → `INSERT … ON CONFLICT (product_id, location_id) DO UPDATE` → actualiza el consolidado →
+  crea el movimiento con ubicación → audita (`locationId` añadido a la lista blanca de metadatos).
+  `lockLocationsShared()` es el paso previo público para los llamadores.
+- **Ventas:** bloqueo previo de catálogo antes de `lockProductsForSale` (venta directa y conversión de
+  cotización); `locationId` en las líneas inventariables (las de servicio, no) y en los EXIT; la
+  anulación reingresa a la ubicación del movimiento ORIGINAL (histórico sin ubicación → `MAIN/DEFAULT`).
+- **Recepciones (D1):** bloqueo previo de catálogo; `locationId` en cada línea; entradas y anulaciones
+  en orden ascendente de `productId` (desempate por id de línea); la anulación retira de la ubicación
+  de cada línea (histórica → `MAIN/DEFAULT`). Corrige el deadlock preexistente C4 (línea base: 39 de 80
+  recepciones concurrentes en orden inverso respondieron 500 en 2 de 6 ejecuciones; tras el cambio,
+  0 fallos en 6 ejecuciones × 80).
+- **Contrato público intacto (D3):** ninguna respuesta de movimientos, ventas o recepciones expone
+  ubicación; no cambian DTOs, permisos, costos, valorización ni COGS. R2-B y R2-C **no** se implementan.
+- **Fixtures E2E:** `test/helpers/stock-fixtures.ts` (`createProductRow`, `deleteProductRows`,
+  `deleteProductRow`, `setProductStock`, `setProductLocationBalances`, …) mantiene producto y saldo en una
+  misma transacción; 26 suites migradas. Los triggers **no** se desactivan en pruebas.
+  `test/warehouses.e2e-spec.ts` ya no afirma "inercia" (describe reescrito). Nueva suite
+  `test/stock-location-concurrency.e2e-spec.ts` (concurrencia HTTP/Prisma real) y procedimiento manual
+  `test/manual-r2-act/` (datos históricos reales: poblar con el código anterior, migrar y operar).
+- **Límites conocidos:** `session_replication_role = replica`, `DISABLE TRIGGER` y `TRUNCATE` eluden los
+  triggers (requieren privilegios elevados); el trigger no detecta pérdidas de actualización (las evita
+  el `FOR UPDATE` del producto); cualquier `UPDATE` de un movimiento histórico queda rechazado por el
+  `CHECK NOT VALID`; el límite de 5 s de las transacciones de Prisma no interrumpe una consulta bloqueada
+  por un lock (una venta bloqueada 7 s respondió 500 al liberarse el lock, sin efectos parciales;
+  preexistente, sin `lock_timeout` ni reintentos); ante un fallo de la migración Prisma muestra "current
+  transaction is aborted" y la causa real está en el log de PostgreSQL.
+- **Orden de despliegue:** aplicar la migración **antes** de iniciar el backend R2-ACT (un backend
+  anterior contra la base migrada falla cerrado; un backend R2-ACT contra una base sin migrar rechaza
+  salidas por falta de saldo). Respaldo `pg_dump` y ensayo sobre un clon antes de aplicar.
+- **Validación (sobre PostgreSQL 16.15 descartables):** 143 suites / 4234 pruebas unitarias (+26);
+  E2E completa en la base activada: 55 suites / 1862 pruebas, 0 fallos (línea base de `main` en una base
+  descartable nueva: 54 suites / 1848 pruebas, 0 fallos); 86 pruebas de scripts + 11 de integración;
+  `build` correcto; ESLint sin errores en los archivos de `src` modificados, en `test/helpers/stock-fixtures.ts`,
+  `test/stock-location-concurrency.e2e-spec.ts` y los dos specs de `test/manual-r2-act/`, y con **un único error en las
+  26 suites E2E modificadas**, preexistente (`no-unnecessary-type-assertion` en `test/sales-cogs.e2e-spec.ts`, ya presente
+  en `1b54c61`). Migración: base limpia, base
+  con datos históricos reales (conciliada, sin deriva), fallos inyectados (rollback total),
+  `migrate resolve --rolled-back` y reaplicación.
+
 
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
@@ -1293,10 +1351,10 @@ específico debe fijarlo como fixture propio, nunca asumirlo (ver Fase
 A5.2a); 11 errores preexistentes en `tsc --noEmit`; el frontend todavía
 depende de Caja; no hay CI en GitHub.
 
-Migraciones totales **del código de la rama `feat/r2-a1-warehouses-locations-expand`: 33**
-(las 32 anteriores más `20261030000000_add_warehouses_locations_expand`, R2-A1). **Solo 32 están
-integradas hoy en `main`**; la 33 se integra únicamente cuando se fusione el PR de R2-A1, y no
-está aplicada en `pos_db` ni en `pos_db_test`.
+Migraciones totales **en `main`: 33** (las 32 anteriores más `20261030000000_add_warehouses_locations_expand`,
+R2-A1, integrada vía PR #53; no aplicada en `pos_db` ni en `pos_db_test`). **La rama
+`feat/r2-act-stock-location-activation` suma una más (34): `20261031000000_activate_stock_by_location`**,
+sin commit y aplicada únicamente en PostgreSQL 16 descartables.
 
 Nota histórica (cifra desactualizada, válida hasta A5.2a): migraciones totales: **22**, las 20 anteriores en `main` (A1 vía PR #31, A2
 vía PR #32, A4 vía su propio merge) aplicadas tanto en `pos_db` como en

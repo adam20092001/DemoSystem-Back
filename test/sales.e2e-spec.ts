@@ -43,6 +43,11 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import {
+  createProductRow,
+  deleteProductRow,
+  deleteProductRows,
+} from './helpers/stock-fixtures';
 
 const SELLER_USERNAME = 'e2e_seller_sales';
 const SELLER_PASSWORD = 'SellerSales123';
@@ -615,7 +620,7 @@ describe('Sales (e2e)', () => {
       data: Partial<Prisma.ProductUncheckedCreateInput> = {},
     ): Promise<FixtureProduct> {
       const suffix = nextSuffix();
-      const row = await prisma.product.create({
+      const row = await createProductRow(prisma, {
         data: {
           sku: `E2ES-${suffix}`,
           name: `Producto E2E Sales ${suffix}`,
@@ -976,7 +981,7 @@ describe('Sales (e2e)', () => {
         await prisma.inventoryMovement.deleteMany({
           where: { productId: { in: createdProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }
@@ -3085,7 +3090,7 @@ describe('Sales (e2e)', () => {
     });
 
     it('fallo en el segundo ítem de una venta multi-ítem: atomicidad total (ningún movimiento del primer ítem persiste)', async () => {
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2ES-ATOM-${nextSuffix()}`,
           name: `Producto Atomicidad E2E ${nextSuffix()}`,
@@ -3124,7 +3129,7 @@ describe('Sales (e2e)', () => {
     });
 
     it('descuenta exactamente la cantidad vendida y registra un movimiento EXIT/SALE con previousStock/newStock exactos', async () => {
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2ES-EXACT-${nextSuffix()}`,
           name: `Producto Exacto E2E ${nextSuffix()}`,
@@ -3750,7 +3755,7 @@ describe('Sales (e2e)', () => {
   // ==================================================================
   describe('anulación', () => {
     it('venta ACTIVE se anula: 200, status CANCELLED, cancelledAt/cancellationReason/cancelledBy poblados, stock restaurado', async () => {
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2ES-CANC-${nextSuffix()}`,
           name: `Producto Anulacion E2E ${nextSuffix()}`,
@@ -5191,7 +5196,7 @@ describe('Sales (e2e)', () => {
     });
 
     it('no se puede eliminar un Product referenciado por un SaleItem existente', async () => {
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2ES-FK-${nextSuffix()}`,
           name: `Producto FK E2E ${nextSuffix()}`,
@@ -5210,7 +5215,7 @@ describe('Sales (e2e)', () => {
       });
 
       await expectClientFkRejection(() =>
-        prisma.product.delete({ where: { id: dedicatedProduct.id } }),
+        deleteProductRow(prisma, { where: { id: dedicatedProduct.id } }),
       );
     });
 
@@ -5441,7 +5446,7 @@ describe('Sales (e2e)', () => {
       data: Partial<Prisma.ProductUncheckedCreateInput>,
     ): Promise<FixtureProduct> {
       const suffix = nextSuffix();
-      const row = await prisma.product.create({
+      const row = await createProductRow(prisma, {
         data: {
           sku: `E2ES-PAYD-${suffix}`,
           name: `Producto Pago Inicial E2E ${suffix}`,
@@ -6035,7 +6040,7 @@ describe('Sales (e2e)', () => {
       }
 
       const suffixA = nextSuffix();
-      const rowA = await prisma.product.create({
+      const rowA = await createProductRow(prisma, {
         data: {
           sku: `E2ES-PAYQ-${suffixA}`,
           name: `Producto Pago Cotizacion E2E ${suffixA}`,
@@ -6056,7 +6061,7 @@ describe('Sales (e2e)', () => {
       };
 
       const suffixB = nextSuffix();
-      const rowB = await prisma.product.create({
+      const rowB = await createProductRow(prisma, {
         data: {
           sku: `E2ES-PAYQ-${suffixB}`,
           name: `Producto Pago Cotizacion Insuficiente E2E ${suffixB}`,
@@ -6250,7 +6255,7 @@ describe('Sales (e2e)', () => {
       const originalCustomerName = customer.name;
 
       const dedicatedSuffix = nextSuffix();
-      const dedicatedProduct = await prisma.product.create({
+      const dedicatedProduct = await createProductRow(prisma, {
         data: {
           sku: `E2ES-SNPP-${dedicatedSuffix}`,
           name: `Producto Snapshot Pago E2E ${dedicatedSuffix}`,
@@ -6461,7 +6466,7 @@ describe('Sales (e2e)', () => {
 
     beforeAll(async () => {
       const suffix = nextSuffix();
-      const row = await prisma.product.create({
+      const row = await createProductRow(prisma, {
         data: {
           sku: `E2ES-CANCD-${suffix}`,
           name: `Producto Anulacion Cascada Pago E2E ${suffix}`,

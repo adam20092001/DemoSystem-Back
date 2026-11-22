@@ -10,6 +10,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * R2-B1 — snapshot `prices_include_tax` (preparación de esquema únicamente).
@@ -137,7 +138,7 @@ describe('R2-B1 — prices_include_tax (e2e)', () => {
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Product', entityId: { in: ownedProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: ownedProductIds } },
         });
       }
