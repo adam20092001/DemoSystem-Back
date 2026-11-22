@@ -1334,6 +1334,20 @@ desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable)
   usando `MAIN/DEFAULT`**; no hay transferencias (R2-C) ni selección de ubicación en ventas/recepciones (R2-B posteriores).
 - Contrato para Angular: `docs/inventory-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.9.
 
+**R2-B2 — recepciones de compra por ubicación** (rama `feat/r2-b2-purchase-receipts-locations`,
+base `main` en `bf32a79`, **implementada y validada, sin commit/push/PR todavía — NO integrada en `main` ni
+desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable). Requiere R2-ACT aplicado.
+
+- `locationId` opcional (UUID) **por línea** de `POST /purchase-invoices/:id/receipts`; sin él, `MAIN/DEFAULT`. Una ubicación por línea
+  (sin reparto automático; una línea de factura no se repite dentro de una recepción). Se resuelve con `lockLocationsShared()` del motor
+  (inexistente 404, almacén/ubicación inactivos 409, UUID inválido 400), se persiste en `PurchaseReceiptLine.locationId` y se usa en el
+  ENTRY. Recepciones parciales sucesivas pueden usar ubicaciones distintas, sin cambiar las reglas de cantidad.
+- La anulación sigue retirando de la ubicación original de cada línea (histórica NULL → `MAIN/DEFAULT`; saldo insuficiente → 409, sin
+  sustituir). Las respuestas de recepción incluyen `location` por línea (`null` en históricas; sin importes; visible para WAREHOUSE).
+- Sin cambios en permisos, costos, valorización, contabilidad, facturas, cuentas por pagar, `StockMovementEngine` ni reglas de
+  desactivación. **Las ventas siguen usando `MAIN/DEFAULT`** (R2-B3 pendiente); sin transferencias (R2-C).
+- Contrato para Angular: `docs/purchase-receipts-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.10.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

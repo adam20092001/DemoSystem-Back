@@ -10,6 +10,14 @@ export const PURCHASE_RECEIPT_LINE_SAFE_SELECT = {
   purchaseInvoiceLineId: true,
   quantity: true,
   reclassifiedAmount: true,
+  location: {
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      warehouse: { select: { id: true, code: true } },
+    },
+  },
 } satisfies Prisma.PurchaseReceiptLineSelect;
 
 export const PURCHASE_RECEIPT_SAFE_SELECT = {
@@ -66,6 +74,7 @@ function toSafePurchaseReceiptLine(
     id: row.id,
     purchaseInvoiceLineId: row.purchaseInvoiceLineId,
     quantity: row.quantity.toFixed(3),
+    location: row.location,
   };
   if (includeFinancials) {
     line.reclassifiedAmount = row.reclassifiedAmount?.toFixed(2) ?? null;

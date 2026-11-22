@@ -3,6 +3,8 @@ import { RoleName } from '@prisma/client';
 export interface CreatePurchaseReceiptLineInput {
   purchaseInvoiceLineId: string;
   quantity: string;
+  /** R2-B2: ubicación de destino; si se omite, MAIN/DEFAULT. */
+  locationId?: string;
 }
 
 /**

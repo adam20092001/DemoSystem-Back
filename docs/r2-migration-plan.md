@@ -206,7 +206,7 @@ no tiene "down"); mientras no haya operaciones posteriores a la migración, el r
 
 ### 5.6 Decisiones abiertas
 
-1. R2-B: ubicación explícita en inventario (**R2-B1b implementado en rama, ver §5.9**), recepciones y ventas; revisar las reglas de desactivación (D4).
+1. R2-B: ubicación explícita en inventario (**R2-B1b implementado en rama, ver §5.9**), recepciones (**R2-B2 implementado en rama, ver §5.10**) y ventas; revisar las reglas de desactivación (D4).
 2. Endpoint para designar otro almacén predeterminado (hoy inexistente a propósito).
 3. Si algún día se desea `VALIDATE CONSTRAINT`, hay que decidir qué hacer con los movimientos históricos sin ubicación
    (hoy no se reescriben).
@@ -396,6 +396,25 @@ cambios en `StockMovementEngine` (ya soportaba `locationId` desde R2-ACT): es ca
   `MAIN/DEFAULT`; no hay transferencias.
 - **Pruebas:** unitarias (DTOs, controller, servicio) y `test/inventory-locations.e2e-spec.ts` (37 pruebas contra
   PostgreSQL descartable, incluida concurrencia real). Contrato para Angular: `docs/inventory-locations-api.md`.
+
+## 5.10 R2-B2 — recepciones de compra por ubicación (rama `feat/r2-b2-purchase-receipts-locations`; NO integrada ni desplegada)
+
+Segunda entrega de R2-B, sobre R2-ACT y R2-B1b. **Sin migraciones nuevas** y sin cambios en `StockMovementEngine`.
+
+- **`locationId` opcional por línea** en `POST /purchase-invoices/:id/receipts`; sin él, `MAIN/DEFAULT`. `create()` resuelve y bloquea
+  las ubicaciones de todas las líneas con `lockLocationsShared()` (Warehouse/Location `FOR SHARE`, antes de los productos), las asocia a
+  cada línea de factura **por id** (nunca por índice tras reordenar), las persiste en `PurchaseReceiptLine.locationId` y usa la misma en el
+  ENTRY. Errores del motor: UUID inválido 400, inexistente 404, ubicación/almacén inactivos 409.
+- **Una ubicación por línea.** El índice único `(purchaseReceiptId, purchaseInvoiceLineId)` y el rechazo de líneas repetidas (400) se
+  conservan; repartir una línea exige recepciones sucesivas, cada una con su ubicación.
+- **Anulación:** sin cambios de código (ya leía `locationId` de cada línea; histórica NULL → `MAIN/DEFAULT`; saldo insuficiente de la
+  ubicación original → 409, sin sustituir por otra).
+- **Respuesta aditiva:** `location { id, code, name, warehouse { id, code } } | null` por línea (sin importes; visible para WAREHOUSE).
+- **Sin cambios:** permisos, cantidades, costos, valorización, contabilidad, facturas, cuentas por pagar, D4. Ventas siguen en
+  `MAIN/DEFAULT`; sin transferencias.
+- **Pruebas:** unitarias (DTO, mapper, servicio) y E2E en `test/purchase-receipts.e2e-spec.ts` (bloque «R2-B2», PostgreSQL descartable,
+  incluida concurrencia con productos y ubicaciones cruzadas). El caso histórico NULL se cubre con prueba unitaria y el procedimiento manual
+  de R2-ACT (sin bypass de restricciones en E2E). Contrato para Angular: `docs/purchase-receipts-locations-api.md`.
 
 ## 6. Riesgos y límites conocidos de R2-A1 (los puntos sobre inercia quedan superados por R2-ACT, §5)
 

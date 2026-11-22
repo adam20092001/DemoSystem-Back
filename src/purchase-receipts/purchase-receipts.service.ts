@@ -272,6 +272,13 @@ export class PurchaseReceiptsService {
       );
     }
     const requested = this.normalizeRequestedLines(input.lines);
+    // Duplicados ya rechazados arriba: la clave (línea de factura) es única.
+    const requestedLocations = new Map<string, string | null>(
+      input.lines.map((line) => [
+        line.purchaseInvoiceLineId,
+        line.locationId ?? null,
+      ]),
+    );
     const notes = this.normalizeNotes(input.notes);
     const idempotencyKey = this.normalizeIdempotencyKey(input.idempotencyKey);
 
@@ -332,12 +339,21 @@ export class PurchaseReceiptsService {
         }
       }
 
-      // R2-ACT: orden global de bloqueos — documento (factura y sus líneas,
-      // ya bloqueadas arriba) -> Warehouse/Location FOR SHARE -> productos.
-      // La ubicación es siempre MAIN/DEFAULT en esta etapa (R2-B habilita
-      // elegirla); el motor la reutiliza sin costo adicional.
-      const [receiptLocationId] =
-        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+      // R2-ACT/R2-B2: orden global de bloqueos — documento (factura y sus
+      // líneas, ya bloqueadas arriba) -> Warehouse/Location FOR SHARE ->
+      // productos. Una ubicación por línea (omitida => MAIN/DEFAULT). El
+      // resultado se asocia a cada línea por su id (nunca por índice tras
+      // reordenar): lockedLines solo se recorre en el mismo orden en que
+      // se construye la lista solicitada.
+      const resolvedLocations =
+        await this.stockMovementEngine.lockLocationsShared(
+          tx,
+          lockedLines.map((row) => requestedLocations.get(row.id) ?? null),
+        );
+      const locationByInvoiceLineId = new Map<string, string>();
+      lockedLines.forEach((row, index) => {
+        locationByInvoiceLineId.set(row.id, resolvedLocations[index]);
+      });
 
       const alreadyReceived = await tx.purchaseReceiptLine.groupBy({
         by: ['purchaseInvoiceLineId'],
@@ -396,7 +412,7 @@ export class PurchaseReceiptsService {
               return {
                 purchaseInvoiceLineId: row.id,
                 quantity: qty,
-                locationId: receiptLocationId,
+                locationId: locationByInvoiceLineId.get(row.id),
               };
             }),
           },
@@ -435,7 +451,7 @@ export class PurchaseReceiptsService {
           ipAddress: input.ipAddress,
           referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
           referenceId: created.id,
-          locationId: receiptLocationId,
+          locationId: locationByInvoiceLineId.get(row.id),
         });
 
         // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si

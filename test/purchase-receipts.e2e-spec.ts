@@ -10,6 +10,7 @@ import {
   PurchaseInvoiceDocumentType,
   RoleName,
   SupplierDocumentType,
+  WarehouseStatus,
 } from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
@@ -129,6 +130,7 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
   const createdPurchaseReceiptIds: string[] = [];
   const createdSupplierIds: string[] = [];
   const createdProductIds: string[] = [];
+  const createdWarehouseIds: string[] = [];
 
   const RUN_ID = Date.now();
   let counter = 0;
@@ -542,6 +544,25 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
       await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
+      if (createdWarehouseIds.length > 0) {
+        const locations = await prisma.warehouseLocation.findMany({
+          where: { warehouseId: { in: createdWarehouseIds } },
+          select: { id: true },
+        });
+        await prisma.auditLog.deleteMany({
+          where: {
+            entityId: {
+              in: [...createdWarehouseIds, ...locations.map((l) => l.id)],
+            },
+          },
+        });
+        await prisma.warehouseLocation.deleteMany({
+          where: { warehouseId: { in: createdWarehouseIds } },
+        });
+        await prisma.warehouse.deleteMany({
+          where: { id: { in: createdWarehouseIds } },
+        });
+      }
       await prisma.category.deleteMany({ where: { id: categoryId } });
       await prisma.unit.deleteMany({ where: { id: unitId } });
 
@@ -1225,6 +1246,660 @@ describe('Purchase Receipts — Fase A5.2b (e2e)', () => {
           .send({ accountId: resaleInventoryAccountId });
         expect(restore.status).toBe(200);
       }
+    });
+  });
+
+  // ====================================================================
+  // R2-B2 — ubicación de destino por línea
+  // ====================================================================
+  describe('R2-B2: ubicación por línea', () => {
+    interface LocationBody {
+      id: string;
+      code: string;
+      name: string;
+      warehouse: { id: string; code: string };
+    }
+    interface LocatedLineBody extends SafePurchaseReceiptLineBody {
+      location: LocationBody | null;
+    }
+    interface LocatedReceiptBody extends SafePurchaseReceiptBody {
+      lines: LocatedLineBody[];
+    }
+
+    let locA: string;
+    let locB: string;
+    let defaultLocationId: string;
+
+    async function createWarehouseWithLocations(
+      count: number,
+    ): Promise<{ warehouseId: string; locationIds: string[] }> {
+      const suffix = nextSuffix();
+      const created = await request(app.getHttpServer())
+        .post('/api/v1/warehouses')
+        .set('Cookie', adminCookie)
+        .send({ code: `B2W${suffix}`.slice(0, 20), name: 'Almacén e2e B2' });
+      if (created.status !== 201) {
+        throw new Error(`fixture almacén: ${JSON.stringify(created.body)}`);
+      }
+      const warehouseId = (created.body as { id: string }).id;
+      createdWarehouseIds.push(warehouseId);
+      const locationIds: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        const loc = await request(app.getHttpServer())
+          .post(`/api/v1/warehouses/${warehouseId}/locations`)
+          .set('Cookie', adminCookie)
+          .send({ code: `B2L${i}${suffix}`.slice(0, 20), name: `Ubic ${i}` });
+        if (loc.status !== 201) {
+          throw new Error(`fixture ubicación: ${JSON.stringify(loc.body)}`);
+        }
+        locationIds.push((loc.body as { id: string }).id);
+      }
+      return { warehouseId, locationIds };
+    }
+
+    async function balances(productId: string): Promise<Map<string, string>> {
+      const product = await prisma.product.findUniqueOrThrow({
+        where: { id: productId },
+      });
+      const rows = await prisma.stockBalance.findMany({ where: { productId } });
+      const sum = rows.reduce(
+        (acc, b) => acc.plus(b.quantity),
+        new Prisma.Decimal(0),
+      );
+      // Conciliación: producto = suma de ubicaciones, sin negativos.
+      expect(sum.toFixed(3)).toBe(product.stockCurrent.toFixed(3));
+      for (const b of rows) expect(b.quantity.gte(0)).toBe(true);
+      return new Map(rows.map((b) => [b.locationId, b.quantity.toFixed(3)]));
+    }
+
+    /** Factura CONFIRMED con una línea GOOD por producto indicado (cantidad 10 c/u por defecto). */
+    async function createConfirmedInvoiceWithProducts(
+      products: { productId: string; quantity: string }[],
+    ): Promise<{ invoiceId: string; lineIdByProduct: Map<string, string> }> {
+      const suffix = nextSuffix();
+      const draft = await createInvoice({
+        supplierId: activeSupplierId,
+        documentType: PurchaseInvoiceDocumentType.FACTURA,
+        documentSeries: 'F901',
+        documentNumber: suffix.slice(-8),
+        issueDate: businessToday(),
+        lines: products.map((p) => ({
+          productId: p.productId,
+          acquisitionKind: 'GOOD',
+          purchasePurpose: 'RESALE_INVENTORY',
+          quantity: p.quantity,
+          unitCost: '10.00',
+          taxCategory: 'UNAFFECTED',
+        })),
+      });
+      if (draft.status !== 201) {
+        throw new Error(`factura fixture: ${JSON.stringify(draft.body)}`);
+      }
+      const invoice = draft.body as SafePurchaseInvoiceBody;
+      createdPurchaseInvoiceIds.push(invoice.id);
+      const confirmed = await confirmInvoice(invoice.id);
+      if (confirmed.status !== 200) {
+        throw new Error(`confirmar fixture: ${JSON.stringify(confirmed.body)}`);
+      }
+      const body = confirmed.body as SafePurchaseInvoiceBody;
+      return {
+        invoiceId: invoice.id,
+        lineIdByProduct: new Map(
+          body.lines.map((l) => [l.productId as string, l.id]),
+        ),
+      };
+    }
+
+    async function receive(
+      invoiceId: string,
+      lines: Record<string, unknown>[],
+      extra: Record<string, unknown> = {},
+      cookie: string = adminCookie,
+    ): Promise<request.Response> {
+      const response = await createReceipt(
+        invoiceId,
+        { lines, ...extra },
+        cookie,
+      );
+      if (response.status === 201) {
+        createdPurchaseReceiptIds.push((response.body as { id: string }).id);
+      }
+      return response;
+    }
+
+    beforeAll(async () => {
+      defaultLocationId = (
+        await prisma.warehouseLocation.findFirstOrThrow({
+          where: { isDefault: true, warehouse: { isDefault: true } },
+        })
+      ).id;
+      const wh = await createWarehouseWithLocations(2);
+      [locA, locB] = wh.locationIds;
+    }, 60000);
+
+    it('1. sin locationId: ingresa a MAIN/DEFAULT y la respuesta lo informa', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const res = await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(productId),
+          quantity: '4.000',
+        },
+      ]);
+      expect(res.status).toBe(201);
+      const body = res.body as LocatedReceiptBody;
+      expect(body.lines[0].location?.id).toBe(defaultLocationId);
+      expect(body.lines[0].location?.code).toBe('DEFAULT');
+      expect(body.lines[0].location?.warehouse.code).toBe('MAIN');
+      expect((await balances(productId)).get(defaultLocationId)).toBe('4.000');
+    });
+
+    it('2. DEFAULT explícito equivale a omitirlo', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const res = await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(productId),
+          quantity: '3.000',
+          locationId: defaultLocationId,
+        },
+      ]);
+      expect(res.status).toBe(201);
+      expect((await balances(productId)).get(defaultLocationId)).toBe('3.000');
+    });
+
+    it('3. ubicación distinta: stock, línea y movimiento quedan en ella', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const res = await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(productId),
+          quantity: '6.000',
+          locationId: locA,
+        },
+      ]);
+      expect(res.status).toBe(201);
+      const body = res.body as LocatedReceiptBody;
+      expect(body.lines[0].location?.id).toBe(locA);
+      const map = await balances(productId);
+      expect(map.get(locA)).toBe('6.000');
+      expect(map.has(defaultLocationId)).toBe(false);
+      const movement = await prisma.inventoryMovement.findFirstOrThrow({
+        where: { productId, origin: 'PURCHASE_RECEIPT' },
+      });
+      expect(movement.locationId).toBe(locA);
+      const persisted = await prisma.purchaseReceiptLine.findFirstOrThrow({
+        where: { purchaseReceiptId: body.id },
+      });
+      expect(persisted.locationId).toBe(locA);
+    });
+
+    it('4. varias líneas en ubicaciones distintas, enviadas en orden inverso al productId', async () => {
+      const p1 = await createDedicatedTrackedProduct();
+      const p2 = await createDedicatedTrackedProduct();
+      const [low, high] = [p1, p2].sort();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId: low, quantity: '10.000' },
+          { productId: high, quantity: '10.000' },
+        ]);
+      // Orden de envío: primero el producto ALTO, luego el BAJO.
+      const res = await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(high),
+          quantity: '2.000',
+          locationId: locB,
+        },
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(low),
+          quantity: '5.000',
+          locationId: locA,
+        },
+      ]);
+      expect(res.status).toBe(201);
+      const body = res.body as LocatedReceiptBody;
+      const byInvoiceLine = new Map(
+        body.lines.map((l) => [l.purchaseInvoiceLineId, l.location?.id]),
+      );
+      expect(byInvoiceLine.get(lineIdByProduct.get(high) as string)).toBe(locB);
+      expect(byInvoiceLine.get(lineIdByProduct.get(low) as string)).toBe(locA);
+      const mHigh = await balances(high);
+      const mLow = await balances(low);
+      expect(mHigh.get(locB)).toBe('2.000');
+      expect(mHigh.has(locA)).toBe(false);
+      expect(mLow.get(locA)).toBe('5.000');
+      expect(mLow.has(locB)).toBe(false);
+    });
+
+    it('5. recepciones parciales en ubicaciones distintas y cantidad excedida', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '15.000' },
+        ]);
+      const lineId = lineIdByProduct.get(productId);
+      expect(
+        (
+          await receive(invoiceId, [
+            {
+              purchaseInvoiceLineId: lineId,
+              quantity: '10.000',
+              locationId: locA,
+            },
+          ])
+        ).status,
+      ).toBe(201);
+      expect(
+        (
+          await receive(invoiceId, [
+            { purchaseInvoiceLineId: lineId, quantity: '5.000' },
+          ])
+        ).status,
+      ).toBe(201);
+      const map = await balances(productId);
+      expect(map.get(locA)).toBe('10.000');
+      expect(map.get(defaultLocationId)).toBe('5.000');
+      const product = await prisma.product.findUniqueOrThrow({
+        where: { id: productId },
+      });
+      expect(product.stockCurrent.toFixed(3)).toBe('15.000');
+
+      const excess = await receive(invoiceId, [
+        { purchaseInvoiceLineId: lineId, quantity: '1.000', locationId: locB },
+      ]);
+      expect(excess.status).toBe(409);
+      expect((await balances(productId)).has(locB)).toBe(false);
+    });
+
+    it('6. una línea de factura repetida en la misma recepción sigue rechazándose (400)', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const lineId = lineIdByProduct.get(productId);
+      const res = await receive(invoiceId, [
+        { purchaseInvoiceLineId: lineId, quantity: '1.000', locationId: locA },
+        { purchaseInvoiceLineId: lineId, quantity: '1.000', locationId: locB },
+      ]);
+      expect(res.status).toBe(400);
+      expect((await balances(productId)).size).toBe(0);
+    });
+
+    describe('errores de ubicación (sin efectos)', () => {
+      async function expectNoEffects(
+        productId: string,
+        invoiceId: string,
+      ): Promise<void> {
+        expect((await balances(productId)).size).toBe(0);
+        expect(
+          await prisma.purchaseReceipt.count({
+            where: { purchaseInvoiceId: invoiceId },
+          }),
+        ).toBe(0);
+        expect(
+          await prisma.inventoryMovement.count({ where: { productId } }),
+        ).toBe(0);
+      }
+
+      async function setup() {
+        const productId = await createDedicatedTrackedProduct();
+        const { invoiceId, lineIdByProduct } =
+          await createConfirmedInvoiceWithProducts([
+            { productId, quantity: '10.000' },
+          ]);
+        return {
+          productId,
+          invoiceId,
+          lineId: lineIdByProduct.get(productId) as string,
+        };
+      }
+
+      it('7. locationId malformado → 400', async () => {
+        const { productId, invoiceId, lineId } = await setup();
+        const res = await receive(invoiceId, [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '1.000',
+            locationId: 'no-es-uuid',
+          },
+        ]);
+        expect(res.status).toBe(400);
+        await expectNoEffects(productId, invoiceId);
+      });
+
+      it('8. ubicación inexistente → 404', async () => {
+        const { productId, invoiceId, lineId } = await setup();
+        const res = await receive(invoiceId, [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '1.000',
+            locationId: NON_EXISTENT_UUID,
+          },
+        ]);
+        expect(res.status).toBe(404);
+        await expectNoEffects(productId, invoiceId);
+      });
+
+      it('9. ubicación inactiva → 409', async () => {
+        const { productId, invoiceId, lineId } = await setup();
+        const wh = await createWarehouseWithLocations(1);
+        await prisma.warehouseLocation.update({
+          where: { id: wh.locationIds[0] },
+          data: { status: WarehouseStatus.INACTIVE },
+        });
+        const res = await receive(invoiceId, [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '1.000',
+            locationId: wh.locationIds[0],
+          },
+        ]);
+        expect(res.status).toBe(409);
+        await expectNoEffects(productId, invoiceId);
+      });
+
+      it('10. almacén inactivo → 409', async () => {
+        const { productId, invoiceId, lineId } = await setup();
+        const wh = await createWarehouseWithLocations(1);
+        await prisma.warehouse.update({
+          where: { id: wh.warehouseId },
+          data: { status: WarehouseStatus.INACTIVE },
+        });
+        const res = await receive(invoiceId, [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '1.000',
+            locationId: wh.locationIds[0],
+          },
+        ]);
+        expect(res.status).toBe(409);
+        await expectNoEffects(productId, invoiceId);
+      });
+
+      it('11. una línea inválida entre varias no deja ninguna recepción parcial', async () => {
+        const { productId, invoiceId, lineId } = await setup();
+        const other = await createDedicatedTrackedProduct();
+        const second = await createConfirmedInvoiceWithProducts([
+          { productId: other, quantity: '10.000' },
+        ]);
+        expect(second.invoiceId).toBeDefined();
+        const res = await receive(invoiceId, [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '1.000',
+            locationId: locA,
+          },
+          {
+            purchaseInvoiceLineId: second.lineIdByProduct.get(other),
+            quantity: '1.000',
+          },
+        ]);
+        expect(res.status).toBe(400);
+        await expectNoEffects(productId, invoiceId);
+      });
+    });
+
+    it('12. idempotencia: el reintento con otra ubicación devuelve la recepción original sin mover stock', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const lineId = lineIdByProduct.get(productId);
+      const key = `b2-idem-${nextSuffix()}`;
+      const first = await receive(
+        invoiceId,
+        [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '4.000',
+            locationId: locA,
+          },
+        ],
+        { idempotencyKey: key },
+      );
+      expect(first.status).toBe(201);
+      const retry = await receive(
+        invoiceId,
+        [
+          {
+            purchaseInvoiceLineId: lineId,
+            quantity: '4.000',
+            locationId: locB,
+          },
+        ],
+        { idempotencyKey: key },
+      );
+      expect(retry.status).toBe(201);
+      const retryBody = retry.body as LocatedReceiptBody;
+      expect(retryBody.id).toBe((first.body as LocatedReceiptBody).id);
+      expect(retryBody.lines[0].location?.id).toBe(locA);
+      const map = await balances(productId);
+      expect(map.get(locA)).toBe('4.000');
+      expect(map.has(locB)).toBe(false);
+      expect(
+        await prisma.inventoryMovement.count({
+          where: { productId, origin: 'PURCHASE_RECEIPT' },
+        }),
+      ).toBe(1);
+    });
+
+    it('13. consultas (detalle y listado) y anulación exponen la ubicación original', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const created = await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(productId),
+          quantity: '5.000',
+          locationId: locA,
+        },
+      ]);
+      const receiptId = (created.body as LocatedReceiptBody).id;
+
+      const detail = await getReceipt(receiptId);
+      expect((detail.body as LocatedReceiptBody).lines[0].location?.id).toBe(
+        locA,
+      );
+      const list = await listReceipts(invoiceId);
+      const summary = list.body as { receipts: LocatedReceiptBody[] };
+      expect(summary.receipts[0].lines[0].location?.id).toBe(locA);
+
+      const cancelled = await cancelReceipt(receiptId, 'Anulación e2e B2');
+      expect(cancelled.status).toBe(200);
+      const cancelledBody = cancelled.body as LocatedReceiptBody;
+      expect(cancelledBody.status).toBe('CANCELLED');
+      expect(cancelledBody.lines[0].location?.id).toBe(locA);
+      const map = await balances(productId);
+      expect(map.get(locA) ?? '0.000').toBe('0.000');
+      expect(map.has(defaultLocationId)).toBe(false);
+      const exit = await prisma.inventoryMovement.findFirstOrThrow({
+        where: { productId, origin: 'PURCHASE_RECEIPT_CANCELLATION' },
+      });
+      expect(exit.locationId).toBe(locA);
+    });
+
+    it('14. anular con saldo insuficiente en la ubicación original → 409, sin tomar de otra ubicación ni dejar efectos parciales', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '20.000' },
+        ]);
+      const lineId = lineIdByProduct.get(productId);
+      const receiptA = await receive(invoiceId, [
+        { purchaseInvoiceLineId: lineId, quantity: '10.000', locationId: locA },
+      ]);
+      // Stock abundante en otra ubicación: NO debe usarse como sustituto.
+      expect(
+        (
+          await receive(invoiceId, [
+            {
+              purchaseInvoiceLineId: lineId,
+              quantity: '10.000',
+              locationId: locB,
+            },
+          ])
+        ).status,
+      ).toBe(201);
+      const exit = await request(app.getHttpServer())
+        .post('/api/v1/inventory/exits')
+        .set('Cookie', adminCookie)
+        .send({
+          productId,
+          quantity: '8.000',
+          reason: 'Consumo e2e B2',
+          locationId: locA,
+        });
+      expect(exit.status).toBe(201);
+      const before = await balances(productId);
+
+      const cancel = await cancelReceipt(
+        (receiptA.body as LocatedReceiptBody).id,
+        'Anulación insuficiente',
+      );
+      expect(cancel.status).toBe(409);
+      const after = await balances(productId);
+      expect(after.get(locA)).toBe(before.get(locA));
+      expect(after.get(locB)).toBe(before.get(locB));
+      const stillActive = await prisma.purchaseReceipt.findUniqueOrThrow({
+        where: { id: (receiptA.body as LocatedReceiptBody).id },
+      });
+      expect(stillActive.status).toBe('ACTIVE');
+    });
+
+    it('15. roles: WAREHOUSE crea con ubicación y no ve importes; no anula; MANAGEMENT/ACCOUNTANT/SELLER no crean', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const lineId = lineIdByProduct.get(productId);
+      const body = [
+        { purchaseInvoiceLineId: lineId, quantity: '2.000', locationId: locA },
+      ];
+      for (const cookie of [managementCookie, accountantCookie, sellerCookie]) {
+        expect((await receive(invoiceId, body, {}, cookie)).status).toBe(403);
+      }
+      const created = await receive(invoiceId, body, {}, warehouseCookie);
+      expect(created.status).toBe(201);
+      const receipt = created.body as LocatedReceiptBody;
+      expect(receipt.lines[0].location?.id).toBe(locA);
+      expect('reclassifiedAmount' in receipt.lines[0]).toBe(false);
+      expect('reclassificationEntryId' in receipt).toBe(false);
+      expect(
+        (await cancelReceipt(receipt.id, 'motivo', warehouseCookie)).status,
+      ).toBe(403);
+      const read = await getReceipt(receipt.id, warehouseCookie);
+      expect((read.body as LocatedReceiptBody).lines[0].location?.id).toBe(
+        locA,
+      );
+      expect(
+        'reclassifiedAmount' in (read.body as LocatedReceiptBody).lines[0],
+      ).toBe(false);
+    });
+
+    it('16. concurrencia: dos recepciones con productos compartidos y ubicaciones cruzadas, en orden opuesto', async () => {
+      const p1 = await createDedicatedTrackedProduct();
+      const p2 = await createDedicatedTrackedProduct();
+      const inv1 = await createConfirmedInvoiceWithProducts([
+        { productId: p1, quantity: '10.000' },
+        { productId: p2, quantity: '10.000' },
+      ]);
+      const inv2 = await createConfirmedInvoiceWithProducts([
+        { productId: p1, quantity: '10.000' },
+        { productId: p2, quantity: '10.000' },
+      ]);
+      const [r1, r2] = await Promise.all([
+        receive(inv1.invoiceId, [
+          {
+            purchaseInvoiceLineId: inv1.lineIdByProduct.get(p1),
+            quantity: '3.000',
+            locationId: locA,
+          },
+          {
+            purchaseInvoiceLineId: inv1.lineIdByProduct.get(p2),
+            quantity: '4.000',
+            locationId: locB,
+          },
+        ]),
+        receive(inv2.invoiceId, [
+          {
+            purchaseInvoiceLineId: inv2.lineIdByProduct.get(p2),
+            quantity: '5.000',
+            locationId: locA,
+          },
+          {
+            purchaseInvoiceLineId: inv2.lineIdByProduct.get(p1),
+            quantity: '6.000',
+            locationId: locB,
+          },
+        ]),
+      ]);
+      expect(r1.status).toBe(201);
+      expect(r2.status).toBe(201);
+      const m1 = await balances(p1);
+      const m2 = await balances(p2);
+      expect(m1.get(locA)).toBe('3.000');
+      expect(m1.get(locB)).toBe('6.000');
+      expect(m2.get(locB)).toBe('4.000');
+      expect(m2.get(locA)).toBe('5.000');
+    });
+
+    it('17. el stock por ubicación (R2-B1b) refleja la recepción y los costos/factura no cambian', async () => {
+      const productId = await createDedicatedTrackedProduct();
+      const { invoiceId, lineIdByProduct } =
+        await createConfirmedInvoiceWithProducts([
+          { productId, quantity: '10.000' },
+        ]);
+      const invoiceBefore = await prisma.purchaseInvoice.findUniqueOrThrow({
+        where: { id: invoiceId },
+      });
+      const productBefore = await prisma.product.findUniqueOrThrow({
+        where: { id: productId },
+      });
+      await receive(invoiceId, [
+        {
+          purchaseInvoiceLineId: lineIdByProduct.get(productId),
+          quantity: '7.000',
+          locationId: locB,
+        },
+      ]);
+      const res = await request(app.getHttpServer())
+        .get(`/api/v1/inventory/products/${productId}/stock-by-location`)
+        .set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        stockCurrent: string;
+        locations: { location: { id: string }; quantity: string }[];
+      };
+      expect(body.stockCurrent).toBe('7.000');
+      expect(body.locations).toHaveLength(1);
+      expect(body.locations[0].location.id).toBe(locB);
+      const invoiceAfter = await prisma.purchaseInvoice.findUniqueOrThrow({
+        where: { id: invoiceId },
+      });
+      expect(invoiceAfter.totalAmount.toFixed(2)).toBe(
+        invoiceBefore.totalAmount.toFixed(2),
+      );
+      expect(invoiceAfter.status).toBe(invoiceBefore.status);
+      const productAfter = await prisma.product.findUniqueOrThrow({
+        where: { id: productId },
+      });
+      expect(productAfter.salePrice.toFixed(2)).toBe(
+        productBefore.salePrice.toFixed(2),
+      );
     });
   });
 

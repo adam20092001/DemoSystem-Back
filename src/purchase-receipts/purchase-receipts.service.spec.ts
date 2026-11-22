@@ -89,6 +89,7 @@ function makeSafeReceiptRow(overrides: Partial<Record<string, unknown>> = {}) {
         purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
         quantity: d('4.000'),
         reclassifiedAmount: null,
+        location: null,
       },
     ],
     ...overrides,
@@ -604,6 +605,168 @@ describe('PurchaseReceiptsService', () => {
           locationId?: string;
         };
         expect(call.locationId).toBe('77777777-7777-4777-8777-777777777777');
+      });
+    });
+
+    describe('R2-B2: ubicación de destino por línea', () => {
+      const LINE_A = '00000000-0000-4000-8000-0000000000a1';
+      const LINE_B = '00000000-0000-4000-8000-0000000000a2';
+      const PRODUCT_LOW = '00000000-0000-4000-8000-000000000001';
+      const PRODUCT_HIGH = '00000000-0000-4000-8000-000000000009';
+      const LOC_A = '10000000-0000-4000-8000-00000000000a';
+      const LOC_B = '10000000-0000-4000-8000-00000000000b';
+
+      /** A (id menor) -> producto ALTO; B -> producto BAJO: el orden por producto invierte el de las líneas. */
+      function setupInverse(): void {
+        prisma.tx.$queryRaw.mockReset();
+        prisma.tx.$queryRaw
+          .mockResolvedValueOnce([makeLockedInvoiceRow()])
+          .mockResolvedValueOnce([
+            makeLockedLineRow({ id: LINE_A, productId: PRODUCT_HIGH }),
+            makeLockedLineRow({ id: LINE_B, productId: PRODUCT_LOW }),
+          ]);
+        prisma.tx.purchaseReceipt.create.mockResolvedValue(
+          makeSafeReceiptRow({
+            lines: [
+              {
+                id: 'r-line-a',
+                purchaseInvoiceLineId: LINE_A,
+                quantity: d('1.000'),
+                reclassifiedAmount: null,
+                location: null,
+              },
+              {
+                id: 'r-line-b',
+                purchaseInvoiceLineId: LINE_B,
+                quantity: d('1.000'),
+                reclassifiedAmount: null,
+                location: null,
+              },
+            ],
+          }),
+        );
+      }
+
+      it('pasa a lockLocationsShared la ubicación solicitada de cada línea (null si se omite)', async () => {
+        setupInverse();
+        await service.create(
+          createInput({
+            lines: [
+              {
+                purchaseInvoiceLineId: LINE_A,
+                quantity: '1.000',
+                locationId: LOC_A,
+              },
+              { purchaseInvoiceLineId: LINE_B, quantity: '1.000' },
+            ],
+          }),
+        );
+        expect(
+          stockMovementEngine.lockLocationsShared.mock.calls[0][1],
+        ).toEqual([LOC_A, null]);
+      });
+
+      it('asocia cada ubicación a SU línea aunque el orden de proceso (por productId) sea inverso', async () => {
+        setupInverse();
+        // Solicitud con las líneas en orden B, A: cada una con destino propio.
+        await service.create(
+          createInput({
+            lines: [
+              {
+                purchaseInvoiceLineId: LINE_B,
+                quantity: '1.000',
+                locationId: LOC_B,
+              },
+              {
+                purchaseInvoiceLineId: LINE_A,
+                quantity: '1.000',
+                locationId: LOC_A,
+              },
+            ],
+          }),
+        );
+
+        const created = prisma.tx.purchaseReceipt.create.mock.calls[0][0] as {
+          data: {
+            lines: {
+              create: { purchaseInvoiceLineId: string; locationId: string }[];
+            };
+          };
+        };
+        const persisted = new Map(
+          created.data.lines.create.map((l) => [
+            l.purchaseInvoiceLineId,
+            l.locationId,
+          ]),
+        );
+        expect(persisted.get(LINE_A)).toBe(LOC_A);
+        expect(persisted.get(LINE_B)).toBe(LOC_B);
+
+        // Los ENTRY se procesan por productId ascendente (B->BAJO primero) y
+        // cada uno usa la ubicación de SU línea.
+        const calls = stockMovementEngine.apply.mock.calls.map(
+          (c) => c[1] as { productId: string; locationId?: string },
+        );
+        expect(calls).toEqual([
+          expect.objectContaining({
+            productId: PRODUCT_LOW,
+            locationId: LOC_B,
+          }),
+          expect.objectContaining({
+            productId: PRODUCT_HIGH,
+            locationId: LOC_A,
+          }),
+        ]);
+      });
+
+      it('sin locationId: persiste y usa la ubicación predeterminada resuelta por el motor', async () => {
+        await service.create(createInput());
+        const call = stockMovementEngine.apply.mock.calls[0][1] as {
+          locationId?: string;
+        };
+        expect(call.locationId).toBe('77777777-7777-4777-8777-777777777777');
+      });
+
+      it('si el motor rechaza la ubicación no se crea nada ni se mueve stock', async () => {
+        stockMovementEngine.lockLocationsShared.mockRejectedValueOnce(
+          new NotFoundException('Ubicación no encontrada'),
+        );
+        await expect(
+          service.create(
+            createInput({
+              lines: [
+                {
+                  purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
+                  quantity: '1.000',
+                  locationId: LOC_A,
+                },
+              ],
+            }),
+          ),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
+        expect(stockMovementEngine.apply).not.toHaveBeenCalled();
+      });
+
+      it('idempotencia: un reintento con otra ubicación devuelve la recepción original sin bloquear ni mover nada', async () => {
+        prisma.tx.purchaseReceipt.findUnique.mockResolvedValue(
+          makeSafeReceiptRow({ idempotencyKey: 'retry-loc' }),
+        );
+        await service.create(
+          createInput({
+            idempotencyKey: 'retry-loc',
+            lines: [
+              {
+                purchaseInvoiceLineId: PURCHASE_INVOICE_LINE_ID,
+                quantity: '4.000',
+                locationId: LOC_B,
+              },
+            ],
+          }),
+        );
+        expect(stockMovementEngine.lockLocationsShared).not.toHaveBeenCalled();
+        expect(stockMovementEngine.apply).not.toHaveBeenCalled();
+        expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
       });
     });
 

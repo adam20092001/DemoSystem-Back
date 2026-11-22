@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PurchaseReceiptStatus } from '@prisma/client';
+import { MovementLocationResponseDto } from '../../inventory/dto/movement-response.dto';
 
 /**
  * Documenta exactamente los campos de SafePurchaseReceiptLine. Nunca
@@ -17,6 +18,14 @@ export class PurchaseReceiptLineResponseDto {
 
   @ApiProperty({ type: String })
   quantity!: string;
+
+  @ApiProperty({
+    type: MovementLocationResponseDto,
+    nullable: true,
+    description:
+      'R2-B2. Ubicación de destino de la línea. null en recepciones históricas (anteriores a R2-ACT). Sin importes; visible para todos los roles lectores.',
+  })
+  location!: MovementLocationResponseDto | null;
 
   @ApiPropertyOptional({
     type: String,
