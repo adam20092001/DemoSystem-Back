@@ -91,18 +91,21 @@ export class PurchaseInvoiceReceiptsController {
   @ApiOperation({
     summary: 'Registrar una recepción física de mercadería (ADMIN, WAREHOUSE)',
     description:
-      'Solo contra una factura CONFIRMED y únicamente líneas con isReceiptEligible=true. Admite recepciones parciales; la suma de cantidades ACTIVE nunca supera lo facturado. `idempotencyKey` opcional: reenviarla en un reintento devuelve la misma recepción ya creada.',
+      'Solo contra una factura CONFIRMED y únicamente líneas con isReceiptEligible=true. Admite recepciones parciales; la suma de cantidades ACTIVE nunca supera lo facturado. Cada línea admite `locationId` opcional (R2-B2; por defecto MAIN/DEFAULT). `idempotencyKey` opcional: reenviarla en un reintento devuelve la misma recepción ya creada.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiCreatedResponse({ type: PurchaseReceiptResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload inválido, línea inexistente/no elegible, o duplicada en la misma recepción.',
+      'Payload inválido (incluido un locationId mal formado), línea inexistente/no elegible, o duplicada en la misma recepción.',
   })
-  @ApiNotFoundResponse({ description: 'La factura no existe.' })
+  @ApiNotFoundResponse({
+    description:
+      'La factura o alguna ubicación de destino (locationId) no existe.',
+  })
   @ApiConflictResponse({
     description:
-      'La factura no está CONFIRMED, la cantidad excede lo facturado, o no se puede determinar con seguridad la cuenta de reclasificación.',
+      'La factura no está CONFIRMED, la cantidad excede lo facturado, alguna ubicación o su almacén está inactivo, o no se puede determinar con seguridad la cuenta de reclasificación.',
   })
   @Roles(...CREATE_ROLES)
   @Post(':id/receipts')
