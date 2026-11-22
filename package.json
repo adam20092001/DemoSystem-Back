@@ -45,9 +45,13 @@
     "db:test:up": "docker compose up -d db_test",
     "db:test:down": "docker compose stop db_test",
     "db:test:down:clean": "node scripts/db-test-clean-volume.js",
-    "db:test:reset": "npm run db:test:down:clean && docker compose up -d --wait db_test && npm run prisma:test:deploy && npm run prisma:test:seed",
-    "prisma:test:deploy": "node scripts/run-with-env.js .env.test prisma migrate deploy",
-    "prisma:test:seed": "node scripts/run-with-env.js .env.test prisma db seed"
+    "db:test:preflight": "node scripts/test-db-preflight.js",
+    "db:test:mark-disposable": "node scripts/test-db-mark-disposable.js",
+    "db:test:reset": "npm run db:test:preflight && npm run db:test:down:clean && docker compose up -d --wait db_test && npm run prisma:test:deploy && npm run prisma:test:seed",
+    "prisma:test:deploy": "node scripts/run-with-test-db.js prisma migrate deploy",
+    "prisma:test:seed": "node scripts/run-with-test-db.js prisma db seed",
+    "test:scripts": "node --test scripts/lib/test-db-guard.test.js scripts/run-with-test-db.test.js scripts/test-db-preflight.test.js scripts/db-test-clean-volume.test.js",
+    "test:scripts:integration": "node --test --test-concurrency=1 scripts/test-db-guard.integration.test.js"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"

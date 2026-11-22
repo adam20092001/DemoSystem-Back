@@ -542,6 +542,10 @@ npm run db:test:reset       # down:clean + up + migrate deploy + seed, listo par
 `db:test:reset` (y `prisma:test:deploy`/`prisma:test:seed` por separado) necesitan
 el archivo `.env.test` ya creado (copia `.env.test.example`) — no solo
 `test:e2e`. Sin él, fallan con un error claro en vez de tocar otra base.
+Todos estos comandos pasan por la **guardia de seguridad de la base de pruebas**
+(ver "Seguridad de la base de datos de pruebas" más abajo); `db:test:reset`
+ejecuta primero un preflight de solo lectura (`npm run db:test:preflight`) y
+solo después limpia el volumen.
 
 > ⚠️ **`db:test:down:clean` y `db:test:reset` son destructivos ÚNICAMENTE
 > para `pos_db_test`.** Resuelven el volumen a borrar por las etiquetas que
@@ -565,9 +569,154 @@ npm run test:cov     # Cobertura de pruebas unitarias
 
 `npm run test:e2e` necesita `pos_db_test` arriba (`npm run db:test:up`) y un
 archivo `.env.test` (copia `.env.test.example`, ver los comentarios de ese
-archivo). Las suites e2e validan en su propio arranque que `DATABASE_URL`
-apunte a `pos_db_test` — si no es así, fallan explícitamente en vez de
-arriesgar otra base.
+archivo). Antes de cargar cualquier suite, un `globalSetup` valida el destino
+con la guardia de seguridad (ver abajo) y aborta toda la ejecución si no es un
+destino autorizado y verificado.
+
+```bash
+npm run test:scripts              # pruebas unitarias de los scripts TEST (guardia, preflight, limpieza Docker); sin base de datos
+npm run test:scripts:integration  # integración con PostgreSQL descartable propio (requiere Docker; crea y elimina sus contenedores)
+```
+
+### Seguridad de la base de datos de pruebas
+
+Las pruebas E2E escriben y borran datos. Para que nunca se ejecuten contra una
+base no prevista (`INC-E2E-database-guard`), un único módulo compartido
+(`scripts/lib/test-db-guard.js`) protege Jest, `prisma:test:deploy`,
+`prisma:test:seed` y `db:test:reset`. **No usa coincidencia de texto sobre la
+URL**: parsea `DATABASE_URL` con `new URL()` y verifica:
+
+1. **Estructura (sin conectar)** — protocolo `postgresql://`; host `localhost`,
+   `127.0.0.1` o `::1`; puerto igual a `TEST_POSTGRES_PORT` (5433 por defecto,
+   nunca 5432); base **exactamente** `pos_db_test`; usuario igual a
+   `TEST_POSTGRES_USER` (nunca `pos_user`/`postgres`); solo los parámetros
+   `schema=public`, `connection_limit`, `pool_timeout`, `connect_timeout` y
+   `sslmode`; `NODE_ENV` distinto de `production`.
+2. **Identidad real (solo lectura, antes de cualquier escritura)** —
+   `current_database()` y el usuario de sesión deben coincidir; para bases
+   descartables además el marcador (abajo). Cualquier error de conexión o
+   tiempo de espera (5 s) **falla cerrado**.
+3. **Huella del destino** — `jest-e2e.global-setup.ts` verifica una vez y
+   emite una huella; cada archivo de prueba, `createTestPrismaClient()` y los
+   helpers de la app la comprueban de forma síncrona antes de crear clientes o
+   iniciar NestJS. Una huella heredada del shell no vale.
+
+Los mensajes de error indican solo `host:puerto/base` y un código; nunca
+contraseñas, tokens ni URLs completas.
+
+**Configuración: archivos, no shell.** La fuente de verdad es `.env.test`; un
+`.env.test.local` (no versionado) puede sobrescribirlo. Una `DATABASE_URL` (o
+`TEST_POSTGRES_*`) heredada del shell que **contradiga** a los archivos aborta
+con `ENV_CONFLICT` (si coincide, no hay problema). Para pruebas, desarrollo y
+`db:seed:demo` nada cambia: este comportamiento aplica solo a las rutas TEST.
+`scripts/run-with-env.js` se conserva sin cambios.
+
+**Códigos de error principales:** `ENV_CONFLICT`, `URL_INVALID`, `PROTOCOL`,
+`HOST_NOT_ALLOWED`, `PORT_NOT_ALLOWED`, `DB_NAME_NOT_ALLOWED`,
+`DB_RESERVED_NAME`, `USER_NOT_ALLOWED`, `PARAM_NOT_ALLOWED`,
+`IDENTITY_MISMATCH`, `IDENTITY_UNVERIFIABLE`, `TIMEOUT`, `MARKER_MISSING`,
+`MARKER_MISMATCH`, `FINGERPRINT_INVALID`, `DOCKER_NOT_LOCAL`,
+`DISPOSABLE_INVALID`, `PRISMA_CLIENT_UNAVAILABLE` (ejecuta
+`npm run prisma:generate`, que no accede a ninguna base).
+
+#### Uso normal
+
+Con `.env.test` copiado de `.env.test.example` y `pos_db_test` levantada
+(`npm run db:test:up` o `npm run db:test:reset`), `npm run test:e2e` funciona
+sin pasos adicionales.
+
+#### Usar una base descartable (propia, aislada)
+
+Para ejecutar suites contra una base distinta de `pos_db_test` (por ejemplo, un
+contenedor propio en otro puerto), autorízala **de forma exacta** en
+`.env.test.local` — nunca en `.env.test` ni en variables del shell:
+
+```bash
+# 1. Genera un token y crea tu servidor/base (nombre pos_db_test_<sufijo>, p. ej. pos_db_test_scratch).
+node -e "console.log(require('crypto').randomBytes(16).toString('hex'))"
+
+# 2. .env.test.local (no versionado):
+#    DATABASE_URL=postgresql://<usuario>:<clave>@localhost:<puerto>/pos_db_test_scratch?schema=public
+#    E2E_DISPOSABLE_TARGET=localhost:<puerto>/pos_db_test_scratch
+#    E2E_DISPOSABLE_TOKEN=<token del paso 1>
+
+# 3. Marca la base (solo si está VACÍA), migra, siembra y prueba:
+npm run db:test:mark-disposable
+npm run prisma:test:deploy
+npm run prisma:test:seed
+npm run test:e2e
+```
+
+- El destino autorizado es **uno solo**, sin comodines ni listas, y debe
+  coincidir exactamente (host, puerto y base) con `DATABASE_URL`.
+- El nombre debe ser `pos_db_test_<sufijo>` (minúsculas, dígitos o `_`); `pos_db`,
+  `postgres` y las plantillas nunca son válidos.
+- **Solo hosts locales** (comparación exacta sobre el host normalizado):
+  `localhost`, `127.0.0.1` y `::1` (escrito `[::1]` en el destino; la forma
+  expandida `[0:0:0:0:0:0:0:1]` se normaliza igual que lo hace `new URL()`).
+  Se rechazan hosts de LAN, dominios, IP públicas y cualquier alias, aunque
+  resuelva a esta máquina (`miequipo`, `host.docker.internal`, `127.0.0.2`,
+  `127.1`, `localhost.`...). Una base descartable **nunca** puede ser remota.
+- **Puerto 5432 prohibido** (reservado al entorno de desarrollo); se aceptan
+  puertos altos como los de un contenedor propio.
+- El **marcador** (`COMMENT ON DATABASE`) guarda el hash del token y, cuando el
+  rol puede leer `pg_control_system()`, el identificador del clúster. Solo se
+  crea sobre una base sin tablas (o ya marcada con el mismo token). Es una
+  defensa **adicional**: no autentica criptográficamente al servidor ni
+  sustituye a las credenciales distintas por entorno.
+- `db:test:reset` no aplica a descartables: se rechaza si hay una autorización
+  descartable configurada (elimina tu contenedor propio manualmente).
+
+#### Qué se considera destino peligroso
+
+Cualquier base que no sea exactamente `pos_db_test` local (o una descartable
+autorizada y marcada): `pos_db`, bases con sufijos parecidos, hosts remotos,
+otros puertos o usuarios, y cualquier `DATABASE_URL` heredada del shell que
+contradiga a los archivos.
+
+#### `db:test:reset`
+
+Orden: **preflight → limpieza del volumen → arranque → deploy protegido → seed
+protegido**. El preflight (solo lectura) exige primero que el **demonio Docker
+sea local**: rechaza (`DOCKER_NOT_LOCAL`) cualquier `DOCKER_HOST` definido
+(aunque parezca local; elimínalo y usa el contexto de Docker Desktop), un
+`DOCKER_CONTEXT` que contradiga el contexto activo y cualquier contexto cuyo
+**endpoint real** (`docker context inspect`, no su nombre) no sea un pipe
+`npipe:////./pipe/<nombre>` o un socket `unix:///ruta` locales. SSH, TCP
+(incluido `tcp://localhost`, que podría ser un túnel), HTTP y respuestas
+ausentes o inválidas se rechazan. Después exige destino canónico, que el puerto
+publicado por Docker Compose para `db_test` coincida con el de la política
+(Compose no lee `.env.test`), que el contenedor/volumen sean el servicio
+`db_test` de este proyecto (etiquetas de Compose y montaje) y, si el
+contenedor está en marcha, la identidad real de la base. La limpieza
+(`db-test-clean-volume.js`) conserva todas sus protecciones y vuelve a
+resolver el recurso unos instantes después (ventana documentada).
+
+#### Límites: lo que la guardia NO puede proteger
+
+- Comandos manuales: `npx prisma migrate reset`, `psql`, `docker compose down
+  -v`, `docker volume rm`, etc.
+- Los scripts de **desarrollo** (`prisma:deploy`, `prisma:migrate`, `db:seed`,
+  `db:seed:demo`) siguen usando `.env` y no están protegidos por esta guardia
+  (riesgo registrado como límite operativo; ver la incidencia).
+- Un servidor o túnel equivocado con una base homónima en una ruta canónica
+  solo se detecta por `current_database()`, que no autentica al servidor; el
+  control definitivo es operativo (credenciales distintas por entorno, rol sin
+  acceso a producción).
+- Existe una ventana corta entre verificar y ejecutar (la CLI de Prisma abre su
+  propia conexión) y no hay reverificación periódica durante la corrida.
+- Los pasos de `db:test:reset` son procesos distintos que heredan el mismo
+  entorno (`DOCKER_HOST`/`DOCKER_CONTEXT`), pero el contexto activo se guarda en
+  la configuración de Docker: un `docker context use` ejecutado entre el
+  preflight y la limpieza (o en otra terminal) no se detecta. `db-test-clean-volume.js`
+  no se modificó y no repite la comprobación de demonio local.
+
+#### Cómo verificar que las bases existentes no se alteraron
+
+Sin ejecutar nada destructivo: `docker ps` y `docker volume ls` antes/después
+(mismos contenedores y volúmenes), `docker inspect pos_db pos_db_test --format
+'{{.State.StartedAt}}'` sin cambios, y —en lectura— el número de filas de
+`_prisma_migrations` en cada base.
 
 Limitaciones conocidas: la suite e2e pasa en ejecuciones consecutivas sin
 reset, pero varias suites dejan residuos en `products` y `audit_logs`, y el

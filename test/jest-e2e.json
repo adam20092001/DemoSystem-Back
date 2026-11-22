@@ -6,6 +6,7 @@
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
   },
+  "globalSetup": "<rootDir>/jest-e2e.global-setup.ts",
   "setupFiles": ["<rootDir>/jest-e2e.setup.ts"],
   "setupFilesAfterEnv": ["<rootDir>/jest-e2e.bootstrap.ts"],
   "maxWorkers": 1,
