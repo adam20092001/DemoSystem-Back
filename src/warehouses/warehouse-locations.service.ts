@@ -41,8 +41,9 @@ const LOCATION_NOT_FOUND = 'Ubicación no encontrada';
  * una ubicación de otro almacén responde 404, igual que una inexistente, y
  * nunca puede manipularse por la ruta equivocada.
  *
- * INERTE respecto al inventario: no lee ni escribe stock, movimientos ni
- * saldos. La ubicación técnica DEFAULT de cada almacén nunca cambia de
+ * Este servicio NO mueve stock (eso es StockMovementEngine); solo lee, para
+ * decidir la desactivación, los saldos, movimientos y líneas que referencian
+ * la ubicación (D4: reglas sin cambios con R2-ACT). La ubicación técnica DEFAULT de cada almacén nunca cambia de
  * código ni se desactiva por separado, y ninguna ubicación se elimina.
  */
 @Injectable()

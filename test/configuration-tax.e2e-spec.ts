@@ -23,6 +23,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Suite dedicada de integración IGV (Fase 10, Bloque C): Configuration <->
@@ -314,7 +315,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: 'E2ECFGTAX-P1',
         name: 'Producto E2E Config IGV',
@@ -480,7 +481,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
       }
 
       if (createdProductIds.length > 0) {
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }
@@ -689,7 +690,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
         maxDiscountPercent: '100.00',
       });
       await trackLatestConfigurationAuditRow();
-      const product118 = await prisma.product.create({
+      const product118 = await createProductRow(prisma, {
         data: {
           sku: `E2ECFGTAX-P118-${Date.now()}`,
           name: 'Producto 118 E2E Config IGV',
@@ -920,7 +921,7 @@ describe('Configuration — Tax/IGV Integration (Bloque 10, C) (e2e)', () => {
 
   describe('§43 — IGV en venta DIRECTA + verificación de asiento contable', () => {
     async function createTrackedProduct(salePrice: string): Promise<string> {
-      const product = await prisma.product.create({
+      const product = await createProductRow(prisma, {
         data: {
           sku: `E2ECFGTAX-P${salePrice}-${Date.now()}`,
           name: `Producto ${salePrice} E2E Config IGV`,

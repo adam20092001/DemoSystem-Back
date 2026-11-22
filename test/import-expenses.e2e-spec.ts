@@ -26,6 +26,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase B2 — Gastos de importación y asignación de costo. Suite dedicada y
@@ -375,7 +376,7 @@ describe('Import Expenses — Fase B2 (e2e)', () => {
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `B2-${shortSuffix}`,
         name: `Producto E2E B2 ${shortSuffix}`,
@@ -474,7 +475,7 @@ describe('Import Expenses — Fase B2 (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

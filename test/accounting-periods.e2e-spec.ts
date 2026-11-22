@@ -27,6 +27,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase A2.1/A2.2/A2.3/A2.4/A2.6/A2.7: periodos contables mensuales, fecha
@@ -210,7 +211,7 @@ describe('Accounting Periods — Fase A2 (e2e)', () => {
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: 'E2EA2-P1',
         name: 'Producto E2E A2',
@@ -301,7 +302,7 @@ describe('Accounting Periods — Fase A2 (e2e)', () => {
       await prisma.customer.deleteMany({
         where: { id: { in: createdCustomerIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.accountingPeriod.deleteMany({

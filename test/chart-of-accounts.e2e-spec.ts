@@ -24,6 +24,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase A1 (PCGE) — administración del plan de cuentas jerárquico. Suite
@@ -248,7 +249,7 @@ describe('Chart of Accounts — PCGE (Fase A1) (e2e)', () => {
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `E2ECOA-P-${SUFFIX}`,
         name: 'Producto E2E COA',
@@ -303,7 +304,7 @@ describe('Chart of Accounts — PCGE (Fase A1) (e2e)', () => {
         }
       }
       if (productId) {
-        await prisma.product.deleteMany({ where: { id: productId } });
+        await deleteProductRows(prisma, { where: { id: productId } });
       }
       if (customerId) {
         await prisma.customer.deleteMany({ where: { id: customerId } });

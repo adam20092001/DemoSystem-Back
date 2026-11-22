@@ -21,6 +21,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { deleteProductRows } from './helpers/stock-fixtures';
 
 const WAREHOUSE_USERNAME = 'e2e_warehouse_inventory';
 const WAREHOUSE_PASSWORD = 'WarehouseInventory123';
@@ -206,7 +207,7 @@ describe('Inventory (e2e)', () => {
       await prisma.inventoryMovement.deleteMany({
         where: { productId: { in: createdProductIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
     }
@@ -810,6 +811,7 @@ describe('Inventory (e2e)', () => {
           'newStock',
           'movementType',
           'origin',
+          'locationId',
         ].sort(),
       );
       expect(initialMetadata.previousStock).toBe('0.000');
@@ -2224,9 +2226,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 0, 0, 0, 'check probe', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 0, 0, 0, 'check probe', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 0, 0)
           `,
         '23514',
       );
@@ -2242,9 +2244,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, -1, 0, 'check probe', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, -1, 0, 'check probe', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 0, 1)
           `,
         '23514',
       );
@@ -2260,9 +2262,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'EXIT', 'MANUAL', 2, 1, -1, 'check probe', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'EXIT', 'MANUAL', 2, 1, -1, 'check probe', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 2, 0)
           `,
         '23514',
       );
@@ -2278,9 +2280,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, 1, 5, 'check probe', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, 1, 5, 'check probe', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 1, 2)
           `,
         '23514',
       );
@@ -2296,9 +2298,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, reference_type, reference_id, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, reference_type, reference_id, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'SALE', 1, 1, 2, 'check probe', 'SALE', '11111111-1111-1111-1111-111111111111', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'SALE', 1, 1, 2, 'check probe', 'SALE', '11111111-1111-1111-1111-111111111111', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 1, 2)
           `,
         '23514',
       );
@@ -2314,9 +2316,9 @@ describe('Inventory (e2e)', () => {
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, reference_type, reference_id, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, reference_type, reference_id, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, 1, 2, 'check probe', 'SALE', NULL, ${adminId}::uuid, now())
+              (gen_random_uuid(), ${constraintProductId}::uuid, 'ENTRY', 'MANUAL', 1, 1, 2, 'check probe', 'SALE', NULL, ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 1, 2)
           `,
         '23514',
       );
@@ -2331,18 +2333,18 @@ describe('Inventory (e2e)', () => {
       const product = await createProduct();
       await prisma.$executeRaw`
         INSERT INTO inventory_movements
-          (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+          (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
         VALUES
-          (gen_random_uuid(), ${product.id}::uuid, 'ENTRY', 'INITIAL_BALANCE', 1, 0, 1, 'check probe first', ${adminId}::uuid, now())
+          (gen_random_uuid(), ${product.id}::uuid, 'ENTRY', 'INITIAL_BALANCE', 1, 0, 1, 'check probe first', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 0, 1)
       `;
 
       await expectPgRejection(
         () =>
           prisma.$executeRaw`
             INSERT INTO inventory_movements
-              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at)
+              (id, product_id, movement_type, origin, quantity, previous_stock, new_stock, reason, created_by_user_id, created_at, location_id, location_previous_stock, location_new_stock)
             VALUES
-              (gen_random_uuid(), ${product.id}::uuid, 'ENTRY', 'INITIAL_BALANCE', 1, 0, 1, 'check probe second', ${adminId}::uuid, now())
+              (gen_random_uuid(), ${product.id}::uuid, 'ENTRY', 'INITIAL_BALANCE', 1, 0, 1, 'check probe second', ${adminId}::uuid, now(), (SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id = l.warehouse_id WHERE w.is_default AND l.is_default), 0, 1)
           `,
         '23505',
       );

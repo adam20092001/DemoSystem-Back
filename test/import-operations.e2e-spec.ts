@@ -25,6 +25,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase B1 — Operaciones de importación y seguimiento de embarques. Suite
@@ -294,7 +295,7 @@ describe('Import Operations — Fase B1 (e2e)', () => {
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `B1-${shortSuffix}`,
         name: `Producto E2E B1 ${shortSuffix}`,
@@ -371,7 +372,7 @@ describe('Import Operations — Fase B1 (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

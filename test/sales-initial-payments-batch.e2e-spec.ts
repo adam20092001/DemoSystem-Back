@@ -27,6 +27,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * R1-B2 — lote de pagos iniciales (`payments[]`) en POST /sales y
@@ -192,7 +193,7 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
     // Producto inventariable fixture (mismo patrón de inserción directa que
     // sales.e2e-spec.ts): permite verificar que un lote fallido no deja
     // ningún movimiento de stock.
-    const tracked = await prisma.product.create({
+    const tracked = await createProductRow(prisma, {
       data: {
         sku: `R1B2-T-${nextSuffix()}`,
         name: 'Producto inventariable R1-B2',
@@ -317,7 +318,7 @@ describe('Sales — lote de pagos iniciales (e2e) — R1-B2', () => {
         await prisma.auditLog.deleteMany({
           where: { entityType: 'Product', entityId: { in: ownedProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: ownedProductIds } },
         });
       }

@@ -111,9 +111,77 @@ function makeMovementRow(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const WAREHOUSE_ID = '66666666-6666-4666-8666-666666666666';
+const DEFAULT_LOCATION_ID = '77777777-7777-4777-8777-777777777777';
+const OTHER_LOCATION_ID = '88888888-8888-4888-8888-888888888888';
+
+interface TxMockState {
+  productRows: LockedProductRowShape[];
+  /** undefined = un único saldo en la ubicación igual al stock consolidado. */
+  balanceRows: { quantity: Prisma.Decimal }[] | undefined;
+  warehouseStatus: string;
+  locationStatus: string;
+  /** ubicaciones explícitas conocidas (id -> warehouseId); vacío = ninguna. */
+  knownLocations: Map<string, string>;
+  defaultRows: { locationId: string; warehouseId: string }[];
+}
+
 function createTxMock() {
+  const state: TxMockState = {
+    productRows: [],
+    balanceRows: undefined,
+    warehouseStatus: 'ACTIVE',
+    locationStatus: 'ACTIVE',
+    knownLocations: new Map([[OTHER_LOCATION_ID, WAREHOUSE_ID]]),
+    defaultRows: [
+      { locationId: DEFAULT_LOCATION_ID, warehouseId: WAREHOUSE_ID },
+    ],
+  };
+  /** Despacha por el texto SQL: cada consulta del motor tiene una forma única. */
+  const queryRaw = jest.fn((sql: Prisma.Sql): Promise<unknown[]> => {
+    const text = sql.strings.join('?');
+    if (text.includes('FROM products p')) {
+      return Promise.resolve(state.productRows);
+    }
+    if (text.includes('FROM stock_balances')) {
+      return Promise.resolve(
+        state.balanceRows ??
+          state.productRows.map((row) => ({ quantity: row.stockCurrent })),
+      );
+    }
+    if (text.includes('JOIN warehouses w ON')) {
+      return Promise.resolve(state.defaultRows);
+    }
+    if (
+      text.includes('FROM warehouse_locations') &&
+      text.includes('FOR SHARE')
+    ) {
+      return Promise.resolve([
+        { id: DEFAULT_LOCATION_ID, status: state.locationStatus },
+      ]);
+    }
+    if (text.includes('FROM warehouse_locations')) {
+      const ids = sql.values[0] as string[];
+      return Promise.resolve(
+        ids
+          .filter((id) => state.knownLocations.has(id))
+          .map((id) => ({
+            locationId: id,
+            warehouseId: state.knownLocations.get(id) as string,
+          })),
+      );
+    }
+    if (text.includes('FROM warehouses') && text.includes('FOR SHARE')) {
+      return Promise.resolve([
+        { id: WAREHOUSE_ID, status: state.warehouseStatus },
+      ]);
+    }
+    throw new Error(`Consulta no prevista en el mock: ${text}`);
+  });
   return {
-    $queryRaw: jest.fn<Promise<LockedProductRowShape[]>, [unknown]>(),
+    state,
+    $queryRaw: queryRaw,
+    $executeRaw: jest.fn<Promise<number>, [Prisma.Sql]>().mockResolvedValue(1),
     product: {
       update: jest.fn<Promise<unknown>, [ProductUpdateArgs]>(),
     },
@@ -122,6 +190,13 @@ function createTxMock() {
       count: jest.fn<Promise<number>, [InventoryMovementCountArgs]>(),
     },
   };
+}
+
+/** Cuenta solo las consultas de lock del PRODUCTO (el motor hace varias consultas). */
+function productLockCalls(tx: ReturnType<typeof createTxMock>): number {
+  return tx.$queryRaw.mock.calls.filter(([sql]) =>
+    sql.strings.join('?').includes('FROM products p'),
+  ).length;
 }
 
 function createAuditServiceMock() {
@@ -160,7 +235,7 @@ describe('StockMovementEngine', () => {
   });
 
   function setupLock(row: LockedProductRowShape = makeLockedRow()): void {
-    tx.$queryRaw.mockResolvedValue([row]);
+    tx.state.productRows = [row];
   }
 
   async function captureError(command: StockMovementCommand): Promise<unknown> {
@@ -465,11 +540,11 @@ describe('StockMovementEngine', () => {
 
       await engine.apply(txClient, makeCommand());
 
-      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(productLockCalls(tx)).toBe(1);
     });
 
     it('producto inexistente → 404', async () => {
-      tx.$queryRaw.mockResolvedValue([]);
+      tx.state.productRows = [];
 
       const error = await captureError(makeCommand());
 
@@ -670,7 +745,7 @@ describe('StockMovementEngine', () => {
     });
 
     it('producto inexistente sigue siendo 404 incluso en reversa histórica', async () => {
-      tx.$queryRaw.mockResolvedValue([]);
+      tx.state.productRows = [];
 
       const error = await captureError(reversalCommand());
 
@@ -852,7 +927,7 @@ describe('StockMovementEngine', () => {
     });
 
     it('producto inexistente sigue siendo 404 incluso con el bypass histórico', async () => {
-      tx.$queryRaw.mockResolvedValue([]);
+      tx.state.productRows = [];
 
       const error = await captureError(receiptCommand());
 
@@ -890,7 +965,7 @@ describe('StockMovementEngine', () => {
       expect(tx.inventoryMovement.count).toHaveBeenCalledWith({
         where: { productId: PRODUCT_ID },
       });
-      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(productLockCalls(tx)).toBe(1);
     });
 
     it('previousStock distinto de cero → 409, aunque no haya movimientos previos', async () => {
@@ -1068,8 +1143,10 @@ describe('StockMovementEngine', () => {
           'newStock',
           'movementType',
           'origin',
+          'locationId',
         ].sort(),
       );
+      expect(metadata.locationId).toBe(DEFAULT_LOCATION_ID);
       expect(metadata.quantity).toBe('5.000');
       expect(metadata.previousStock).toBe('10.000');
       expect(metadata.newStock).toBe('15.000');
@@ -1086,6 +1163,227 @@ describe('StockMovementEngine', () => {
       await expect(engine.apply(txClient, makeCommand())).rejects.toThrow(
         'fallo de auditoría',
       );
+    });
+  });
+
+  describe('R2-ACT: stock por ubicación', () => {
+    function sqlText(sql: Prisma.Sql): string {
+      return sql.strings.join('?');
+    }
+    function firstOrder(matcher: (text: string) => boolean): number {
+      const index = tx.$queryRaw.mock.calls.findIndex(([sql]) =>
+        matcher(sqlText(sql)),
+      );
+      return index === -1 ? -1 : tx.$queryRaw.mock.invocationCallOrder[index];
+    }
+
+    it('sin locationId usa la ubicación DEFAULT del almacén predeterminado y la persiste en el movimiento', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('10.000') }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(txClient, makeCommand());
+
+      const data = tx.inventoryMovement.create.mock.calls[0][0].data;
+      expect(data.locationId).toBe(DEFAULT_LOCATION_ID);
+      expect((data.locationPreviousStock as Prisma.Decimal).toString()).toBe(
+        '10',
+      );
+      expect((data.locationNewStock as Prisma.Decimal).toString()).toBe('15');
+    });
+
+    it('actualiza el saldo por ubicación con INSERT ... ON CONFLICT y el consolidado en la misma operación', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('10.000') }));
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(txClient, makeCommand());
+
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      const text = sqlText(tx.$executeRaw.mock.calls[0][0]);
+      expect(text).toContain('INSERT INTO stock_balances');
+      expect(text).toContain('ON CONFLICT (product_id, location_id)');
+      expect(tx.product.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('sin saldo previo en la ubicación parte de 0', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('0') }));
+      tx.state.balanceRows = [];
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(txClient, makeCommand());
+
+      const data = tx.inventoryMovement.create.mock.calls[0][0].data;
+      expect((data.locationPreviousStock as Prisma.Decimal).toString()).toBe(
+        '0',
+      );
+      expect((data.locationNewStock as Prisma.Decimal).toString()).toBe('5');
+    });
+
+    it('usa el locationId explícito cuando existe', async () => {
+      setupLock();
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(
+        txClient,
+        makeCommand({ locationId: OTHER_LOCATION_ID }),
+      );
+
+      expect(tx.inventoryMovement.create.mock.calls[0][0].data.locationId).toBe(
+        OTHER_LOCATION_ID,
+      );
+    });
+
+    it('locationId inexistente → 404; no uuid → 400; ambos antes de tocar el producto', async () => {
+      setupLock();
+      const missing = await captureError(
+        makeCommand({ locationId: '99999999-9999-4999-8999-999999999999' }),
+      );
+      assertErrorType(missing, 'NotFound');
+      const invalid = await captureError(
+        makeCommand({ locationId: 'no-uuid' }),
+      );
+      assertErrorType(invalid, 'BadRequest');
+      expect(productLockCalls(tx)).toBe(0);
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('EXIT con saldo insuficiente EN LA UBICACIÓN → 409 sin escrituras, aunque el consolidado alcance', async () => {
+      setupLock(makeLockedRow({ stockCurrent: new Prisma.Decimal('10.000') }));
+      tx.state.balanceRows = [{ quantity: new Prisma.Decimal('2.000') }];
+
+      const error = await captureError(
+        makeCommand({
+          movementType: InventoryMovementType.EXIT,
+          quantity: new Prisma.Decimal('3.000'),
+        }),
+      );
+
+      assertErrorType(error, 'Conflict');
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+      expect(tx.product.update).not.toHaveBeenCalled();
+      expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
+    });
+
+    it('almacén inactivo → 409 antes de bloquear el producto', async () => {
+      setupLock();
+      tx.state.warehouseStatus = 'INACTIVE';
+
+      const error = await captureError(makeCommand());
+
+      assertErrorType(error, 'Conflict');
+      expect(productLockCalls(tx)).toBe(0);
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('ubicación inactiva → 409 antes de bloquear el producto', async () => {
+      setupLock();
+      tx.state.locationStatus = 'INACTIVE';
+
+      const error = await captureError(makeCommand());
+
+      assertErrorType(error, 'Conflict');
+      expect(productLockCalls(tx)).toBe(0);
+    });
+
+    it('los orígenes históricos autoritativos (reversas) TAMBIÉN exigen ubicación activa', async () => {
+      setupLock();
+      tx.state.locationStatus = 'INACTIVE';
+
+      const error = await captureError(
+        makeCommand({
+          origin: InventoryMovementOrigin.SALE_CANCELLATION,
+          movementType: InventoryMovementType.ENTRY,
+          referenceType: 'Sale',
+          referenceId: 'sale-1',
+        }),
+      );
+
+      assertErrorType(error, 'Conflict');
+      expect(tx.product.update).not.toHaveBeenCalled();
+    });
+
+    it('ORDEN GLOBAL de bloqueos: almacén -> ubicación -> producto -> saldo -> escritura', async () => {
+      setupLock();
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(txClient, makeCommand());
+
+      const warehouse = firstOrder(
+        (t) => t.includes('FROM warehouses') && t.includes('FOR SHARE'),
+      );
+      const location = firstOrder(
+        (t) =>
+          t.includes('FROM warehouse_locations') && t.includes('FOR SHARE'),
+      );
+      const product = firstOrder((t) => t.includes('FROM products p'));
+      const balance = firstOrder((t) => t.includes('FROM stock_balances'));
+      const write = tx.$executeRaw.mock.invocationCallOrder[0];
+      expect(warehouse).toBeGreaterThan(0);
+      expect(warehouse).toBeLessThan(location);
+      expect(location).toBeLessThan(product);
+      expect(product).toBeLessThan(balance);
+      expect(balance).toBeLessThan(write);
+    });
+
+    it('los bloqueos de catálogo son FOR SHARE y nunca FOR UPDATE', async () => {
+      setupLock();
+      tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+      await engine.apply(txClient, makeCommand());
+
+      for (const [sql] of tx.$queryRaw.mock.calls) {
+        const text = sqlText(sql);
+        if (
+          text.includes('FROM warehouses') ||
+          text.includes('FROM warehouse_locations')
+        ) {
+          expect(text).not.toContain('FOR UPDATE');
+        }
+      }
+    });
+
+    describe('lockLocationsShared()', () => {
+      it('null/undefined resuelven la ubicación DEFAULT y conserva el orden de entrada', async () => {
+        const result = await engine.lockLocationsShared(txClient, [
+          null,
+          OTHER_LOCATION_ID,
+          undefined,
+        ]);
+
+        expect(result).toEqual([
+          DEFAULT_LOCATION_ID,
+          OTHER_LOCATION_ID,
+          DEFAULT_LOCATION_ID,
+        ]);
+      });
+
+      it('sin ubicación predeterminada configurada → 500 (invariante de despliegue)', async () => {
+        tx.state.defaultRows = [];
+
+        await expect(
+          engine.lockLocationsShared(txClient, [null]),
+        ).rejects.toThrow('ubicación predeterminada');
+      });
+
+      it('almacenes y ubicaciones se bloquean en orden ascendente de id', async () => {
+        await engine.lockLocationsShared(txClient, [OTHER_LOCATION_ID, null]);
+
+        const locationLock = tx.$queryRaw.mock.calls
+          .map(([sql]) => sql)
+          .find(
+            (sql) =>
+              sqlText(sql).includes('FROM warehouse_locations') &&
+              sqlText(sql).includes('FOR SHARE'),
+          ) as Prisma.Sql;
+        expect(sqlText(locationLock)).toContain('ORDER BY id');
+        expect(locationLock.values[0]).toEqual(
+          [OTHER_LOCATION_ID, DEFAULT_LOCATION_ID].sort(),
+        );
+      });
+
+      it('lista vacía devuelve [] sin bloquear nada relevante', async () => {
+        const result = await engine.lockLocationsShared(txClient, []);
+        expect(result).toEqual([]);
+      });
     });
   });
 });

@@ -22,6 +22,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase A6.1 — Inventario valorizado. Suite dedicada y aislada (mismo
@@ -189,7 +190,7 @@ describe('Inventory Valuation — Fase A6.1 (e2e)', () => {
     valuationMethod: InventoryValuationMethod | null = null,
   ): Promise<string> {
     const suffix = nextSuffix();
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `A61-${suffix}`,
         name: `Producto E2E A6.1 ${suffix}`,
@@ -420,7 +421,7 @@ describe('Inventory Valuation — Fase A6.1 (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

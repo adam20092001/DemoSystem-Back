@@ -1,6 +1,8 @@
 # R2 — Stock por almacén y ubicación: plan de migración
 
-Estado: **R2-A1 (EXPAND) implementado**, sin commit. Las etapas siguientes **no están iniciadas** ni autorizadas.
+Estado: **R2-A1 (EXPAND) integrada en `main`** (PR #53). **R2-ACT implementado en código en la rama
+`feat/r2-act-stock-location-activation`, sin commit/push/PR y NO aplicado a `pos_db` ni a `pos_db_test`** (ver §5).
+R2-B y R2-C **no están iniciadas** ni autorizadas.
 Contrato de API de lo ya implementado: [warehouses-locations-api.md](warehouses-locations-api.md).
 
 ## 1. Estrategia: EXPAND → ACTIVAR
@@ -10,8 +12,8 @@ revisar y revertir cada paso, se separa en etapas:
 
 | Etapa | Contenido | Estado |
 |---|---|---|
-| **R2-A1 — EXPAND** | Estructura aditiva (tablas y columnas nullable), catálogo de almacenes/ubicaciones, `MAIN`/`DEFAULT`. **Inerte** para el inventario. | **Implementado (esta rama)** |
-| **R2-ACT** | Backfill de existencias a `MAIN/DEFAULT`, invariante `stockCurrent = Σ saldos`, motor por ubicación (`StockMovementEngine`), fixtures E2E. | No iniciado |
+| **R2-A1 — EXPAND** | Estructura aditiva (tablas y columnas nullable), catálogo de almacenes/ubicaciones, `MAIN`/`DEFAULT`. **Inerte** para el inventario. | **Integrado en `main` (PR #53)** |
+| **R2-ACT** | Backfill de existencias a `MAIN/DEFAULT`, invariante `stockCurrent = Σ saldos` (triggers diferidos), motor por ubicación (`StockMovementEngine`), orden global de bloqueos, fixtures E2E. | **Implementado en la rama `feat/r2-act-stock-location-activation` (sin commit; no aplicado a bases existentes)** |
 | **R2-B** | `locationId` opcional en inventario, recepciones y ventas; anulaciones; ubicaciones inactivas. | No iniciado |
 | **R2-C** | Transferencias, consultas por ubicación, reconciliación. | No iniciado |
 
@@ -99,26 +101,283 @@ de despliegue debe ejecutar (solo lectura) y documentar:
 4. Conteo de `inventory_movements` y suma de `inventory_valuations.total_cost` (para compararlos al final).
 5. Respaldo `pg_dump` previo y ensayo contra un **clon restaurado**, nunca directamente contra producción.
 
-## 5. Diseño previsto de R2-ACT (pendiente de aprobación; sin implementar)
+## 5. R2-ACT — activación del inventario por ubicación (implementado en código; NO aplicado a ninguna base existente)
 
-- Backfill: una fila de `stock_balances` por producto con `stock_current > 0`, `quantity = stock_current`, ubicación
-  `DEFAULT` de `MAIN`, dentro de **una transacción explícita** (`BEGIN/COMMIT`, como R2-A1: la atomicidad de Prisma
-  solo está observada, no garantizada por su documentación); verificaciones posteriores que abortan con
-  `RAISE EXCEPTION` si algún producto no cuadra o cambian el conteo de movimientos / la suma de valorización.
-- Invariante `stockCurrent = Σ StockBalance.quantity`, mantenida solo por `StockMovementEngine`; trigger diferido de
-  verificación **(patrón nuevo en el repositorio: requiere aprobación explícita)**.
-- Reglas de ubicaciones inactivas (propuesta I3): toda entrada o salida sobre ubicación/almacén inactivo responde 409.
-- CHECK de corte opcional (`location_id IS NOT NULL OR created_at <= <instante de la migración>`) — requiere aprobación.
-- Migrar los fixtures E2E que escriben `stockCurrent` directamente (≈ 19 archivos) a un helper común.
-- Orden de bloqueo uniforme entre productos en recepciones (hallazgo C4 del plan original).
+Rama `feat/r2-act-stock-location-activation`, base `main` en `1b54c61` (R2-A1 ya integrada, PR #53). **Sin commit,
+push ni PR.** La migración `20261031000000_activate_stock_by_location` **no se ha aplicado** en `pos_db` ni en
+`pos_db_test`; solo se probó en PostgreSQL 16 descartables. Decisiones aprobadas: D1 (orden por `productId` en
+recepciones y anulaciones), D2 (CHECK `NOT VALID` + triggers diferidos), D3 (contrato de respuesta de movimientos
+intacto), D4 (reglas de desactivación de A1 intactas; se revisan en R2-B).
 
-### Decisiones abiertas que condicionan R2-ACT
-1. ¿Se aprueba el trigger diferido y el CHECK de corte?
-2. ¿Se confirma la regla de ubicaciones inactivas (I3)?
-3. Anulación de ventas/recepciones históricas (sin ubicación) → devuelven/retiran de `DEFAULT`.
-4. Endpoint para designar otro almacén predeterminado (hoy inexistente a propósito: `MAIN` no puede desactivarse).
+### 5.1 Qué cambia
 
-## 6. Riesgos y límites conocidos de R2-A1
+- **Estructura activada:** `stock_balances` deja de estar vacía y pasa a ser la fuente por ubicación; `Product.stockCurrent`
+  sigue siendo la cantidad **consolidada** y la única que leen los reportes, el dashboard y la validación de ventas.
+- **Invariante:** `products.stock_current = Σ stock_balances.quantity` para cada producto, verificada **en el COMMIT** por
+  triggers (§5.3). `StockMovementEngine` sigue siendo el **único escritor** de stock.
+- **Ubicación predeterminada:** ningún endpoint permite todavía elegir ubicación. Toda operación usa `MAIN/DEFAULT`
+  (resuelta como "la ubicación `DEFAULT` del almacén predeterminado"). La selección explícita es R2-B.
+- **Movimientos nuevos** persisten `location_id`, `location_previous_stock` y `location_new_stock`. Las líneas de venta
+  inventariables y las líneas de recepción persisten `location_id`; las líneas de servicio, no.
+- **Contrato público intacto (D3):** `SafeInventoryMovement` y las respuestas de ventas/recepciones no exponen campos de
+  ubicación. La auditoría de inventario añade `locationId` a su lista blanca de metadatos.
+
+### 5.2 Orden global de bloqueos (verificado en PostgreSQL 16.15 y con HTTP real)
+
+```
+1. documento (venta / cotización / factura y sus líneas / recepción), cuando la operación lo bloquea
+2. Warehouse   FOR SHARE   (ids ascendentes)
+3. WarehouseLocation FOR SHARE   (ids ascendentes)
+4. Product     FOR UPDATE  (ascendente por productId; lo toma el motor, y la venta antes de aplicar)
+5. fila de StockBalance FOR UPDATE + INSERT … ON CONFLICT DO UPDATE
+6. capas posteriores (valorización, contabilidad)
+```
+
+- Nadie adquiere por primera vez un lock de almacén/ubicación **después** de uno de producto: `SalesService`
+  (venta directa, conversión de cotización y anulación), `PurchaseReceiptsService` (recepción y anulación) llaman a
+  `StockMovementEngine.lockLocationsShared()` **antes** de bloquear productos; el motor repite el bloqueo (idempotente).
+- El catálogo (A1) toma el lock **exclusivo** de almacén/ubicación al desactivar, al inicio de su transacción y sin tomar
+  nada de nivel inferior. El motor **nunca** usa `FOR UPDATE` sobre almacén o ubicación (con `FOR UPDATE` el spike produjo
+  deadlock real).
+- D1: recepciones y anulaciones de recepción procesan los productos en orden ascendente de `productId` (desempate por id
+  de línea). Antes, el orden dependía del id de la línea de factura: dos recepciones con los mismos productos en orden
+  inverso podían producir un **deadlock** (hallazgo C4, preexistente e intermitente; medido en §5.7).
+- Una ubicación o un almacén inactivo responde 409 a **cualquier** movimiento, incluidas las reversas históricas.
+
+### 5.3 Migración `20261031000000_activate_stock_by_location`
+
+Una sola transacción explícita (`BEGIN`/`COMMIT`):
+
+1. **Precondiciones** (falla cerrada, `RAISE EXCEPTION`): `MAIN` existe, está activo y es predeterminado; su `DEFAULT` existe
+   y está activa; `stock_balances` vacía; ningún stock negativo; ningún movimiento, línea de venta ni línea de recepción
+   con ubicación.
+2. `LOCK TABLE products, stock_balances, inventory_movements IN SHARE ROW EXCLUSIVE MODE`: un backend antiguo que escriba
+   durante la migración espera y, después, **falla cerrado** (el trigger rechaza el COMMIT y el CHECK rechaza el movimiento
+   sin ubicación).
+3. **Backfill:** una fila por producto con `stock_current > 0` hacia `MAIN/DEFAULT`, cantidad idéntica (Decimal(14,3)).
+   Productos con stock 0: **sin fila** ("sin fila" = 0). No se toca `products`, costos, valorización ni movimientos.
+4. **Conciliación antes del COMMIT:** por producto (`stock_current = Σ saldos`), suma global, conteo de productos y de
+   movimientos, suma de `inventory_valuations.total_cost`, ningún movimiento con ubicación y ningún saldo fuera de
+   `MAIN/DEFAULT`.
+5. **Triggers diferidos** (`CREATE CONSTRAINT TRIGGER … DEFERRABLE INITIALLY DEFERRED`, `FOR EACH ROW`), función
+   `r2_assert_product_stock_matches_balances()`: productos (`INSERT` con stock ≠ 0, `UPDATE OF stock_current`) y saldos
+   (`INSERT`, `UPDATE` de cantidad o producto —se revisan `OLD` y `NEW`—, `DELETE`). Dentro de la transacción el estado
+   puede ser incoherente; al COMMIT debe cuadrar. Coste medido ≈ 65 µs por disparo (una venta de 20 líneas ≈ 40 disparos
+   ≈ 2,6 ms). No hay deduplicación (evita un hueco con `SET CONSTRAINTS … IMMEDIATE`).
+6. `CHECK (location_id IS NOT NULL) NOT VALID` en `inventory_movements`: los movimientos **nuevos** exigen ubicación; los
+   históricos (NULL) no se validan ni se modifican. `VALIDATE CONSTRAINT` fallará mientras existan históricos con NULL.
+
+**Reversa de operaciones históricas:** una venta o recepción previa a ACT no tiene ubicación; su anulación crea un
+movimiento **nuevo** con ubicación `MAIN/DEFAULT` (nunca modifica el movimiento histórico). Una operación nueva se revierte
+a la ubicación del movimiento original.
+
+### 5.4 Restricciones y límites conocidos
+
+- `session_replication_role = replica`, `ALTER TABLE … DISABLE TRIGGER` y `TRUNCATE` eluden los triggers; requieren
+  privilegios elevados y se mitigan con roles de base de datos, no con el trigger. Ninguna prueba los usa.
+- El trigger **no puede detectar una pérdida de actualización**: la protección frente a ella es el `FOR UPDATE` del
+  producto en el motor.
+- Como consecuencia del `CHECK NOT VALID`, cualquier `UPDATE` de un movimiento histórico (location_id NULL) es rechazado
+  (ningún código actual actualiza movimientos).
+- El límite de 5 s de las transacciones interactivas de Prisma **no interrumpe una consulta bloqueada por un lock**
+  (medido: una venta bloqueada 7 s por otra sesión responde 500 "Transaction already closed" solo cuando el lock se libera,
+  sin efectos parciales). Preexistente; no se introdujeron `lock_timeout` ni reintentos.
+- Una ubicación que ya tiene movimientos no puede desactivarse (D4, sin cambios): como todo movimiento nuevo lleva
+  ubicación, `MAIN/DEFAULT` quedan permanentemente activas.
+- Mensaje de error de Prisma Migrate: ante un fallo, Prisma muestra "current transaction is aborted" en lugar de la
+  excepción original; la causa (`R2-ACT: …`) está en el log del servidor PostgreSQL.
+
+### 5.5 Procedimiento de activación coordinada (no ejecutado)
+
+1. Verificaciones de solo lectura en la base destino (§4) y **respaldo `pg_dump`**; ensayo sobre un **clon restaurado**.
+2. Ventana sin escritura de inventario: detener el backend actual.
+3. Aplicar `prisma migrate deploy` (esta migración) **antes** de iniciar el backend nuevo. Un backend R2-ACT contra una base
+   sin migrar rechazaría salidas por falta de saldo por ubicación, y un backend anterior contra una base migrada falla
+   cerrado: nunca arrancar un backend de versión distinta a la del esquema.
+4. Comprobar: `SELECT count(*) FROM products p WHERE p.stock_current <> COALESCE((SELECT SUM(quantity) FROM stock_balances
+   WHERE product_id = p.id),0)` debe ser 0; 5 triggers `r2_stock_check_*`; CHECK `inventory_movements_location_required_after_act`
+   con `convalidated = false`.
+5. Iniciar el backend R2-ACT y ejecutar la prueba de humo (venta, recepción y anulación sobre un producto de prueba).
+
+**Plan de respaldo y recuperación:** si la migración falla, Prisma la deja registrada como fallida y revierte todo (no queda
+ningún objeto parcial): corregir la causa, ejecutar `prisma migrate resolve --rolled-back 20261031000000_activate_stock_by_location`
+y repetir `deploy` (probado). Si la migración tuvo éxito pero se decide volver atrás, **restaurar el respaldo previo** (Prisma
+no tiene "down"); mientras no haya operaciones posteriores a la migración, el respaldo no pierde datos.
+
+### 5.6 Decisiones abiertas
+
+1. R2-B: ubicación explícita en inventario, recepciones y ventas; revisar las reglas de desactivación (D4).
+2. Endpoint para designar otro almacén predeterminado (hoy inexistente a propósito).
+3. Si algún día se desea `VALIDATE CONSTRAINT`, hay que decidir qué hacer con los movimientos históricos sin ubicación
+   (hoy no se reescriben).
+
+### 5.7 Verificación realizada (solo PostgreSQL 16.15 descartables)
+
+Alcance y límites: contenedores `postgres:16-alpine` propios y efímeros (`tmpfs`), con la guardia E2E del repositorio
+(`.env.test.local`, marcador de base descartable). **Nunca** se conectó a `pos_db` ni `pos_db_test`, no se aplicó
+ninguna migración ni seed a ellas y no se desplegó. Todo se verificó una sola vez por escenario salvo donde se indica.
+
+**Migración (SQL real, también vía `prisma migrate deploy`):**
+
+| Escenario | Resultado |
+|---|---|
+| Base limpia (33 migraciones + ACT) | Aplica; 0 saldos; 5 triggers; CHECK sin validar; segundo `deploy` sin pendientes |
+| Base con datos de ejemplo (decimales, stock 0, producto no inventariable) | Saldos = stock por producto; productos con stock 0 sin fila; sin deriva (`migrate diff`, exit 0) |
+| **Base poblada con el código anterior** (5 productos; 11 movimientos; 4 valorizaciones; 3 ventas, 1 anulada; 3 recepciones, 1 anulada) | Productos 5→5, Σ stock 23.875→23.875, movimientos 11→11 (todos NULL), valorización 75.00→75.00, 3 saldos (7.125 / 9.750 / 7.000) en `MAIN/DEFAULT`; sin deriva |
+| Error inyectado al final y a mitad de la migración | Rollback total (sin saldos, función, triggers ni CHECK); migración registrada como no finalizada |
+| Precondiciones incumplidas (MAIN inactivo; saldos preexistentes; movimiento con ubicación) | Abortan con la excepción propia y sin efectos |
+| Recuperación | `migrate resolve --rolled-back` + `deploy` tras corregir la causa: éxito |
+| Escritor del backend anterior durante la migración | Esperó el `LOCK TABLE`; después falló cerrado (trigger y CHECK) |
+
+**Triggers y CHECK:** T01–T16 y C1–C8 (consistente en cualquier orden, solo consolidado, solo saldo, `INSERT`/`UPDATE`/`DELETE`
+de saldo, cambio de `product_id` revisando `OLD` y `NEW`, varios movimientos por transacción, rollback, `SET CONSTRAINTS ALL
+IMMEDIATE`; históricos NULL legibles, nuevos NULL rechazados, `VALIDATE CONSTRAINT` falla por diseño). Límites
+comprobados: `session_replication_role = replica` y `TRUNCATE` los eluden.
+
+**Concurrencia HTTP/Prisma real** (`test/stock-location-concurrency.e2e-spec.ts`, 13 pruebas; mismo archivo antes y
+después del cambio, con `deadlock_timeout=200ms` y `log_lock_waits=on` en la base descartable):
+
+| Escenario | Antes (código de `main`) | Después |
+|---|---|---|
+| 1a venta vs. desactivar MAIN y DEFAULT | venta 201; desactivaciones 409 | igual |
+| 1b/2b motor real vs. desactivar ubicación/almacén (orden de llegada alternado, 12 y 10 rondas) | no aplica (sin ubicaciones) | exclusión mutua en todas las rondas: o se mueve el stock (y la desactivación recibe 409) o se desactiva (y el movimiento recibe 409); nunca ambos |
+| 2a recepción vs. desactivar MAIN | recepción 201; desactivación 409 | igual |
+| 3 / 3b dos salidas de 7 sobre stock 10 (venta y manual) | 201 + 409; stock 3 | igual |
+| **4 recepciones con los mismos 2 productos en orden inverso** | **2 de 6 ejecuciones (×80 recepciones): 39 respondieron 500 por `deadlock detected` (78 deadlocks en el log)**; 4 ejecuciones sin fallos | **6 ejecuciones × 80 recepciones: 0 fallos y 0 deadlocks en el log** |
+| 5 venta + recepción sobre el mismo producto (12 rondas) | todas 201; stock exacto | igual |
+| 6a anular venta + otra venta + salida manual | 200/201/201; stock exacto | igual |
+| 6b anular recepción vs. venta que consume ese stock | exactamente una prospera | igual |
+| 7 venta de dos productos con el segundo insuficiente | 409; sin escrituras parciales; locks liberados | igual |
+| 8 lock de producto retenido 7 s (> 5 s de la transacción de Prisma) | 500 tras ~6,7 s (al liberarse el lock); sin efectos parciales; el sistema se recupera | igual |
+
+El deadlock del escenario 4 es **preexistente e intermitente** (no se reprodujo en 4 de 6 ejecuciones del comportamiento
+anterior); D1 lo elimina por construcción (orden determinista), no por reintentos. No se agregaron reintentos ni
+`lock_timeout`. Las pruebas 1b/2b y 9 solo se ejecutan con R2-ACT aplicada (se saltan solas con un aviso en caso contrario).
+
+**Datos históricos reales** (`test/manual-r2-act/`; **no forman parte de `npm run test:e2e`**: su extensión es
+`.manual-spec.ts` y el `testRegex` ordinario es `.e2e-spec.ts$`). Se comprobó: anular una **venta histórica** reingresa a
+`MAIN/DEFAULT` con movimientos nuevos con ubicación sin tocar los históricos; anular una **recepción histórica** retira de
+`MAIN/DEFAULT`; una venta nueva persiste la ubicación en la línea inventariable (no en el servicio); stock insuficiente sigue
+respondiendo 409 sin efectos parciales; la conciliación global se mantiene. No pueden ser pruebas E2E normales porque el
+`CHECK NOT VALID` impide insertar movimientos históricos (sin ubicación) en una base ya activada, y desactivarlo sería un
+bypass. El procedimiento completo y reproducible está en §5.8.
+
+**Regresión:** unitarias 143 suites / 4234 pruebas; E2E completa 55 suites / 1862 pruebas sin fallos (en una base
+descartable nueva, la línea base de `main` fue 54 suites / 1848 pruebas sin fallos); scripts 86 + 11 de integración; `build`
+correcto. Las "13 pruebas fallando" que se registraron antes en `pos_db_test` compartida no aparecen en una base descartable
+limpia (dependían del estado acumulado de esa base).
+
+### 5.8 Procedimiento reproducible: pruebas con datos históricos reales (manual, solo base descartable)
+
+Reproduce **33 migraciones → datos históricos creados con el código anterior → migración 34 (R2-ACT) → operaciones con el
+código nuevo**. Verificado de punta a punta (ver el resultado esperado de cada etapa). Los specs de `test/manual-r2-act/`
+**no existen en `main`**: el código anterior se obtiene con un **worktree aislado** del commit base
+`1b54c615b983bd5e3fcf644edea753be9dfba8bf` (no se usa `git stash`, no se toca `main` ni la rama actual) y solo se le copia el
+spec del paso 1.
+
+**Seguridad.** Todos los comandos de base de datos pasan por la guardia E2E (`scripts/lib/test-db-guard.js`): rechazan
+cualquier destino que no sea una base **local, con nombre `pos_db_test_<sufijo>`, usuario `pos_test_user`, puerto distinto de
+5432 y con marcador de base descartable**. `pos_db` y `pos_db_test` nunca son destinos válidos de este procedimiento. No
+ejecutes `prisma migrate` ni `psql` directamente con una URL que no sea la de la base descartable de esta guía.
+
+Los comandos son de Git Bash (Windows); en Linux/macOS cambia solo el enlace de `node_modules` (`ln -s`).
+`REPO` es la raíz de la rama `feat/r2-act-stock-location-activation`.
+
+**0. Preparación (una vez)**
+
+```bash
+cd <REPO>
+export REPO="$(pwd)"
+export BASE="$REPO/../DemoSystem-Back-r2act-base"          # worktree del código anterior
+export DB=pos_db_test_r2act_hist                            # patrón obligatorio pos_db_test_<sufijo>
+export PW=<clave-local-cualquiera>
+export TOKEN=$(node -e "console.log(require('crypto').randomBytes(16).toString('hex'))")
+
+# PostgreSQL 16 descartable propio (puerto alto; 5432 está prohibido y 5433 es el de pos_db_test)
+MSYS_NO_PATHCONV=1 docker run -d --name r2act_hist_pg --label demosystem.r2act.hist=1 \
+  -e POSTGRES_USER=pos_test_user -e POSTGRES_PASSWORD=$PW -e POSTGRES_DB=$DB \
+  -p 55443:5432 --tmpfs /var/lib/postgresql/data postgres:16-alpine
+
+# Worktree del commit base (33 migraciones) y enlace al node_modules de la rama
+git worktree add --detach "$BASE" 1b54c615b983bd5e3fcf644edea753be9dfba8bf
+powershell -NoProfile -Command "New-Item -ItemType Junction -Path '$(cygpath -w "$BASE")\node_modules' -Target '$(cygpath -w "$REPO")\node_modules'"
+cp "$REPO/.env.test" "$BASE/.env.test"
+
+# Autorización EXACTA de la base descartable, idéntica en ambos directorios (archivo no versionado)
+for d in "$REPO" "$BASE"; do
+  printf 'DATABASE_URL=postgresql://pos_test_user:%s@localhost:55443/%s?schema=public\nE2E_DISPOSABLE_TARGET=localhost:55443/%s\nE2E_DISPOSABLE_TOKEN=%s\n' \
+    "$PW" "$DB" "$DB" "$TOKEN" > "$d/.env.test.local"
+done
+```
+
+**Etapa A — base histórica (código anterior, 33 migraciones, sin R2-ACT)**
+
+```bash
+cd "$BASE"
+npm run db:test:mark-disposable     # valida el destino y marca la base (solo si está vacía)
+npm run prisma:test:deploy          # debe decir "33 migrations found" (la guardia valida el destino antes)
+npm run prisma:test:seed
+mkdir -p test/manual-r2-act && cp "$REPO/test/manual-r2-act/populate-historical.manual-spec.ts" test/manual-r2-act/
+npx jest --config ./test/jest-e2e.json --testRegex '.*\.manual-spec\.ts$' --runInBand populate-historical
+cp test/manual-r2-act/.state.json "$REPO/test/manual-r2-act/.state.json"
+```
+
+La salida debe incluir `[e2e-db-guard] destino verificado: DISPOSABLE localhost:55443/pos_db_test_r2act_hist` y `Tests: 1 passed`.
+Evidencia a guardar (solo lectura, **solo** contra el contenedor descartable):
+
+```bash
+Q(){ docker exec r2act_hist_pg psql -U pos_test_user -d "$DB" -At -c "$1"; }
+Q "select 'productos='||count(*)||' stock='||sum(stock_current) from products"
+Q "select 'movs='||count(*)||' sin_ubicacion='||count(*) filter (where location_id is null) from inventory_movements"
+Q "select 'valoriz='||count(*)||' costo='||sum(total_cost) from inventory_valuations"
+Q "select 'saldos='||count(*) from stock_balances"
+```
+
+Resultado esperado: `productos=5 stock=23.875`, `movs=11 sin_ubicacion=11`, `valoriz=4 costo=75.00`, `saldos=0`.
+`.state.json` contiene solo ids de esta base (sin credenciales) y está **ignorado por git**
+(`test/manual-r2-act/.state.json`); los pasos B y C lo leen desde `REPO`.
+
+**Etapa B — activación (código R2-ACT, migración 34)**
+
+```bash
+cd "$REPO"
+npm run prisma:test:deploy          # debe decir "34 migrations found" y aplicar SOLO 20261031000000_activate_stock_by_location
+# repetir las consultas Q(): ahora saldos=3 suma=23.875 (7.125 / 9.750 / 7.000, todos en MAIN/DEFAULT) y
+# productos, stock, movimientos (11, todos sin ubicación) y valorización (4, 75.00) idénticos a la Etapa A.
+Q "select 'descuadres='||count(*) from products p where p.stock_current <> coalesce((select sum(quantity) from stock_balances b where b.product_id=p.id),0)"   # 0
+
+# Deriva: la URL es la de la base descartable; revisa que el destino impreso sea ...:55443/pos_db_test_r2act_hist
+U="$(grep ^DATABASE_URL .env.test.local | cut -d= -f2-)"; echo "destino: ${U#*@}"
+DATABASE_URL="$U" npx prisma migrate diff --from-url "$U" --to-schema-datamodel prisma/schema.prisma --exit-code   # "No difference detected."
+```
+
+**Etapa C — verificación con el backend nuevo**
+
+```bash
+cd "$REPO"
+npx jest --config ./test/jest-e2e.json --testRegex '.*\.manual-spec\.ts$' --runInBand verify-historical
+```
+
+Esperado: `Tests: 7 passed` (estado migrado; anulación de venta histórica; anulación de recepción histórica; venta nueva;
+409 por stock insuficiente; anulación de venta solo de servicios; conciliación global). Comprueba que los movimientos y
+valorizaciones históricos no se reescriben.
+
+**Limpieza (obligatoria; el orden importa)**
+
+```bash
+cd "$REPO"
+# 1) Primero el enlace: NUNCA dejar que `git worktree remove` recorra la junction y borre node_modules
+powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$BASE")\node_modules').Delete()"
+git worktree remove --force "$BASE" && git worktree prune
+docker rm -f r2act_hist_pg
+rm -f "$REPO/.env.test.local" "$REPO/test/manual-r2-act/.state.json"   # solo estos dos archivos
+```
+
+`.state.json` solo se necesita entre las Etapas A–C; es seguro borrarlo, y se regenera ejecutando de nuevo la Etapa A.
+Limitación: el paso A debe ejecutarse una sola vez por base; para repetir el escenario se crea otra base descartable
+(`DB` y contenedor nuevos) porque la migración 34 es irreversible sin restaurar un respaldo.
+
+## 6. Riesgos y límites conocidos de R2-A1 (los puntos sobre inercia quedan superados por R2-ACT, §5)
 
 - **El invariante "todo almacén tiene su `DEFAULT`" lo garantiza el servicio**, no un trigger (los triggers no están
   aprobados). Un `INSERT` manual en `warehouses` sin ubicación la deja sin `DEFAULT`; la API no lo permite.

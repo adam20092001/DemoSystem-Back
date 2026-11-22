@@ -23,6 +23,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Suite dedicada de administración de secuencias (Fase 10, Bloque D):
@@ -375,7 +376,7 @@ describe('Configuration — Document Sequence Administration (Bloque 10, D) (e2e
     });
     unitId = unit.id;
 
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: 'E2ECFGSEQ-P1',
         name: 'Producto E2E Config Secuencias',
@@ -460,7 +461,7 @@ describe('Configuration — Document Sequence Administration (Bloque 10, D) (e2e
         await prisma.inventoryMovement.deleteMany({
           where: { productId: { in: createdProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }

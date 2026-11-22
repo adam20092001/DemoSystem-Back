@@ -19,6 +19,11 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import {
+  createProductRow,
+  deleteProductRows,
+  setProductLocationBalances,
+} from './helpers/stock-fixtures';
 
 const NON_EXISTENT_UUID = '00000000-0000-0000-0000-000000000000';
 const ROLE_FIXTURES = [
@@ -64,7 +69,7 @@ async function inventorySnapshot(prisma: PrismaClient): Promise<string> {
   return rows[0].h;
 }
 
-describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
+describe('Almacenes y ubicaciones — R2-A1 (catálogo) y R2-ACT (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaClient;
   let adminCookie: string;
@@ -128,7 +133,7 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
         allowDecimal: true,
       },
     });
-    const product = await prisma.product.create({
+    const product = await createProductRow(prisma, {
       data: {
         sku: `E2E-WH-${RUN}-${(counter += 1)}`,
         name: 'Producto e2e almacenes',
@@ -186,16 +191,15 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
   afterAll(async () => {
     try {
       if (createdProductIds.length > 0) {
-        await prisma.stockBalance.deleteMany({
-          where: { productId: { in: createdProductIds } },
-        });
+        // Los saldos se eliminan junto con el producto (deleteProductRows):
+        // borrar solo los saldos rompería stockCurrent = Σ saldos.
         await prisma.inventoryMovement.deleteMany({
           where: { productId: { in: createdProductIds } },
         });
         await prisma.auditLog.deleteMany({
           where: { entityId: { in: createdProductIds } },
         });
-        await prisma.product.deleteMany({
+        await deleteProductRows(prisma, {
           where: { id: { in: createdProductIds } },
         });
       }
@@ -270,13 +274,12 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
       expect(body.data.filter((row) => row.isDefault)).toHaveLength(1);
     });
 
-    it('la migración no dejó saldos ni movimientos con ubicación', async () => {
-      expect(await prisma.stockBalance.count()).toBe(0);
-      expect(
-        await prisma.inventoryMovement.count({
-          where: { locationId: { not: null } },
-        }),
-      ).toBe(0);
+    it('R2-ACT: el consolidado de cada producto coincide con la suma de sus saldos por ubicación', async () => {
+      const mismatches = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT p.id FROM products p
+        WHERE p.stock_current <> COALESCE(
+          (SELECT SUM(b.quantity) FROM stock_balances b WHERE b.product_id = p.id), 0)`);
+      expect(mismatches).toHaveLength(0);
     });
   });
 
@@ -891,9 +894,9 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
       const warehouse = await createWarehouse();
       const location = await createLocation(warehouse.id);
       const productId = await createProductFixture();
-      await prisma.stockBalance.create({
-        data: { productId, locationId: location.id, quantity: '2.000' },
-      });
+      await setProductLocationBalances(prisma, productId, [
+        { locationId: location.id, quantity: '2.000' },
+      ]);
 
       expect(
         (
@@ -917,10 +920,9 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
       expect(still.status).toBe('ACTIVE');
 
       // Un saldo en cero no es stock: deja de bloquear.
-      await prisma.stockBalance.updateMany({
-        where: { locationId: location.id },
-        data: { quantity: '0.000' },
-      });
+      await setProductLocationBalances(prisma, productId, [
+        { locationId: location.id, quantity: '0.000' },
+      ]);
       expect(
         (
           await http()
@@ -1164,9 +1166,9 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
   });
 
   // ==========================================================================
-  // INERCIA respecto al inventario (condición crítica de R2-A1)
+  // R2-ACT: el inventario opera por ubicación (sobre MAIN/DEFAULT)
   // ==========================================================================
-  describe('el inventario permanece intacto', () => {
+  describe('el inventario por ubicación (R2-ACT)', () => {
     it('crear/editar/desactivar catálogo no cambia cantidades, movimientos ni saldos', async () => {
       await createProductFixture('7.000');
       const before = await inventorySnapshot(prisma);
@@ -1187,9 +1189,8 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
       expect(await inventorySnapshot(prisma)).toBe(before);
     });
 
-    it('las operaciones de inventario existentes siguen igual: stock consolidado, sin ubicación y sin saldos por ubicación', async () => {
+    it('las operaciones de inventario registran MAIN/DEFAULT, mantienen el saldo por ubicación y NO cambian el contrato de respuesta', async () => {
       const productId = await createProductFixture();
-      const balancesBefore = await prisma.stockBalance.count();
 
       const initial = await http()
         .post('/api/v1/inventory/initial-balances')
@@ -1212,6 +1213,14 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
         .send({ productId, quantity: '999.000', reason: 'No hay stock' });
       expect(tooMuch.status).toBe(409);
 
+      // D3: la respuesta de movimientos NO expone campos de ubicación.
+      for (const response of [initial, entry, exit]) {
+        const body = response.body as Record<string, unknown>;
+        expect(body).not.toHaveProperty('locationId');
+        expect(body).not.toHaveProperty('locationPreviousStock');
+        expect(body).not.toHaveProperty('locationNewStock');
+      }
+
       const product = await prisma.product.findUniqueOrThrow({
         where: { id: productId },
       });
@@ -1222,12 +1231,25 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
         orderBy: { createdAt: 'asc' },
       });
       expect(movements).toHaveLength(3);
-      for (const movement of movements) {
-        expect(movement.locationId).toBeNull();
-        expect(movement.locationPreviousStock).toBeNull();
-        expect(movement.locationNewStock).toBeNull();
-      }
-      expect(await prisma.stockBalance.count()).toBe(balancesBefore);
+      const expected: [string, string][] = [
+        ['0.000', '10.000'],
+        ['10.000', '15.000'],
+        ['15.000', '12.000'],
+      ];
+      movements.forEach((movement, index) => {
+        expect(movement.locationId).toBe(mainDefaultLocationId);
+        expect(movement.locationPreviousStock?.toFixed(3)).toBe(
+          expected[index][0],
+        );
+        expect(movement.locationNewStock?.toFixed(3)).toBe(expected[index][1]);
+      });
+
+      const balances = await prisma.stockBalance.findMany({
+        where: { productId },
+      });
+      expect(balances).toHaveLength(1);
+      expect(balances[0].locationId).toBe(mainDefaultLocationId);
+      expect(balances[0].quantity.toFixed(3)).toBe('12.000');
 
       const stock = await http()
         .get(`/api/v1/inventory/products/${productId}/stock`)
@@ -1235,36 +1257,65 @@ describe('Almacenes y ubicaciones — R2-A1 EXPAND (e2e)', () => {
       expect(stock.status).toBe(200);
     });
 
-    it('un saldo por ubicación no influye en la aprobación ni el rechazo de operaciones', async () => {
-      const productId = await createProductFixture('2.000');
-      // Saldo por ubicación "inventado" que contradice el consolidado:
-      await prisma.stockBalance.create({
-        data: {
-          productId,
-          locationId: mainDefaultLocationId,
-          quantity: '100.000',
-        },
-      });
-      // El consolidado (2) manda: una salida de 5 falla aunque el saldo diga 100.
-      const exit = await http()
+    it('la insuficiencia se evalúa POR UBICACIÓN: el consolidado alcanza pero el saldo de MAIN/DEFAULT no → 409, sin escrituras', async () => {
+      const productId = await createProductFixture();
+      const warehouse = await createWarehouse();
+      const other = await createLocation(warehouse.id);
+      // Coherente (consolidado 10 = 5 + 5), repartido en dos ubicaciones.
+      await setProductLocationBalances(prisma, productId, [
+        { locationId: mainDefaultLocationId, quantity: '5.000' },
+        { locationId: other.id, quantity: '5.000' },
+      ]);
+
+      const tooMuchForLocation = await http()
         .post('/api/v1/inventory/exits')
         .set('Cookie', adminCookie)
-        .send({ productId, quantity: '5.000', reason: 'Debe fallar' });
-      expect(exit.status).toBe(409);
-      // Y una salida de 1 pasa sin tocar el saldo por ubicación.
-      const ok = await http()
+        .send({ productId, quantity: '7.000', reason: 'Excede la ubicación' });
+      expect(tooMuchForLocation.status).toBe(409);
+      expect(
+        (
+          await prisma.product.findUniqueOrThrow({ where: { id: productId } })
+        ).stockCurrent.toFixed(3),
+      ).toBe('10.000');
+
+      const fits = await http()
         .post('/api/v1/inventory/exits')
         .set('Cookie', adminCookie)
-        .send({ productId, quantity: '1.000', reason: 'Debe pasar' });
-      expect(ok.status).toBe(201);
-      const balance = await prisma.stockBalance.findFirstOrThrow({
+        .send({ productId, quantity: '5.000', reason: 'Cabe en la ubicación' });
+      expect(fits.status).toBe(201);
+      const balances = await prisma.stockBalance.findMany({
         where: { productId },
+        orderBy: { quantity: 'asc' },
       });
-      expect(balance.quantity.toFixed(3)).toBe('100.000');
+      expect(balances.map((b) => b.quantity.toFixed(3))).toEqual([
+        '0.000',
+        '5.000',
+      ]);
+      expect(
+        (
+          await prisma.product.findUniqueOrThrow({ where: { id: productId } })
+        ).stockCurrent.toFixed(3),
+      ).toBe('5.000');
+    });
+
+    it('una escritura directa que rompe stockCurrent = Σ saldos se rechaza al COMMIT (trigger diferido)', async () => {
+      const productId = await createProductFixture('2.000');
+      await expect(
+        prisma.product.update({
+          where: { id: productId },
+          data: { stockCurrent: '9.000' },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        prisma.stockBalance.updateMany({
+          where: { productId },
+          data: { quantity: '100.000' },
+        }),
+      ).rejects.toThrow();
       const product = await prisma.product.findUniqueOrThrow({
         where: { id: productId },
       });
-      expect(product.stockCurrent.toFixed(3)).toBe('1.000');
+      expect(product.stockCurrent.toFixed(3)).toBe('2.000');
     });
   });
 });

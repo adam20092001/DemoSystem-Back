@@ -38,6 +38,8 @@ import { SalesService } from './sales.service';
 const ACTOR_ID = 'actor-1';
 const CUSTOMER_ID = 'customer-1';
 const PRODUCT_ID = 'product-1';
+const DEFAULT_LOCATION_ID = '77777777-7777-4777-8777-777777777777';
+const OTHER_LOCATION_ID = '88888888-8888-4888-8888-888888888888';
 const PRODUCT_ID_2 = 'product-2';
 const QUOTE_ID = 'quote-1';
 const QUOTE_SELLER_ID = 'quote-seller-1';
@@ -389,7 +391,16 @@ function createSequenceServiceMock() {
 }
 
 function createEngineMock() {
-  return { apply: jest.fn<Promise<unknown>, [unknown, unknown]>() };
+  return {
+    apply: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    // R2-ACT: bloqueo previo de catálogo; null/undefined => ubicación DEFAULT.
+    lockLocationsShared: jest.fn(
+      (_tx: unknown, requested: ReadonlyArray<string | null | undefined>) =>
+        Promise.resolve(
+          requested.map((id) => id ?? '77777777-7777-4777-8777-777777777777'),
+        ),
+    ),
+  };
 }
 
 function createPaymentEngineMock() {
@@ -1622,6 +1633,69 @@ describe('SalesService', () => {
           (call) => (call[1] as { productId: string }).productId,
         );
         expect(calledProductIds).toEqual([PRODUCT_ID, PRODUCT_ID_2]);
+      });
+
+      it('R2-ACT: bloquea almacén y ubicación (lockLocationsShared) ANTES del lock de productos', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+          }),
+        );
+        await service.createDirect(validDirectInput);
+
+        expect(engine.lockLocationsShared).toHaveBeenCalledTimes(1);
+        expect(engine.lockLocationsShared.mock.calls[0][1]).toEqual([null]);
+        const catalogLockOrder =
+          engine.lockLocationsShared.mock.invocationCallOrder[0];
+        const productLockIndex = prisma.tx.$queryRaw.mock.calls.findIndex(
+          ([sql]) =>
+            (sql as { strings: string[] }).strings
+              .join('?')
+              .includes('FROM products p'),
+        );
+        expect(productLockIndex).toBeGreaterThanOrEqual(0);
+        expect(catalogLockOrder).toBeLessThan(
+          prisma.tx.$queryRaw.mock.invocationCallOrder[productLockIndex],
+        );
+      });
+
+      it('R2-ACT: persiste locationId (MAIN/DEFAULT resuelta) en la línea inventariable y lo pasa al motor', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            products: new Map([[PRODUCT_ID, makeProductRow()]]),
+          }),
+        );
+        await service.createDirect(validDirectInput);
+
+        const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { items: { create: { locationId: string | null }[] } };
+        };
+        expect(createArgs.data.items.create[0].locationId).toBe(
+          DEFAULT_LOCATION_ID,
+        );
+        expect(
+          (engine.apply.mock.calls[0][1] as { locationId?: string }).locationId,
+        ).toBe(DEFAULT_LOCATION_ID);
+      });
+
+      it('R2-ACT: una línea NO inventariable (servicio) no recibe ubicación ni mueve stock', async () => {
+        prisma.tx.$queryRaw.mockImplementation(
+          createQueryRawRouter({
+            customer: makeCustomerRow(),
+            products: new Map([
+              [PRODUCT_ID, makeProductRow({ isInventoryTracked: false })],
+            ]),
+          }),
+        );
+        await service.createDirect(validDirectInput);
+
+        const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+          data: { items: { create: { locationId: string | null }[] } };
+        };
+        expect(createArgs.data.items.create[0].locationId).toBeNull();
+        expect(engine.apply).not.toHaveBeenCalled();
       });
 
       it('la secuencia NV se obtiene solo después de toda la validación (elegibilidad de cliente falla antes)', async () => {
@@ -3695,6 +3769,41 @@ describe('SalesService', () => {
         };
         expect(call.referenceType).toBe('Sale');
         expect(call.referenceId).toBe(SALE_ID);
+      });
+
+      it('R2-ACT: reingresa a la ubicación del movimiento ORIGINAL y bloquea el catálogo antes de aplicar', async () => {
+        prisma.tx.inventoryMovement.findMany.mockResolvedValueOnce([
+          {
+            productId: PRODUCT_ID,
+            quantity: new Prisma.Decimal('1.000'),
+            locationId: OTHER_LOCATION_ID,
+          },
+        ]);
+        await service.cancel(validCancelInput);
+        expect(engine.lockLocationsShared).toHaveBeenCalledWith(prisma.tx, [
+          OTHER_LOCATION_ID,
+        ]);
+        const call = engine.apply.mock.calls[0][1] as { locationId?: string };
+        expect(call.locationId).toBe(OTHER_LOCATION_ID);
+        expect(
+          engine.lockLocationsShared.mock.invocationCallOrder[0],
+        ).toBeLessThan(engine.apply.mock.invocationCallOrder[0]);
+      });
+
+      it('R2-ACT: un movimiento histórico sin ubicación (NULL) se revierte a MAIN/DEFAULT (el motor resuelve el default)', async () => {
+        prisma.tx.inventoryMovement.findMany.mockResolvedValueOnce([
+          {
+            productId: PRODUCT_ID,
+            quantity: new Prisma.Decimal('1.000'),
+            locationId: null,
+          },
+        ]);
+        await service.cancel(validCancelInput);
+        expect(engine.lockLocationsShared).toHaveBeenCalledWith(prisma.tx, [
+          null,
+        ]);
+        const call = engine.apply.mock.calls[0][1] as { locationId?: string };
+        expect(call.locationId).toBeUndefined();
       });
 
       it('venta sin movimientos originales (todos los ítems no inventariables) igual se puede anular', async () => {

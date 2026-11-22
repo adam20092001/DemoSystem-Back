@@ -415,25 +415,32 @@ inicializadas (no hace falta reejecutar `db:seed`). Para asignarlo, `POST` o
 Matriz completa en [CLAUDE.md](CLAUDE.md) §5 y contrato para Angular en
 [docs/purchasing-role-api.md](docs/purchasing-role-api.md).
 
-## Almacenes y ubicaciones (R2-A1, solo estructura)
+## Almacenes y ubicaciones (R2-A1) e inventario por ubicación (R2-ACT)
 
-Primera etapa del futuro stock por ubicación: catálogo administrativo de
-**almacenes** y **ubicaciones** (`/api/v1/warehouses*`, ver Swagger, etiqueta
-*Warehouses*) y la estructura de base de datos que lo prepara (migración
-`20261030000000_add_warehouses_locations_expand`, aditiva). **Es inerte
-respecto al inventario**: `Product.stockCurrent` sigue siendo la única cantidad
-operativa, `StockMovementEngine`/ventas/recepciones no cambian, no hay backfill
-ni saldos por ubicación (`stock_balances` nace vacía) y el frontend **no** debe
-usar todavía ubicaciones en operaciones de stock (reservado a R2-ACT).
+**R2-A1** (integrada en `main`, PR #53): catálogo administrativo de **almacenes** y
+**ubicaciones** (`/api/v1/warehouses*`, ver Swagger, etiqueta *Warehouses*) y la
+estructura de base de datos que lo prepara (migración
+`20261030000000_add_warehouses_locations_expand`, aditiva). El almacén principal
+`MAIN` y su ubicación técnica `DEFAULT` los crea la migración; cada almacén nuevo
+nace con su `DEFAULT`. Roles: ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y
+SELLER leen; PURCHASING y ACCOUNTANT reciben 403. `MAIN` no puede desactivarse;
+`DEFAULT` no cambia de código ni se desactiva por separado; nada se elimina; solo
+se desactiva lo que no tiene ningún rastro (saldos, movimientos, líneas de venta o
+recepción).
 
-- La migración crea el almacén principal `MAIN` y su ubicación técnica
-  `DEFAULT` (solo catálogo, sin cantidades). Cada almacén nuevo se crea con su
-  `DEFAULT`.
-- Roles: ADMIN administra; ADMIN, WAREHOUSE, MANAGEMENT y SELLER leen;
-  PURCHASING y ACCOUNTANT reciben 403.
-- `MAIN` no puede desactivarse; `DEFAULT` no cambia de código ni se desactiva
-  por separado; nada se elimina; durante esta etapa solo se desactiva lo que no
-  tiene ningún rastro (saldos, movimientos, líneas de venta o recepción).
+**R2-ACT** (rama `feat/r2-act-stock-location-activation`; **implementado en código,
+sin commit/PR y NO aplicado a `pos_db` ni a `pos_db_test`**): la migración
+`20261031000000_activate_stock_by_location` hace el backfill de las existencias a
+`MAIN/DEFAULT`, instala triggers diferidos que exigen `stock_current = Σ saldos por
+ubicación` al COMMIT y un CHECK `NOT VALID` que obliga a los movimientos **nuevos** a
+llevar ubicación. `StockMovementEngine` mantiene el saldo por ubicación; todas las
+operaciones usan `MAIN/DEFAULT` (la selección de ubicación llega en R2-B) y
+**ningún contrato de API cambia**. `Product.stockCurrent` sigue siendo la cantidad
+consolidada. Aplicar la migración **antes** de iniciar el backend de esa versión;
+ver el procedimiento de activación coordinada, el respaldo y la recuperación en
+[docs/r2-migration-plan.md](docs/r2-migration-plan.md) §5. Las suites E2E que
+preparan stock deben usar `test/helpers/stock-fixtures.ts` (producto y saldo en una
+misma transacción; los triggers no se desactivan en pruebas).
 
 Contrato para Angular: [docs/warehouses-locations-api.md](docs/warehouses-locations-api.md).
 Plan y verificaciones de R2: [docs/r2-migration-plan.md](docs/r2-migration-plan.md).

@@ -22,6 +22,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * Fase A5.2a — Facturas de compra universales. Suite dedicada y aislada
@@ -421,7 +422,7 @@ describe('Purchase Invoices — Fase A5.2a (e2e)', () => {
     });
     unitId = unit.id;
 
-    const trackedProduct = await prisma.product.create({
+    const trackedProduct = await createProductRow(prisma, {
       data: {
         sku: `A52A-T-${suffix}`,
         name: `Producto rastreado E2E A5.2a ${suffix}`,
@@ -436,7 +437,7 @@ describe('Purchase Invoices — Fase A5.2a (e2e)', () => {
     trackedProductId = trackedProduct.id;
     createdProductIds.push(trackedProductId);
 
-    const nonTrackedProduct = await prisma.product.create({
+    const nonTrackedProduct = await createProductRow(prisma, {
       data: {
         sku: `A52A-NT-${suffix}`,
         name: `Servicio no rastreado E2E A5.2a ${suffix}`,
@@ -523,7 +524,7 @@ describe('Purchase Invoices — Fase A5.2a (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });

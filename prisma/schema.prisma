@@ -345,9 +345,9 @@ model Product {
   specifications        ProductSpecification[]
   images                ProductImage[]
   movements             InventoryMovement[]
-  // R2-A1 (EXPAND): saldos por ubicación. Hoy NUNCA se escriben ni se leen
-  // para decidir nada; Product.stockCurrent sigue siendo la única cantidad
-  // operativa. Se activan en R2-ACT.
+  // R2-ACT: saldos por ubicación. Invariante verificada al COMMIT por
+  // triggers diferidos: stockCurrent = Σ saldos. Product.stockCurrent sigue
+  // siendo la cantidad CONSOLIDADA; solo StockMovementEngine escribe ambos.
   stockBalances         StockBalance[]
   // Fase A6.1: historial inmutable de eventos de valorización de este
   // producto (ORIGINAL por recepción, REVERSAL por cancelación). Nunca
@@ -444,9 +444,9 @@ model InventoryMovement {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  // R2-A1 (EXPAND): ubicación y saldos de ubicación del movimiento. Las
-  // tres columnas son NULL en TODO movimiento (histórico y nuevo) hasta que
-  // R2-ACT active el stock por ubicación; previousStock/newStock conservan
+  // R2-A1/R2-ACT: ubicación y saldos de ubicación del movimiento. NULL solo
+  // en movimientos HISTÓRICOS (anteriores a R2-ACT); todo movimiento nuevo
+  // las lleva (CHECK NOT VALID de R2-ACT). previousStock/newStock conservan
   // su significado CONSOLIDADO. CHECK a mano: las tres nulas o las tres no
   // nulas.
   locationId            String?            @map("location_id") @db.Uuid
@@ -476,12 +476,11 @@ model InventoryMovement {
 
 // --- Almacenes y ubicaciones (R2-A1, solo EXPAND) ---------------------------
 //
-// Estructura preparatoria del stock por ubicación. INERTE respecto al
-// inventario: StockMovementEngine y Product.stockCurrent no cambian, ningún
-// flujo lee StockBalance para aprobar o rechazar una operación, y la
-// migración NO hace backfill (stock_balances nace VACÍA). La activación
-// (motor por ubicación, backfill de existencias a MAIN/DEFAULT, invariante
-// stockCurrent = Σ saldos) pertenece a R2-ACT.
+// Stock por ubicación. R2-A1 creó la estructura (INERTE: stock_balances nacía
+// VACÍA); R2-ACT (migración 20261031000000_activate_stock_by_location) hace el
+// backfill de las existencias a MAIN/DEFAULT, activa el motor por ubicación
+// (StockMovementEngine) y la invariante stockCurrent = Σ saldos, verificada
+// al COMMIT por triggers diferidos (viven solo en la migración SQL).
 //
 // CHECK, índices únicos parciales y normalización de códigos se agregan a
 // mano en migration.sql (el DSL de Prisma no los expresa):
@@ -1223,8 +1222,9 @@ model PurchaseReceiptLine {
   // anular: la reversión usa este valor tal cual.
   reclassifiedAmount Decimal? @map("reclassified_amount") @db.Decimal(14, 2)
 
-  // R2-A1 (EXPAND): ubicación de destino de esta línea. Siempre NULL hasta
-  // R2-ACT; ninguna lógica de recepción la lee ni la escribe.
+  // R2-ACT: ubicación de destino de esta línea (MAIN/DEFAULT). NULL solo en
+  // recepciones HISTÓRICAS (anteriores a R2-ACT): su anulación retira de
+  // MAIN/DEFAULT.
   locationId String?            @map("location_id") @db.Uuid
   location   WarehouseLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
 
@@ -1721,8 +1721,9 @@ model SaleItem {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  // R2-A1 (EXPAND): ubicación de origen del stock de esta línea. Siempre
-  // NULL hasta R2-ACT; ninguna lógica de venta la lee ni la escribe.
+  // R2-ACT: ubicación de origen del stock de esta línea (MAIN/DEFAULT);
+  // NULL en líneas no inventariables y en ventas HISTÓRICAS (anteriores a
+  // R2-ACT).
   locationId String?            @map("location_id") @db.Uuid
   location   WarehouseLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
 

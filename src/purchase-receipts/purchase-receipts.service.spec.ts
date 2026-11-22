@@ -147,7 +147,16 @@ function createAuditServiceMock() {
 }
 
 function createStockMovementEngineMock() {
-  return { apply: jest.fn<Promise<unknown>, [unknown, unknown]>() };
+  return {
+    apply: jest.fn<Promise<unknown>, [unknown, unknown]>(),
+    // R2-ACT: bloqueo previo de catálogo; null/undefined => ubicación DEFAULT.
+    lockLocationsShared: jest.fn(
+      (_tx: unknown, requested: ReadonlyArray<string | null | undefined>) =>
+        Promise.resolve(
+          requested.map((id) => id ?? '77777777-7777-4777-8777-777777777777'),
+        ),
+    ),
+  };
 }
 
 function createAccountingEngineMock() {
@@ -513,6 +522,91 @@ describe('PurchaseReceiptsService', () => {
       ).resolves.toBeDefined();
     });
 
+    describe('R2-ACT: ubicación y orden de bloqueos (D1)', () => {
+      const LINE_A = '00000000-0000-4000-8000-0000000000a1';
+      const LINE_B = '00000000-0000-4000-8000-0000000000a2';
+      const PRODUCT_LOW = '00000000-0000-4000-8000-000000000001';
+      const PRODUCT_HIGH = '00000000-0000-4000-8000-000000000009';
+
+      /** Líneas bloqueadas por id ascendente (A, B) con productId en ORDEN INVERSO. */
+      function setupTwoLinesInverseProductOrder(): void {
+        prisma.tx.$queryRaw.mockReset();
+        prisma.tx.$queryRaw
+          .mockResolvedValueOnce([makeLockedInvoiceRow()])
+          .mockResolvedValueOnce([
+            makeLockedLineRow({ id: LINE_A, productId: PRODUCT_HIGH }),
+            makeLockedLineRow({ id: LINE_B, productId: PRODUCT_LOW }),
+          ]);
+        prisma.tx.purchaseReceipt.create.mockResolvedValue(
+          makeSafeReceiptRow({
+            lines: [
+              {
+                id: 'r-line-a',
+                purchaseInvoiceLineId: LINE_A,
+                quantity: d('1.000'),
+                reclassifiedAmount: null,
+              },
+              {
+                id: 'r-line-b',
+                purchaseInvoiceLineId: LINE_B,
+                quantity: d('1.000'),
+                reclassifiedAmount: null,
+              },
+            ],
+          }),
+        );
+      }
+
+      const twoLinesInput = () =>
+        createInput({
+          lines: [
+            { purchaseInvoiceLineId: LINE_A, quantity: '1.000' },
+            { purchaseInvoiceLineId: LINE_B, quantity: '1.000' },
+          ],
+        });
+
+      it('D1: aplica las entradas en orden ascendente de productId, no en el orden de las líneas', async () => {
+        setupTwoLinesInverseProductOrder();
+
+        await service.create(twoLinesInput());
+
+        const products = stockMovementEngine.apply.mock.calls.map(
+          (call) => (call[1] as { productId: string }).productId,
+        );
+        expect(products).toEqual([PRODUCT_LOW, PRODUCT_HIGH]);
+      });
+
+      it('bloquea almacén y ubicación (MAIN/DEFAULT) ANTES de la primera entrada', async () => {
+        await service.create(createInput());
+
+        expect(stockMovementEngine.lockLocationsShared).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          stockMovementEngine.lockLocationsShared.mock.calls[0][1],
+        ).toEqual([null]);
+        expect(
+          stockMovementEngine.lockLocationsShared.mock.invocationCallOrder[0],
+        ).toBeLessThan(stockMovementEngine.apply.mock.invocationCallOrder[0]);
+      });
+
+      it('persiste locationId en cada línea de recepción y lo usa en el movimiento', async () => {
+        await service.create(createInput());
+
+        const createArgs = prisma.tx.purchaseReceipt.create.mock
+          .calls[0][0] as {
+          data: { lines: { create: { locationId: string }[] } };
+        };
+        expect(createArgs.data.lines.create[0].locationId).toBe(
+          '77777777-7777-4777-8777-777777777777',
+        );
+        const call = stockMovementEngine.apply.mock.calls[0][1] as {
+          locationId?: string;
+        };
+        expect(call.locationId).toBe('77777777-7777-4777-8777-777777777777');
+      });
+    });
+
     it('idempotencyKey ya usada: devuelve la MISMA recepción existente, sin crear nada nuevo', async () => {
       const existing = makeSafeReceiptRow({ idempotencyKey: 'retry-1' });
       prisma.tx.purchaseReceipt.findUnique.mockResolvedValue(existing);
@@ -869,6 +963,83 @@ describe('PurchaseReceiptsService', () => {
       );
       expect(stockMovementEngine.apply).not.toHaveBeenCalled();
       expect(prisma.tx.purchaseReceipt.update).not.toHaveBeenCalled();
+    });
+
+    describe('R2-ACT: ubicación y orden de bloqueos en la anulación (D1)', () => {
+      const LOCATION_X = '88888888-8888-4888-8888-888888888888';
+      const PRODUCT_LOW = '00000000-0000-4000-8000-000000000001';
+      const PRODUCT_HIGH = '00000000-0000-4000-8000-000000000009';
+
+      it('D1: procesa las salidas en orden ascendente de productId (desempate por id de línea)', async () => {
+        prisma.tx.purchaseReceiptLine.findMany.mockResolvedValue([
+          {
+            id: 'line-1',
+            purchaseInvoiceLine: { productId: PRODUCT_HIGH },
+            quantity: d('1.000'),
+            locationId: null,
+          },
+          {
+            id: 'line-2',
+            purchaseInvoiceLine: { productId: PRODUCT_LOW },
+            quantity: d('1.000'),
+            locationId: null,
+          },
+        ]);
+
+        await service.cancel(cancelInput());
+
+        const products = stockMovementEngine.apply.mock.calls.map(
+          (call) => (call[1] as { productId: string }).productId,
+        );
+        expect(products).toEqual([PRODUCT_LOW, PRODUCT_HIGH]);
+      });
+
+      it('retira de la ubicación de cada línea y bloquea el catálogo antes de la primera salida', async () => {
+        prisma.tx.purchaseReceiptLine.findMany.mockResolvedValue([
+          {
+            id: 'line-1',
+            purchaseInvoiceLine: { productId: PRODUCT_LOW },
+            quantity: d('2.000'),
+            locationId: LOCATION_X,
+          },
+        ]);
+
+        await service.cancel(cancelInput());
+
+        expect(stockMovementEngine.lockLocationsShared).toHaveBeenCalledWith(
+          prisma.tx,
+          [LOCATION_X],
+        );
+        const call = stockMovementEngine.apply.mock.calls[0][1] as {
+          locationId?: string;
+        };
+        expect(call.locationId).toBe(LOCATION_X);
+        expect(
+          stockMovementEngine.lockLocationsShared.mock.invocationCallOrder[0],
+        ).toBeLessThan(stockMovementEngine.apply.mock.invocationCallOrder[0]);
+      });
+
+      it('una línea histórica sin ubicación (NULL) sale de MAIN/DEFAULT (el motor resuelve el default)', async () => {
+        prisma.tx.purchaseReceiptLine.findMany.mockResolvedValue([
+          {
+            id: 'line-1',
+            purchaseInvoiceLine: { productId: PRODUCT_LOW },
+            quantity: d('2.000'),
+            locationId: null,
+          },
+        ]);
+
+        await service.cancel(cancelInput());
+
+        expect(stockMovementEngine.lockLocationsShared).toHaveBeenCalledWith(
+          prisma.tx,
+          [null],
+        );
+        const call = stockMovementEngine.apply.mock.calls[0][1] as {
+          locationId?: string;
+        };
+        expect(call.locationId).toBeUndefined();
+      });
     });
 
     it('camino feliz: un movimiento EXIT compensatorio, marca CANCELLED', async () => {

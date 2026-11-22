@@ -21,6 +21,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
 /**
  * R1 — Rol PURCHASING. Suite dedicada y aislada: crea y limpia exclusivamente
@@ -374,7 +375,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
 
     for (const slot of ['A', 'B']) {
       const suffix = nextSuffix();
-      const product = await prisma.product.create({
+      const product = await createProductRow(prisma, {
         data: {
           sku: `R1-${slot}-${suffix}`,
           name: `Producto E2E R1 ${slot} ${suffix}`,
@@ -465,7 +466,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       await prisma.supplier.deleteMany({
         where: { id: { in: createdSupplierIds } },
       });
-      await prisma.product.deleteMany({
+      await deleteProductRows(prisma, {
         where: { id: { in: createdProductIds } },
       });
       await prisma.category.deleteMany({ where: { id: categoryId } });
@@ -1046,7 +1047,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
   // =====================================================================
   describe('WAREHOUSE: recepción física sin visibilidad financiera', () => {
     it('17-19. identifica la factura pendiente, ve cantidades, recibe parcial y totalmente sin ver importes; solo ADMIN anula la recepción', async () => {
-      const dedicated = await prisma.product.create({
+      const dedicated = await createProductRow(prisma, {
         data: {
           sku: `R1-W-${nextSuffix()}`,
           name: `Producto almacén E2E R1`,
@@ -1250,7 +1251,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
 
     it('R1-A. varias líneas elegibles pendientes: listado y detalle coinciden en cada etapa y las recepciones anuladas no cuentan', async () => {
       const makeProduct = async (slot: string) => {
-        const product = await prisma.product.create({
+        const product = await createProductRow(prisma, {
           data: {
             sku: `R1-M-${slot}-${nextSuffix()}`,
             name: `Producto multilínea ${slot} E2E R1`,
@@ -1506,7 +1507,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
     });
 
     it('R1-B. paginación real: total, páginas 1..N, orden estable, sin duplicados ni omisiones', async () => {
-      const pagedProduct = await prisma.product.create({
+      const pagedProduct = await createProductRow(prisma, {
         data: {
           sku: `R1-P-${nextSuffix()}`,
           name: 'Producto paginación E2E R1',
