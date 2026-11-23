@@ -41,9 +41,16 @@ function makeLockedInvoiceRow(
     supplierId: SUPPLIER_ID,
     status: 'CONFIRMED',
     currencyCode: 'PEN',
+    baseCurrencyCode: 'PEN',
     totalAmount: d('150.00'),
+    totalAmountOriginal: d('150.00'),
     postedEntryId: POSTED_ENTRY_ID,
     ...overrides,
+    // R4: en estas pruebas el original coincide con el contable (tasa 1).
+    ...(overrides.totalAmount !== undefined &&
+    overrides.totalAmountOriginal === undefined
+      ? { totalAmountOriginal: overrides.totalAmount }
+      : {}),
   };
 }
 
@@ -68,6 +75,10 @@ function makeSafeSupplierPaymentRow(
     paymentDate: new Date('2026-03-20T00:00:00.000Z'),
     amount: d('150.00'),
     currencyCode: 'PEN',
+    baseCurrencyCode: 'PEN',
+    exchangeRate: d('1'),
+    exchangeRateDate: new Date('2026-03-20T00:00:00.000Z'),
+    baseAmount: d('150.00'),
     paymentMethodId: 'method-cash',
     paymentMethodCode: 'CASH',
     paymentMethodName: 'Efectivo',
@@ -82,7 +93,14 @@ function makeSafeSupplierPaymentRow(
     createdAt: new Date('2026-03-20T00:00:00.000Z'),
     updatedAt: new Date('2026-03-20T00:00:00.000Z'),
     allocations: [
-      { id: 'alloc-1', purchaseInvoiceId: INVOICE_ID, amount: d('150.00') },
+      {
+        id: 'alloc-1',
+        purchaseInvoiceId: INVOICE_ID,
+        amount: d('150.00'),
+        carryingBaseAmount: d('150.00'),
+        settledBaseAmount: d('150.00'),
+        fxDifferenceAmount: d('0.00'),
+      },
     ],
     ...overrides,
   };
@@ -344,7 +362,10 @@ describe('SupplierPaymentsService', () => {
 
     it('overpayment: el monto asignado supera el saldo pendiente recalculado: ConflictException', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('100.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('100.00'), carryingBaseAmount: d('100.00') },
+        },
       ]);
       await expect(
         service.create(

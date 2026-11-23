@@ -23,6 +23,7 @@ import { ReportsModule } from './reports/reports.module';
 import { SalesModule } from './sales/sales.module';
 import { SireDemoModule } from './sire-demo/sire-demo.module';
 import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
+import { CountriesModule } from './countries/countries.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
 import { UnitsModule } from './units/units.module';
@@ -47,6 +48,7 @@ import { UsersModule } from './users/users.module';
     InventoryValuationModule,
     CustomersModule,
     SuppliersModule,
+    CountriesModule,
     WarehousesModule,
     QuotesModule,
     SalesModule,

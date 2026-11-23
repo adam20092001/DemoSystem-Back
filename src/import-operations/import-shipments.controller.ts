@@ -92,6 +92,9 @@ export class ImportShipmentsController {
     return this.importShipmentsService.update({
       importShipmentId: id,
       transportMode: dto.transportMode,
+      incoterm: dto.incoterm,
+      incotermNamedPlace: dto.incotermNamedPlace,
+      incotermVersion: dto.incotermVersion,
       carrierName: dto.carrierName,
       trackingReference: dto.trackingReference,
       billOfLadingNumber: dto.billOfLadingNumber,

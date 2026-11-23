@@ -134,6 +134,18 @@ function makeAccountRow(
       name: 'Costo de ventas',
       type: AccountType.COST,
     },
+    [AccountingSystemKey.FX_GAIN_REALIZED]: {
+      id: 'acc-fx-gain',
+      code: 'FXG',
+      name: 'Ganancia por diferencia de cambio',
+      type: AccountType.REVENUE,
+    },
+    [AccountingSystemKey.FX_LOSS_REALIZED]: {
+      id: 'acc-fx-loss',
+      code: 'FXL',
+      name: 'Pérdida por diferencia de cambio',
+      type: AccountType.EXPENSE,
+    },
   };
   const base = byKey[systemKey];
   return {

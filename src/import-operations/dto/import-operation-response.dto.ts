@@ -46,6 +46,39 @@ export class ImportOperationResponseDto {
   @ApiProperty({ nullable: true, type: String })
   notes!: string | null;
 
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    format: 'uuid',
+    description:
+      'Factura de compra principal. null solo en operaciones históricas.',
+  })
+  purchaseInvoiceId!: string | null;
+
+  @ApiProperty({
+    description:
+      'true: operación anterior a R4, sin factura principal bajo el modelo nuevo (puede abarcar varias compras vía sus líneas).',
+  })
+  isLegacyUnlinked!: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'Resumen de la factura vinculada: documento, estado, moneda del documento, canAssignLines y proveedor heredado.',
+    type: 'object',
+    additionalProperties: true,
+  })
+  purchaseInvoice!: Record<string, unknown> | null;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'Solo en el detalle: líneas de la compra con cantidades facturada, asignada a embarques, recibida y pendiente (strings decimales).',
+    type: 'array',
+    items: { type: 'object', additionalProperties: true },
+  })
+  invoiceLines!: Record<string, unknown>[] | null;
+
   @ApiProperty({ type: ImportOperationActorDto })
   createdBy!: ImportOperationActorDto;
 

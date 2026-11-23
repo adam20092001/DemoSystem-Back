@@ -490,6 +490,11 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
   [AuditAction.SUPPLIER_UPDATED]: ['updatedFields'],
   [AuditAction.SUPPLIER_ACTIVATED]: ['previousStatus'],
   [AuditAction.SUPPLIER_DEACTIVATED]: ['previousStatus'],
+  // R4: países. Solo el código ISO y los campos tocados.
+  [AuditAction.COUNTRY_CREATED]: ['countryCode'],
+  [AuditAction.COUNTRY_UPDATED]: ['countryCode', 'updatedFields'],
+  [AuditAction.COUNTRY_ACTIVATED]: ['countryCode'],
+  [AuditAction.COUNTRY_DEACTIVATED]: ['countryCode'],
   // R2-A1: catálogo de almacenes/ubicaciones. Solo metadatos estructurales
   // (códigos técnicos, ids y campos tocados); nunca nombres ni descripciones.
   [AuditAction.WAREHOUSE_CREATED]: ['code', 'defaultLocationId'],
@@ -544,12 +549,18 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'amount',
     'invoiceCount',
     'entryId',
+    'currencyCode',
+    'baseAmount',
+    'fxDifference',
   ],
   [AuditAction.SUPPLIER_PAYMENT_CANCELLED]: ['reason', 'reversalEntryId'],
   // IMPORT_* (Fase B1). ImportOperationsService/ImportShipmentsService son
   // sus únicos emisores. Nunca referencia/descripción/notas (texto libre) —
   // solo identificadores/estados/conteos.
-  [AuditAction.IMPORT_OPERATION_CREATED]: ['importOperationId'],
+  [AuditAction.IMPORT_OPERATION_CREATED]: [
+    'importOperationId',
+    'purchaseInvoiceId',
+  ],
   [AuditAction.IMPORT_OPERATION_UPDATED]: [
     'importOperationId',
     'updatedFields',
@@ -563,6 +574,7 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'importOperationId',
     'importShipmentId',
     'lineCount',
+    'incoterm',
   ],
   [AuditAction.IMPORT_SHIPMENT_UPDATED]: [
     'importShipmentId',

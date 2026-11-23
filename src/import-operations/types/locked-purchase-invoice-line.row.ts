@@ -5,5 +5,7 @@ export interface LockedPurchaseInvoiceLineRow {
   id: string;
   quantity: Prisma.Decimal;
   productId: string | null;
+  /** R4: factura a la que pertenece la línea. */
+  invoiceId: string;
   invoiceStatus: string;
 }

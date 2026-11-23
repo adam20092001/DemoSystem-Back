@@ -24,6 +24,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
+import { createLegacyImportOperation } from './helpers/import-fixtures';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
@@ -109,19 +110,12 @@ describe('Import Operations — Fase B1 (e2e)', () => {
   async function createOperationOrThrow(
     reference: string,
   ): Promise<SafeImportOperationBody> {
-    const response = await createOperation({
-      reference,
-      originCountry: 'CN',
-      destinationCountry: 'PE',
-    });
-    if (response.status !== 201) {
-      throw new Error(
-        `No se pudo crear la operación fixture: ${JSON.stringify(response.body)}`,
-      );
-    }
-    const body = response.body as SafeImportOperationBody;
-    createdImportOperationIds.push(body.id);
-    return body;
+    // R4: operación HISTÓRICA por fixture (la API ya exige factura de compra);
+    // esta suite verifica el comportamiento de embarques/transiciones que las
+    // operaciones históricas conservan intacto.
+    const created = await createLegacyImportOperation(prisma, { reference });
+    createdImportOperationIds.push(created.id);
+    return created;
   }
 
   async function createSupplier(): Promise<string> {
@@ -682,14 +676,33 @@ describe('Import Operations — Fase B1 (e2e)', () => {
   });
 
   describe('Auditoría', () => {
-    it('registra IMPORT_OPERATION_CREATED e IMPORT_SHIPMENT_CREATED', async () => {
-      const operation = await createOperationOrThrow(`IMP-${nextSuffix()}`);
-      await createShipment(operation.id, {
+    it('registra IMPORT_OPERATION_CREATED (operación nueva vinculada a factura) e IMPORT_SHIPMENT_CREATED', async () => {
+      const invoiceLineId = await createConfirmedInvoiceLine('5.000');
+      const invoiceId = (
+        await prisma.purchaseInvoiceLine.findUniqueOrThrow({
+          where: { id: invoiceLineId },
+          select: { purchaseInvoiceId: true },
+        })
+      ).purchaseInvoiceId;
+      const created = await createOperation({
+        purchaseInvoiceId: invoiceId,
+        originCountry: 'CN',
+        destinationCountry: 'PE',
+      });
+      expect(created.status).toBe(201);
+      const operation = created.body as SafeImportOperationBody;
+      createdImportOperationIds.push(operation.id);
+      const shipment = await createShipment(operation.id, {
         transportMode: ImportTransportMode.LAND,
         lines: [
-          { descriptionSnapshot: 'Carga terrestre', plannedQuantity: '2.000' },
+          {
+            descriptionSnapshot: 'Carga terrestre',
+            plannedQuantity: '2.000',
+            purchaseInvoiceLineId: invoiceLineId,
+          },
         ],
       });
+      expect(shipment.status).toBe(201);
 
       const logs = await prisma.auditLog.findMany({
         where: {

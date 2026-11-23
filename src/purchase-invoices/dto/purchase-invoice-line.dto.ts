@@ -19,6 +19,8 @@ import {
 export const PURCHASE_QUANTITY_PATTERN = /^\d{1,11}(\.\d{1,3})?$/;
 /** Decimal como texto, no negativo, máximo 2 decimales (Decimal(14,2)). */
 export const PURCHASE_MONEY_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
+/** R4: precio unitario original; hasta 6 decimales (el servicio exige 2 si la moneda es la de la empresa). */
+export const PURCHASE_UNIT_COST_PATTERN = /^\d{1,12}(\.\d{1,6})?$/;
 
 /**
  * Una línea sin productId exige `description`; con productId, es opcional
@@ -71,11 +73,16 @@ export class CreatePurchaseInvoiceLineDto {
   })
   quantity!: string;
 
-  @ApiProperty({ type: String, example: '25.50' })
+  @ApiProperty({
+    type: String,
+    example: '25.50',
+    description:
+      'Costo unitario en la MONEDA DEL DOCUMENTO. Hasta 6 decimales si la moneda difiere de la de la empresa; 2 si es la de la empresa.',
+  })
   @IsString()
-  @Matches(PURCHASE_MONEY_PATTERN, {
+  @Matches(PURCHASE_UNIT_COST_PATTERN, {
     message:
-      'unitCost debe ser un decimal no negativo, como texto, con máximo 2 decimales',
+      'unitCost debe ser un decimal no negativo, como texto, con máximo 6 decimales (2 en la moneda de la empresa)',
   })
   unitCost!: string;
 

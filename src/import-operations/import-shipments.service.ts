@@ -10,6 +10,7 @@ import {
   ImportOperationStatus,
   ImportShipmentStatus,
   Prisma,
+  PurchaseInvoiceStatus,
   RoleName,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
@@ -19,8 +20,17 @@ import {
   isValidDateOnly,
   toPrismaDate,
 } from '../common/date/business-date';
+import {
+  BusinessConflictException,
+  FieldBadRequestException,
+} from '../common/errors/error-contract';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
+import {
+  EMPTY_INCOTERM_STATE,
+  IncotermState,
+  resolveIncotermState,
+} from './import-incoterm';
 import {
   IMPORT_SHIPMENT_SAFE_SELECT,
   toSafeImportShipment,
@@ -53,6 +63,13 @@ function assertCanRead(requesterRole: RoleName): void {
       'No tiene permisos para consultar embarques de importación',
     );
   }
+}
+
+interface LockedOperationRow {
+  id: string;
+  status: ImportOperationStatus;
+  purchaseInvoiceId: string | null;
+  isLegacyUnlinked: boolean;
 }
 
 interface LockedShipmentRow {
@@ -104,6 +121,17 @@ export class ImportShipmentsService {
       input.estimatedArrivalDate,
       'estimatedArrivalDate',
     );
+    // R4: Incoterm (opcional, sin valor predeterminado) validado contra el modo.
+    const incotermState = resolveIncotermState(
+      EMPTY_INCOTERM_STATE,
+      {
+        incoterm: input.incoterm,
+        incotermNamedPlace: input.incotermNamedPlace,
+        incotermVersion: input.incotermVersion,
+      },
+      input.transportMode,
+      { transportModeChanged: false },
+    );
 
     if (!Array.isArray(input.lines) || input.lines.length === 0) {
       throw new BadRequestException(
@@ -122,12 +150,19 @@ export class ImportShipmentsService {
         );
       }
 
-      const resolvedLines = await this.resolveAndValidateLines(tx, input.lines);
+      const resolvedLines = await this.resolveAndValidateLines(
+        tx,
+        input.lines,
+        operation,
+      );
 
       const created = await tx.importShipment.create({
         data: {
           importOperationId: input.importOperationId,
           transportMode: input.transportMode,
+          incoterm: incotermState.incoterm,
+          incotermNamedPlace: incotermState.incotermNamedPlace,
+          incotermVersion: incotermState.incotermVersion,
           carrierName,
           trackingReference,
           billOfLadingNumber,
@@ -164,6 +199,7 @@ export class ImportShipmentsService {
           importOperationId: input.importOperationId,
           importShipmentId: created.id,
           lineCount: resolvedLines.length,
+          incoterm: incotermState.incoterm,
         },
         ipAddress: input.ipAddress ?? null,
         client: tx,
@@ -234,6 +270,9 @@ export class ImportShipmentsService {
       input.carrierName !== undefined ||
       input.trackingReference !== undefined ||
       input.billOfLadingNumber !== undefined ||
+      input.incoterm !== undefined ||
+      input.incotermNamedPlace !== undefined ||
+      input.incotermVersion !== undefined ||
       input.containerReference !== undefined ||
       input.originLocation !== undefined ||
       input.destinationLocation !== undefined ||
@@ -258,11 +297,61 @@ export class ImportShipmentsService {
         throw new ConflictException('Solo se puede editar un embarque PLANNED');
       }
 
-      const data: Prisma.ImportShipmentUpdateInput = {};
+      const currentRow = await tx.importShipment.findUniqueOrThrow({
+        where: { id: input.importShipmentId },
+        select: {
+          transportMode: true,
+          incoterm: true,
+          incotermNamedPlace: true,
+          incotermVersion: true,
+        },
+      });
+      const operation = await tx.importOperation.findUniqueOrThrow({
+        where: { id: locked.importOperationId },
+        select: { id: true, purchaseInvoiceId: true, isLegacyUnlinked: true },
+      });
+
+      const data: Prisma.ImportShipmentUncheckedUpdateInput = {};
       const updatedFields: string[] = [];
       if (input.transportMode !== undefined) {
         data.transportMode = input.transportMode;
         updatedFields.push('transportMode');
+      }
+      // R4: el Incoterm se revalida contra el modo RESULTANTE (también si solo
+      // cambia el modo de transporte).
+      const incotermTouched =
+        input.incoterm !== undefined ||
+        input.incotermNamedPlace !== undefined ||
+        input.incotermVersion !== undefined;
+      const transportModeChanged =
+        input.transportMode !== undefined &&
+        input.transportMode !== currentRow.transportMode;
+      if (incotermTouched || transportModeChanged) {
+        const currentIncoterm: IncotermState = {
+          incoterm: currentRow.incoterm,
+          incotermNamedPlace: currentRow.incotermNamedPlace,
+          incotermVersion: currentRow.incotermVersion,
+        };
+        const next = resolveIncotermState(
+          currentIncoterm,
+          {
+            incoterm: input.incoterm,
+            incotermNamedPlace: input.incotermNamedPlace,
+            incotermVersion: input.incotermVersion,
+          },
+          input.transportMode ?? currentRow.transportMode,
+          { transportModeChanged },
+        );
+        if (incotermTouched) {
+          data.incoterm = next.incoterm;
+          data.incotermNamedPlace = next.incotermNamedPlace;
+          data.incotermVersion = next.incotermVersion;
+          updatedFields.push(
+            'incoterm',
+            'incotermNamedPlace',
+            'incotermVersion',
+          );
+        }
       }
       if (input.carrierName !== undefined) {
         data.carrierName = normalizeOptionalText(input.carrierName, 150);
@@ -340,6 +429,7 @@ export class ImportShipmentsService {
         const resolvedLines = await this.resolveAndValidateLines(
           tx,
           input.lines,
+          operation,
         );
         await tx.importShipmentLine.createMany({
           data: resolvedLines.map((line) => ({
@@ -390,6 +480,7 @@ export class ImportShipmentsService {
           'Solo se puede marcar en tránsito un embarque PLANNED',
         );
       }
+      await this.assertLinkedInvoiceConfirmed(tx, locked.importOperationId);
 
       const updated = await tx.importShipment.update({
         where: { id: input.importShipmentId },
@@ -520,11 +611,10 @@ export class ImportShipmentsService {
   private async lockOperation(
     tx: Prisma.TransactionClient,
     importOperationId: string,
-  ): Promise<{ id: string; status: ImportOperationStatus }> {
-    const rows = await tx.$queryRaw<
-      { id: string; status: ImportOperationStatus }[]
-    >(Prisma.sql`
-      SELECT id, status
+  ): Promise<LockedOperationRow> {
+    const rows = await tx.$queryRaw<LockedOperationRow[]>(Prisma.sql`
+      SELECT id, status, purchase_invoice_id AS "purchaseInvoiceId",
+             is_legacy_unlinked AS "isLegacyUnlinked"
       FROM import_operations
       WHERE id = ${importOperationId}::uuid
       FOR UPDATE
@@ -584,9 +674,44 @@ export class ImportShipmentsService {
    * exceed the invoice line quantity across linked shipment lines,
    * including concurrent operations").
    */
+  /**
+   * R4: una operación vinculada a una factura (purchaseInvoiceId) solo admite
+   * líneas de ESA factura, y solo cuando está CONFIRMED. Las operaciones
+   * históricas (isLegacyUnlinked) conservan la regla anterior: vínculo opcional
+   * a cualquier factura CONFIRMED.
+   */
+  private async assertLinkedInvoiceConfirmed(
+    tx: Prisma.TransactionClient,
+    importOperationId: string,
+  ): Promise<void> {
+    const rows = await tx.$queryRaw<{ status: PurchaseInvoiceStatus }[]>(
+      Prisma.sql`
+        SELECT pi.status
+        FROM import_operations o
+        JOIN purchase_invoices pi ON pi.id = o.purchase_invoice_id
+        WHERE o.id = ${importOperationId}::uuid
+        FOR SHARE OF pi
+      `,
+    );
+    if (
+      rows[0] !== undefined &&
+      rows[0].status !== PurchaseInvoiceStatus.CONFIRMED
+    ) {
+      throw new BusinessConflictException({
+        message:
+          'No se puede continuar: la factura de compra de la importación no está CONFIRMED',
+        code: 'PURCHASE_INVOICE_NOT_CONFIRMED',
+      });
+    }
+  }
+
   private async resolveAndValidateLines(
     tx: Prisma.TransactionClient,
     lines: ImportShipmentLineInput[],
+    operation: {
+      purchaseInvoiceId: string | null;
+      isLegacyUnlinked: boolean;
+    },
   ): Promise<
     {
       productId: string | null;
@@ -605,6 +730,38 @@ export class ImportShipmentsService {
       throw new BadRequestException(
         'El embarque debe tener al menos una línea de contenido',
       );
+    }
+
+    // R4: operación vinculada a factura. Lock de la factura FOR SHARE (factura
+    // PRIMERO: PurchaseInvoicesService.cancel() la toma FOR UPDATE, así que no
+    // puede anularse entre esta validación y el commit).
+    if (operation.purchaseInvoiceId !== null) {
+      const linked = await tx.$queryRaw<{ status: PurchaseInvoiceStatus }[]>(
+        Prisma.sql`
+          SELECT status FROM purchase_invoices
+          WHERE id = ${operation.purchaseInvoiceId}::uuid
+          FOR SHARE
+        `,
+      );
+      if (linked[0]?.status !== PurchaseInvoiceStatus.CONFIRMED) {
+        throw new BusinessConflictException({
+          message:
+            'No se pueden asignar líneas a embarques mientras la factura de compra de la importación no esté CONFIRMED',
+          code: 'PURCHASE_INVOICE_NOT_CONFIRMED',
+          field: 'lines',
+        });
+      }
+      lines.forEach((line, index) => {
+        if (line.purchaseInvoiceLineId === undefined) {
+          throw new FieldBadRequestException({
+            message:
+              'Cada línea del embarque debe referenciar una línea de la factura de compra de la importación',
+            code: 'PURCHASE_INVOICE_LINE_REQUIRED',
+            field: `lines[${index}].purchaseInvoiceLineId`,
+            type: 'REQUIRED',
+          });
+        }
+      });
     }
 
     const parsedQuantities = lines.map((line) =>
@@ -655,9 +812,26 @@ export class ImportShipmentsService {
       LockedPurchaseInvoiceLineRow
     >();
     if (invoiceLineIds.length > 0) {
+      // R4: facturas implicadas FOR SHARE (en orden) ANTES de bloquear sus
+      // líneas FOR UPDATE; cancel() de factura toma FOR UPDATE de la factura.
+      const invoiceIdRows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT DISTINCT purchase_invoice_id AS id
+        FROM purchase_invoice_lines
+        WHERE id = ANY(${invoiceLineIds}::uuid[])
+      `);
+      const involvedInvoiceIds = invoiceIdRows.map((r) => r.id).sort();
+      if (involvedInvoiceIds.length > 0) {
+        await tx.$queryRaw(Prisma.sql`
+          SELECT id FROM purchase_invoices
+          WHERE id = ANY(${involvedInvoiceIds}::uuid[])
+          ORDER BY id ASC
+          FOR SHARE
+        `);
+      }
       const lockedLines = await tx.$queryRaw<LockedPurchaseInvoiceLineRow[]>(
         Prisma.sql`
           SELECT pil.id, pil.quantity, pil.product_id AS "productId",
+                 pil.purchase_invoice_id AS "invoiceId",
                  pi.status AS "invoiceStatus"
           FROM purchase_invoice_lines pil
           JOIN purchase_invoices pi ON pi.id = pil.purchase_invoice_id
@@ -673,6 +847,20 @@ export class ImportShipmentsService {
       }
       for (const row of lockedLines) {
         lockedInvoiceLineById.set(row.id, row);
+        if (
+          operation.purchaseInvoiceId !== null &&
+          row.invoiceId !== operation.purchaseInvoiceId
+        ) {
+          const badIndex = lines.findIndex(
+            (l) => l.purchaseInvoiceLineId === row.id,
+          );
+          throw new FieldBadRequestException({
+            message:
+              'La línea referenciada no pertenece a la factura de compra de la importación',
+            code: 'LINE_NOT_IN_OPERATION_INVOICE',
+            field: `lines[${badIndex < 0 ? 0 : badIndex}].purchaseInvoiceLineId`,
+          });
+        }
         if (row.invoiceStatus !== 'CONFIRMED') {
           throw new ConflictException(
             `La línea de factura ${row.id} no pertenece a una factura de compra CONFIRMED`,

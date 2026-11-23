@@ -25,10 +25,19 @@ export interface AccountsPayableItem {
   documentNumber: string;
   issueDate: string;
   dueDate: string | null;
+  /** Moneda del DOCUMENTO: originalAmount, paidAmount y balanceDue están en ella. */
   currencyCode: string;
   originalAmount: string;
   paidAmount: string;
   balanceDue: string;
+  /** Moneda de la EMPRESA (contable) y tasa histórica de la factura. */
+  baseCurrencyCode: string;
+  exchangeRate: string;
+  exchangeRateDate: string;
+  /** Mismos conceptos en la moneda de la EMPRESA: total contable, valor en libros cancelado y saldo en libros. */
+  baseOriginalAmount: string;
+  basePaidAmount: string;
+  baseBalanceDue: string;
   status: AccountsPayableStatus;
   agingBucket: AgingBucket;
   daysOverdue: number | null;
@@ -38,7 +47,16 @@ export interface AccountsPayablePaymentHistoryItem {
   supplierPaymentId: string;
   status: 'ACTIVE' | 'CANCELLED';
   paymentDate: string;
+  /** En la moneda del pago (= moneda de la factura). */
   amountApplied: string;
+  currencyCode: string;
+  exchangeRate: string;
+  /** Valor en libros cancelado (moneda de la empresa). */
+  baseCarryingAmount: string;
+  /** Importe pagado (moneda de la empresa). */
+  baseSettledAmount: string;
+  /** Diferencia de cambio realizada (>0 pérdida, <0 ganancia). */
+  fxDifferenceAmount: string;
   paymentMethodCode: string;
   reference: string | null;
 }

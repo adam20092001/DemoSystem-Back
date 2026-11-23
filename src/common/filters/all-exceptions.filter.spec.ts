@@ -180,6 +180,7 @@ describe('AllExceptionsFilter', () => {
       statusCode: 500,
       message: 'Error interno del servidor',
       error: 'Internal Server Error',
+      kind: 'GENERAL',
       timestamp: expect.any(String) as string,
       path: '/api/v1/auth/login',
     });

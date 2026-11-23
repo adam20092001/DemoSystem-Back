@@ -7,6 +7,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -66,6 +67,37 @@ export class UpdatePurchaseInvoiceDto {
   @Min(0)
   @Max(365)
   paymentTermsDays?: number | null;
+
+  @ApiPropertyOptional({
+    example: 'USD',
+    description:
+      'Moneda del documento (ISO 4217). Cambiarla exige recalcular la tasa.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z]{3}$/, {
+    message: 'currencyCode debe ser un código de moneda de 3 letras (ISO 4217)',
+  })
+  currencyCode?: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    example: '3.70',
+    description:
+      'Unidades de moneda de la EMPRESA por 1 unidad de moneda del documento (hasta 8 decimales).',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,10}(\.\d{1,8})?$/, {
+    message:
+      'exchangeRate debe ser un decimal positivo, como texto, con máximo 8 decimales',
+  })
+  exchangeRate?: string;
+
+  @ApiPropertyOptional({ type: String, example: '2026-11-23' })
+  @IsOptional()
+  @IsDateOnly()
+  exchangeRateDate?: string;
 
   @ApiPropertyOptional({ type: [CreatePurchaseInvoiceLineDto] })
   @IsOptional()

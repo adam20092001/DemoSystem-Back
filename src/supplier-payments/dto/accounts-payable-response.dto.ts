@@ -35,7 +35,12 @@ export class AccountsPayableItemResponseDto {
   @ApiProperty({ type: String, nullable: true, example: '2026-11-15' })
   dueDate!: string | null;
 
-  @ApiProperty({ type: String, example: 'PEN' })
+  @ApiProperty({
+    type: String,
+    example: 'USD',
+    description:
+      'Moneda del DOCUMENTO: originalAmount, paidAmount y balanceDue están en ella.',
+  })
   currencyCode!: string;
 
   @ApiProperty({ type: String })
@@ -46,6 +51,41 @@ export class AccountsPayableItemResponseDto {
 
   @ApiProperty({ type: String })
   balanceDue!: string;
+
+  @ApiProperty({
+    type: String,
+    example: 'PEN',
+    description: 'Moneda de la EMPRESA (contable).',
+  })
+  baseCurrencyCode!: string;
+
+  @ApiProperty({
+    type: String,
+    example: '3.70000000',
+    description: 'Tasa histórica congelada de la factura.',
+  })
+  exchangeRate!: string;
+
+  @ApiProperty({ type: String })
+  exchangeRateDate!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Total contable en moneda de la EMPRESA.',
+  })
+  baseOriginalAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Valor en libros cancelado, moneda de la EMPRESA.',
+  })
+  basePaidAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Saldo en libros, moneda de la EMPRESA.',
+  })
+  baseBalanceDue!: string;
 
   @ApiProperty({ enum: ['UNPAID', 'PARTIALLY_PAID', 'PAID'] })
   status!: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
@@ -67,8 +107,36 @@ export class AccountsPayablePaymentHistoryItemResponseDto {
   @ApiProperty({ type: String, example: '2026-10-21' })
   paymentDate!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    type: String,
+    description: 'En la moneda del pago (= moneda de la factura).',
+  })
   amountApplied!: string;
+
+  @ApiProperty({ type: String })
+  currencyCode!: string;
+
+  @ApiProperty({ type: String })
+  exchangeRate!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Valor en libros cancelado (moneda de la empresa).',
+  })
+  baseCarryingAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Importe pagado (moneda de la empresa).',
+  })
+  baseSettledAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description:
+      'Diferencia de cambio realizada (positivo = pérdida, negativo = ganancia).',
+  })
+  fxDifferenceAmount!: string;
 
   @ApiProperty({ type: String, example: 'CASH' })
   paymentMethodCode!: string;

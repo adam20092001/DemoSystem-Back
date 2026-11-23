@@ -1,4 +1,8 @@
-import { ImportShipmentStatus, ImportTransportMode } from '@prisma/client';
+import {
+  ImportIncoterm,
+  ImportShipmentStatus,
+  ImportTransportMode,
+} from '@prisma/client';
 
 interface SafeImportShipmentActor {
   id: string;
@@ -26,6 +30,9 @@ export interface SafeImportShipment {
   id: string;
   importOperationId: string;
   transportMode: ImportTransportMode;
+  incoterm: ImportIncoterm | null;
+  incotermNamedPlace: string | null;
+  incotermVersion: string | null;
   carrierName: string | null;
   trackingReference: string | null;
   billOfLadingNumber: string | null;

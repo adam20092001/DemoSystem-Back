@@ -568,6 +568,23 @@ export class AccountingEngine {
       (sum, line) => sum.plus(line.amount),
       new Prisma.Decimal(0),
     );
+    // R4: diferencia de cambio realizada (pagado - valor en libros), en la
+    // moneda de la empresa. >0 pérdida (Debe), <0 ganancia (Haber).
+    const fxDifference = command.fxDifferenceAmount ?? new Prisma.Decimal(0);
+    let fxAccount: Account | null = null;
+    if (!fxDifference.equals(0)) {
+      const fxKey = fxDifference.greaterThan(0)
+        ? AccountingSystemKey.FX_LOSS_REALIZED
+        : AccountingSystemKey.FX_GAIN_REALIZED;
+      // Sin mapeo: 409 controlado (estado esperado hasta que ADMIN lo asigne);
+      // la transacción completa se revierte: nunca un pago registrado a medias.
+      const fxAccounts = await this.resolvePurchaseDestinationAccounts(tx, [
+        fxKey,
+      ]);
+      fxAccount = this.requirePurchaseAccount(fxAccounts, fxKey);
+    }
+    // Lo efectivamente pagado (moneda de la empresa) = valor en libros + diferencia.
+    const paidBaseAmount = totalAmount.plus(fxDifference);
     const resolvedLines: ResolvedAccountingLine[] = [
       ...command.liabilityLines.map((line) => ({
         accountId: this.requireManualAccount(
@@ -577,11 +594,29 @@ export class AccountingEngine {
         debitAmount: line.amount,
         creditAmount: new Prisma.Decimal(0),
       })),
+      ...(fxAccount !== null && fxDifference.greaterThan(0)
+        ? [
+            {
+              accountId: fxAccount.id,
+              debitAmount: fxDifference,
+              creditAmount: new Prisma.Decimal(0),
+            },
+          ]
+        : []),
       {
         accountId: cashBankAccount.id,
         debitAmount: new Prisma.Decimal(0),
-        creditAmount: totalAmount,
+        creditAmount: paidBaseAmount,
       },
+      ...(fxAccount !== null && fxDifference.lessThan(0)
+        ? [
+            {
+              accountId: fxAccount.id,
+              debitAmount: new Prisma.Decimal(0),
+              creditAmount: fxDifference.negated(),
+            },
+          ]
+        : []),
     ];
     // Defensa en profundidad: SupplierPaymentsService ya garantiza que
     // Σ liabilityLines = SupplierPayment.amount (validado al construir las

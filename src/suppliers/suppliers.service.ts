@@ -14,6 +14,7 @@ import {
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
 import { PaginatedResult } from '../common/types/paginated-result';
+import { assertCountryUsable } from '../countries/country.utils';
 import { PrismaService } from '../database/prisma.service';
 import {
   SUPPLIER_SAFE_SELECT,
@@ -118,6 +119,8 @@ export class SuppliersService {
       // pre-check aquí sería una condición de carrera (TOCTOU) sin valor
       // real: la única fuente de verdad sigue siendo la restricción de base
       // de datos.
+      // R4: el país debe existir en el catálogo compartido y estar activo.
+      await assertCountryUsable(tx, countryCode, 'countryCode');
       const created = await tx.supplier.create({
         data: {
           documentType: document.documentType,
@@ -264,13 +267,13 @@ export class SuppliersService {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.supplier.findUnique({
         where: { id: input.supplierId },
-        select: { id: true },
+        select: { id: true, countryCode: true },
       });
       if (existing === null) {
         throw new NotFoundException('Proveedor no encontrado');
       }
 
-      const data: Prisma.SupplierUpdateInput = {};
+      const data: Prisma.SupplierUncheckedUpdateInput = {};
       const updatedFields: string[] = [];
 
       if (
@@ -286,7 +289,13 @@ export class SuppliersService {
         updatedFields.push('documentType', 'documentNumber');
       }
       if (input.countryCode !== undefined) {
-        data.countryCode = normalizeCountryCode(input.countryCode);
+        const newCountryCode = normalizeCountryCode(input.countryCode);
+        // R4: solo se revalida cuando el país CAMBIA (un país desactivado
+        // después no impide editar otros datos del proveedor).
+        if (newCountryCode !== existing.countryCode) {
+          await assertCountryUsable(tx, newCountryCode, 'countryCode');
+        }
+        data.countryCode = newCountryCode;
         updatedFields.push('countryCode');
       }
       if (input.legalName !== undefined) {

@@ -92,15 +92,15 @@ function assertValidQuantity(value: Prisma.Decimal): void {
   }
 }
 
-function assertValidUnitCost(value: Prisma.Decimal): void {
+function assertValidUnitCost(value: Prisma.Decimal, maxDecimals = 2): void {
   if (
     !Prisma.Decimal.isDecimal(value) ||
     !value.isFinite() ||
     value.lessThan(0) ||
-    value.decimalPlaces() > 2
+    value.decimalPlaces() > maxDecimals
   ) {
     throw new BadRequestException(
-      'unitCost debe ser un decimal no negativo con máximo 2 decimales',
+      `unitCost debe ser un decimal no negativo con máximo ${maxDecimals} decimales`,
     );
   }
   if (value.greaterThan(MAX_MONEY)) {
@@ -146,6 +146,11 @@ export interface ComputePurchaseLineAmountsInput {
   taxRate: Prisma.Decimal | null;
   /** Monto crudo propuesto por el llamador (default 0 si se omite). */
   creditableTaxAmount: Prisma.Decimal;
+  /**
+   * R4: decimales admitidos en el costo unitario. 2 (contrato anterior) cuando el
+   * documento está en la moneda de la empresa; hasta 6 en moneda extranjera.
+   */
+  unitCostMaxDecimals?: number;
 }
 
 export interface PurchaseLineAmounts {
@@ -177,7 +182,7 @@ export function computePurchaseLineAmounts(
   input: ComputePurchaseLineAmountsInput,
 ): PurchaseLineAmounts {
   assertValidQuantity(input.quantity);
-  assertValidUnitCost(input.unitCost);
+  assertValidUnitCost(input.unitCost, input.unitCostMaxDecimals ?? 2);
 
   const grossAmount = input.quantity
     .mul(input.unitCost)

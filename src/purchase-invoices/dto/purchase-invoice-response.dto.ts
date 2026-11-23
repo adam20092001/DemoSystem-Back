@@ -39,8 +39,17 @@ export class PurchaseInvoiceLineResponseDto {
   @ApiProperty({ type: String })
   quantity!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    type: String,
+    description: 'Costo unitario en la MONEDA DEL DOCUMENTO (6 decimales).',
+  })
   unitCost!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'Costo unitario en la moneda de la EMPRESA (informativo).',
+  })
+  baseUnitCost!: string;
 
   @ApiProperty({ enum: PurchaseLineTaxCategory })
   taxCategory!: PurchaseLineTaxCategory;
@@ -66,6 +75,30 @@ export class PurchaseInvoiceLineResponseDto {
 
   @ApiProperty({ type: String })
   lineTotal!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'taxableBaseAmount en la moneda de la EMPRESA.',
+  })
+  baseTaxableBaseAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'taxAmount en la moneda de la EMPRESA.',
+  })
+  baseTaxAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'creditableTaxAmount en la moneda de la EMPRESA.',
+  })
+  baseCreditableTaxAmount!: string;
+
+  @ApiProperty({
+    type: String,
+    description: 'lineTotal en la moneda de la EMPRESA.',
+  })
+  baseLineTotal!: string;
 
   @ApiProperty({
     nullable: true,
@@ -111,17 +144,48 @@ export class PurchaseInvoiceResponseDto {
   @ApiProperty({ nullable: true, type: Number })
   paymentTermsDays!: number | null;
 
-  @ApiProperty({ example: 'PEN' })
+  @ApiProperty({
+    example: 'USD',
+    description:
+      'Moneda del DOCUMENTO: subtotal, taxAmount, totalAmount y los importes de las líneas (sin prefijo base) están en esta moneda.',
+  })
   currencyCode!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({
+    example: 'PEN',
+    description:
+      'Moneda de la EMPRESA (contable): en ella se contabiliza, valoriza y concilia.',
+  })
+  baseCurrencyCode!: string;
+
+  @ApiProperty({
+    type: String,
+    example: '3.70000000',
+    description:
+      'Unidades de moneda de la empresa por 1 unidad de moneda del documento (1 si coinciden). Congelada al confirmar.',
+  })
+  exchangeRate!: string;
+
+  @ApiProperty({ type: String, example: '2026-11-23' })
+  exchangeRateDate!: string;
+
+  @ApiProperty({ type: String, description: 'En la moneda del DOCUMENTO.' })
   subtotal!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({ type: String, description: 'En la moneda del DOCUMENTO.' })
   taxAmount!: string;
 
-  @ApiProperty({ type: String })
+  @ApiProperty({ type: String, description: 'En la moneda del DOCUMENTO.' })
   totalAmount!: string;
+
+  @ApiProperty({ type: String, description: 'En la moneda de la EMPRESA.' })
+  baseSubtotal!: string;
+
+  @ApiProperty({ type: String, description: 'En la moneda de la EMPRESA.' })
+  baseTaxAmount!: string;
+
+  @ApiProperty({ type: String, description: 'En la moneda de la EMPRESA.' })
+  baseTotalAmount!: string;
 
   @ApiProperty({ enum: PurchaseInvoiceStatus })
   status!: PurchaseInvoiceStatus;

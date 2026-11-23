@@ -24,6 +24,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { binaryParser } from './helpers/excel-download';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
+import { createLegacyImportOperation } from './helpers/import-fixtures';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
@@ -173,18 +174,10 @@ describe('Import Reports — Fase B4 (e2e)', () => {
   async function createOperationOrThrow(
     reference: string,
   ): Promise<SafeImportOperationBody> {
-    const response = await request(app.getHttpServer())
-      .post('/api/v1/import-operations')
-      .set('Cookie', adminCookie)
-      .send({ reference, originCountry: 'CN', destinationCountry: 'PE' });
-    if (response.status !== 201) {
-      throw new Error(
-        `No se pudo crear la operación fixture: ${JSON.stringify(response.body)}`,
-      );
-    }
-    const body = response.body as SafeImportOperationBody;
-    createdImportOperationIds.push(body.id);
-    return body;
+    // R4: operación HISTÓRICA por fixture (la API ya exige factura de compra).
+    const created = await createLegacyImportOperation(prisma, { reference });
+    createdImportOperationIds.push(created.id);
+    return created;
   }
 
   async function createArrivedShipmentWithLine(

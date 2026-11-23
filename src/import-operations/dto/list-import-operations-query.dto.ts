@@ -1,11 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { ImportOperationStatus } from '@prisma/client';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -44,6 +46,25 @@ export class ListImportOperationsQueryDto {
   @IsString()
   @MaxLength(2)
   destinationCountry?: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Operaciones de una factura de compra.',
+  })
+  @IsOptional()
+  @IsUUID()
+  purchaseInvoiceId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'true: solo históricas sin factura principal; false: solo vinculadas.',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  isLegacyUnlinked?: boolean;
 
   @ApiPropertyOptional({
     maxLength: 150,

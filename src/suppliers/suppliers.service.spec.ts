@@ -63,6 +63,10 @@ function createPrismaMock() {
       findUnique: jest.fn<Promise<unknown>, [SupplierFindUniqueArgs]>(),
       update: jest.fn<Promise<unknown>, [SupplierUpdateArgs]>(),
     },
+    // R4: catálogo de países (existente y activo).
+    country: {
+      findUnique: jest.fn().mockResolvedValue({ active: true }),
+    },
   };
 
   return {

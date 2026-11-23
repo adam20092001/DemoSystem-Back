@@ -25,6 +25,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { purgePurchasingResidue } from './helpers/purchasing-cleanup';
 import {
   createProductRow,
   getDefaultLocationId,
@@ -294,6 +295,12 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
 
   afterAll(async () => {
     try {
+      // Retira el residuo propio (facturas, pagos, importaciones, asientos, cuentas y
+      // proveedores) para no romper otras suites que comparten la base.
+      await purgePurchasingResidue(prisma, {
+        supplierLegalNamePrefix: 'Proveedor e2e R3',
+        accountCodePrefixes: ['R3AP', 'R3RES'],
+      });
       await prisma.account.updateMany({
         where: {
           systemKey: {
@@ -511,7 +518,8 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       // Operación
       const op = mustOk<IdBody & { status: string }>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3-${nextSuffix()}`,
+          // R4: la operación se vincula a la factura de compra (referencia generada por el servidor).
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),
@@ -769,9 +777,11 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
     });
 
     it('I2. anulaciones según estado: operación, embarque y gasto (200) y estados terminales siguen rechazando (409)', async () => {
+      const supplierId = await newSupplier();
+      const invoice = await confirmedInvoice(supplierId, '2.000');
       const op = mustOk<IdBody>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3C-${nextSuffix()}`,
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),
@@ -781,7 +791,13 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       const shipment = mustOk<ShipmentBody>(
         await asPurchasing('post', `/import-operations/${op.id}/shipments`, {
           transportMode: ImportTransportMode.AIR,
-          lines: [{ descriptionSnapshot: 'Carga', plannedQuantity: '1.000' }],
+          lines: [
+            {
+              descriptionSnapshot: 'Carga',
+              plannedQuantity: '1.000',
+              purchaseInvoiceLineId: invoice.lines[0].id,
+            },
+          ],
         }),
         201,
         'crear embarque',
@@ -1014,7 +1030,7 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       const invoice = await confirmedInvoice(supplierId, '4.000');
       const op = mustOk<IdBody>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3V-${nextSuffix()}`,
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),
