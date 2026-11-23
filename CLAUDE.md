@@ -1364,6 +1364,23 @@ desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable)
   inventario manual ni reglas de desactivación. Transferencias (R2-C) pendientes.
 - Contrato para Angular: `docs/sales-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.11.
 
+**R2-C — transferencias de stock entre ubicaciones** (rama `feat/r2-c-stock-transfers`,
+base `main` en `01412e7`, **implementada y validada, sin commit/push/PR todavía — NO integrada en `main` ni
+desplegada**; incluye la **migración 35** `20261123011758_add_stock_transfers`, aplicada solo en PostgreSQL 16 descartables, nunca en `pos_db`
+ni `pos_db_test`). Requiere R2-ACT aplicado.
+
+- Una transferencia mueve **un producto** entre dos ubicaciones (del mismo almacén o de almacenes distintos) con un EXIT en el origen y un ENTRY en el
+  destino, ambos vía `StockMovementEngine` (nuevo origen `TRANSFER`) en **una sola transacción**; `Product.stockCurrent` no cambia y sigue conciliado con
+  Σ `StockBalance`. Documento `StockTransfer` **inmutable** (sin anulación ni borrado; la corrección es otra transferencia inversa) enlazado a ambos
+  movimientos (`referenceType='StockTransfer'`, `exitMovementId`/`entryMovementId`). No genera valorización, COGS ni asientos contables.
+- Origen y destino distintos, existentes y activos (almacén y ubicación), cantidad positiva con ≤ 3 decimales, producto inventariable y activo y saldo
+  **propio** suficiente en el origen (409; nunca se completa con otras ubicaciones). Se bloquean ambas ubicaciones juntas antes del producto.
+- Idempotencia opcional por usuario (`idempotencyKey`): mismo contenido → la original; contenido distinto → 409; concurrente → una sola (advisory lock +
+  índice único). Sin clave no hay deduplicación.
+- `POST/GET /api/v1/inventory/transfers` y `GET .../:id`: crean ADMIN/WAREHOUSE; consultan ADMIN/WAREHOUSE/MANAGEMENT. Kardex: campo aditivo `transferId`.
+- Único cambio del motor: `TRANSFER` admite ENTRY/EXIT (no es un origen histórico autoritativo). Contrato para Angular: `docs/stock-transfers-api.md`;
+  detalle técnico: `docs/r2-migration-plan.md` §5.12.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

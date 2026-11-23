@@ -101,6 +101,15 @@ export class MovementResponseDto {
   })
   location!: MovementLocationResponseDto | null;
 
+  @ApiProperty({
+    format: 'uuid',
+    type: String,
+    nullable: true,
+    description:
+      'R2-C. Id de la transferencia entre ubicaciones a la que pertenece el movimiento (origin=TRANSFER); null en los demás.',
+  })
+  transferId!: string | null;
+
   @ApiProperty()
   createdAt!: Date;
 }

@@ -111,6 +111,8 @@ enum InventoryMovementOrigin {
   PURCHASE_RECEIPT
   PURCHASE_RECEIPT_CANCELLATION
   OTHER
+  // R2-C: movimiento (ENTRY o EXIT) de una transferencia entre ubicaciones.
+  TRANSFER
 }
 
 model Role {
@@ -167,6 +169,7 @@ model User {
   updatedAt                  DateTime             @updatedAt @map("updated_at")
   auditLogs                  AuditLog[]
   inventoryMovements         InventoryMovement[]
+  createdStockTransfers      StockTransfer[]
   // Cotizaciones donde este usuario es el emisor comercial (sellerId =
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
@@ -345,6 +348,7 @@ model Product {
   specifications        ProductSpecification[]
   images                ProductImage[]
   movements             InventoryMovement[]
+  stockTransfers        StockTransfer[]
   // R2-ACT: saldos por ubicación. Invariante verificada al COMMIT por
   // triggers diferidos: stockCurrent = Σ saldos. Product.stockCurrent sigue
   // siendo la cantidad CONSOLIDADA; solo StockMovementEngine escribe ambos.
@@ -460,6 +464,10 @@ model InventoryMovement {
   // InventoryValuation.inventoryMovementId lo garantiza en base de datos.
   inventoryValuation InventoryValuation?
 
+  // R2-C: a lo sumo UNA transferencia lo referencia como su EXIT o su ENTRY.
+  stockTransferAsExit  StockTransfer? @relation("StockTransferExit")
+  stockTransferAsEntry StockTransfer? @relation("StockTransferEntry")
+
   // Sin updatedAt: un movimiento confirmado es inmutable (no hay
   // PATCH/DELETE). Sin deletedAt ni status: no hay borrado lógico de
   // movimientos, la corrección es un movimiento compensatorio (Bloque B).
@@ -527,6 +535,8 @@ model WarehouseLocation {
 
   balances             StockBalance[]
   inventoryMovements   InventoryMovement[]
+  transfersAsSource      StockTransfer[] @relation("StockTransferSource")
+  transfersAsDestination StockTransfer[] @relation("StockTransferDestination")
   saleItems            SaleItem[]
   purchaseReceiptLines PurchaseReceiptLine[]
 
@@ -535,6 +545,62 @@ model WarehouseLocation {
 
   @@unique([warehouseId, code])
   @@map("warehouse_locations")
+}
+
+// --- Transferencias de stock entre ubicaciones (R2-C) ------------------------
+//
+// Documento INMUTABLE: una transferencia mueve UN producto de una ubicación a
+// otra dentro de una sola transacción (EXIT en el origen + ENTRY en el
+// destino, ambos vía StockMovementEngine con origin=TRANSFER). El consolidado
+// Product.stockCurrent no cambia. No se anula ni se elimina: una corrección es
+// otra transferencia compensatoria. Nunca genera valorización, COGS ni
+// asientos contables (este modelo no se relaciona con ellos).
+//
+// Los dos movimientos referencian al documento con
+// referenceType='StockTransfer' y referenceId=<id> (polimórfico, sin FK) y el
+// documento apunta a ambos con exitMovementId/entryMovementId (únicos).
+//
+// CHECK a mano en migration.sql: quantity > 0; origen <> destino;
+// idempotency_key no vacía. La unicidad (createdByUserId, idempotencyKey)
+// admite múltiples NULL (transferencias sin clave).
+model StockTransfer {
+  id String @id @default(uuid()) @db.Uuid
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  sourceLocationId String            @map("source_location_id") @db.Uuid
+  sourceLocation   WarehouseLocation @relation("StockTransferSource", fields: [sourceLocationId], references: [id], onDelete: Restrict)
+
+  destinationLocationId String            @map("destination_location_id") @db.Uuid
+  destinationLocation   WarehouseLocation @relation("StockTransferDestination", fields: [destinationLocationId], references: [id], onDelete: Restrict)
+
+  quantity Decimal @db.Decimal(14, 3)
+
+  reason String  @db.VarChar(200)
+  notes  String? @db.VarChar(500)
+
+  // Opcional. Misma clave + mismo usuario + mismo contenido => la transferencia
+  // original; contenido distinto => 409.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  createdByUserId String @map("created_by_user_id") @db.Uuid
+  createdBy       User   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  exitMovementId String            @unique @map("exit_movement_id") @db.Uuid
+  exitMovement   InventoryMovement @relation("StockTransferExit", fields: [exitMovementId], references: [id], onDelete: Restrict)
+
+  entryMovementId String            @unique @map("entry_movement_id") @db.Uuid
+  entryMovement   InventoryMovement @relation("StockTransferEntry", fields: [entryMovementId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([createdByUserId, idempotencyKey])
+  @@index([productId, createdAt])
+  @@index([createdAt])
+  @@index([sourceLocationId])
+  @@index([destinationLocationId])
+  @@map("stock_transfers")
 }
 
 // Saldo por producto y ubicación. En R2-A1 la tabla queda VACÍA y nada la

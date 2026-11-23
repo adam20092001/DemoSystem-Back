@@ -43,5 +43,7 @@ export interface SafeInventoryMovement {
   createdBy: MovementCreatedBySummary;
   /** R2-B1b (aditivo): null en movimientos históricos sin ubicación. */
   location: MovementLocationSummary | null;
+  /** R2-C (aditivo): id de la transferencia del movimiento; null si no es de una transferencia. */
+  transferId: string | null;
   createdAt: Date;
 }

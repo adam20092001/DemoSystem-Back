@@ -169,6 +169,15 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'origin',
     'locationId',
   ],
+  [AuditAction.INVENTORY_TRANSFER_CREATED]: [
+    'transferId',
+    'productId',
+    'quantity',
+    'sourceLocationId',
+    'destinationLocationId',
+    'exitMovementId',
+    'entryMovementId',
+  ],
   // Nunca se audita PII (documentNumber, name, tradeName, contactName,
   // email, phone, address, internalNotes): solo metadatos estructurales.
   [AuditAction.CUSTOMER_CREATED]: [

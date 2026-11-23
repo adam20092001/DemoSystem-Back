@@ -2491,9 +2491,14 @@ describe('Inventory (e2e)', () => {
       // módulo SEPARADO (InventoryValuationController), con su propio tag
       // y su propio alcance — nunca parte de las 10 operaciones de
       // InventoryController que esta prueba fija.
+      // R2-C: /inventory/transfers* también es un controlador APARTE
+      // (StockTransfersController); sus rutas se verifican en
+      // stock-transfers.e2e-spec.ts.
       const inventoryPaths = Object.keys(document.paths).filter(
         (path) =>
-          path.includes('/inventory') && !path.includes('/inventory/valuation'),
+          path.includes('/inventory') &&
+          !path.includes('/inventory/valuation') &&
+          !path.includes('/inventory/transfers'),
       );
       expect(inventoryPaths).toHaveLength(11);
       for (const path of inventoryPaths) {

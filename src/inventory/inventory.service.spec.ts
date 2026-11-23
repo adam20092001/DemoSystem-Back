@@ -61,6 +61,7 @@ function makeSafeMovement(
       lastName: 'Doe',
     },
     location: null,
+    transferId: null,
     createdAt: NOW,
     ...overrides,
   };
@@ -132,6 +133,8 @@ function makeMovementRow(overrides: Partial<Record<string, unknown>> = {}) {
       lastName: 'Doe',
     },
     location: null,
+    referenceType: null,
+    referenceId: null,
     createdAt: NOW,
     ...overrides,
   };

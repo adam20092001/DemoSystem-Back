@@ -515,11 +515,70 @@ describe('StockMovementEngine', () => {
         }),
         'BadRequest',
       ],
+      [
+        'R2-C: TRANSFER con ADJUSTMENT_IN',
+        makeCommand({
+          origin: InventoryMovementOrigin.TRANSFER,
+          movementType: InventoryMovementType.ADJUSTMENT_IN,
+          referenceType: 'StockTransfer',
+          referenceId: 'transfer-1',
+        }),
+        'BadRequest',
+      ],
+      [
+        'R2-C: TRANSFER con ADJUSTMENT_OUT',
+        makeCommand({
+          origin: InventoryMovementOrigin.TRANSFER,
+          movementType: InventoryMovementType.ADJUSTMENT_OUT,
+          referenceType: 'StockTransfer',
+          referenceId: 'transfer-1',
+        }),
+        'BadRequest',
+      ],
     ])('%s → 400 sin ejecutar el lock', async (_name, command, expected) => {
       const error = await captureError(command);
       expect(error).toBeDefined();
       assertErrorType(error, expected);
       expect(tx.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it.each([InventoryMovementType.ENTRY, InventoryMovementType.EXIT])(
+      'R2-C: TRANSFER con %s es una combinación válida y conserva la referencia al documento',
+      async (movementType) => {
+        setupLock(
+          makeLockedRow({ stockCurrent: new Prisma.Decimal('10.000') }),
+        );
+        tx.inventoryMovement.create.mockResolvedValue(makeMovementRow());
+
+        await engine.apply(
+          txClient,
+          makeCommand({
+            origin: InventoryMovementOrigin.TRANSFER,
+            movementType,
+            referenceType: 'StockTransfer',
+            referenceId: 'transfer-1',
+          }),
+        );
+
+        const createArgs = tx.inventoryMovement.create.mock.calls[0][0];
+        expect(createArgs.data.origin).toBe(InventoryMovementOrigin.TRANSFER);
+        expect(createArgs.data.referenceType).toBe('StockTransfer');
+        expect(createArgs.data.referenceId).toBe('transfer-1');
+      },
+    );
+
+    it('R2-C: TRANSFER NO es un origen histórico autoritativo: un producto inactivo se rechaza (409)', async () => {
+      setupLock(makeLockedRow({ productStatus: ProductStatus.INACTIVE }));
+      const error = await captureError(
+        makeCommand({
+          origin: InventoryMovementOrigin.TRANSFER,
+          movementType: InventoryMovementType.EXIT,
+          referenceType: 'StockTransfer',
+          referenceId: 'transfer-1',
+        }),
+      );
+      assertErrorType(error, 'Conflict');
+      expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
     });
 
     it('notes vacía tras trim se guarda como null, sin lanzar error', async () => {

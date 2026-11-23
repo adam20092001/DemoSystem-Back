@@ -1,6 +1,9 @@
 import { Prisma } from '@prisma/client';
 import { SafeInventoryMovement } from '../types/safe-inventory-movement';
 
+/** referenceType con el que las transferencias (R2-C) marcan sus dos movimientos. */
+export const STOCK_TRANSFER_REFERENCE_TYPE = 'StockTransfer';
+
 const MOVEMENT_PRODUCT_SUMMARY_SELECT = {
   id: true,
   sku: true,
@@ -39,6 +42,9 @@ export const INVENTORY_MOVEMENT_SAFE_SELECT = {
   notes: true,
   createdBy: { select: MOVEMENT_CREATED_BY_SUMMARY_SELECT },
   location: { select: MOVEMENT_LOCATION_SUMMARY_SELECT },
+  // R2-C: solo para derivar `transferId`; la referencia en sí no se expone.
+  referenceType: true,
+  referenceId: true,
   createdAt: true,
 } satisfies Prisma.InventoryMovementSelect;
 
@@ -63,6 +69,11 @@ export function toSafeInventoryMovement(
     createdBy: row.createdBy,
     // R2-B1b: null en movimientos históricos (anteriores a R2-ACT).
     location: row.location,
+    // R2-C: id de la transferencia a la que pertenece (null en los demás).
+    transferId:
+      row.referenceType === STOCK_TRANSFER_REFERENCE_TYPE
+        ? row.referenceId
+        : null,
     createdAt: row.createdAt,
   };
 }
