@@ -162,16 +162,6 @@ describe('Import Receipt Links — Fase B3 (e2e)', () => {
     return `${RUN_ID}${counter}`;
   }
 
-  function createOperation(
-    body: Record<string, unknown>,
-    cookie: string = adminCookie,
-  ): Promise<request.Response> {
-    return request(app.getHttpServer())
-      .post('/api/v1/import-operations')
-      .set('Cookie', cookie)
-      .send(body);
-  }
-
   function createShipment(
     operationId: string,
     body: Record<string, unknown>,
@@ -391,7 +381,7 @@ describe('Import Receipt Links — Fase B3 (e2e)', () => {
     // R4: operación HISTÓRICA por fixture (la API ya exige factura de compra).
     const created = await createLegacyImportOperation(prisma, { reference });
     createdImportOperationIds.push(created.id);
-    return created as unknown as SafeImportOperationBody;
+    return created;
   }
 
   /** Embarque con UNA línea, opcionalmente vinculada a una factura, y lo lleva a ARRIVED. */

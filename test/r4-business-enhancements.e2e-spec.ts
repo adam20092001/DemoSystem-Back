@@ -29,6 +29,7 @@ import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createLegacyImportOperation } from './helpers/import-fixtures';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { purgePurchasingResidue } from './helpers/purchasing-cleanup';
 import { createProductRow } from './helpers/stock-fixtures';
 
 /**
@@ -422,6 +423,11 @@ describe('R4 — Incoterm, multimoneda, importación↔compra, países y errores
 
   afterAll(async () => {
     try {
+      await purgePurchasingResidue(prisma, {
+        supplierLegalNamePrefix: 'Proveedor e2e R4',
+        accountCodePrefixes: ['R4AP', 'R4RES', 'R4VAT', 'R4FXG', 'R4FXL'],
+        importOperationReferencePrefixes: ['LEG-', 'INC-', 'BAD-'],
+      });
       if (originalTax !== null) {
         await prisma.companySettings.updateMany({ data: originalTax });
       }
@@ -907,7 +913,7 @@ describe('R4 — Incoterm, multimoneda, importación↔compra, países y errores
         assignedQuantity: '4.000',
         assignedToThisOperationQuantity: '4.000',
         availableQuantity: '6.000',
-      } as Record<string, unknown>);
+      });
       expect(created.status).toBe('PLANNED');
     });
 

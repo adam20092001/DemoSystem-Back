@@ -376,7 +376,11 @@ export class SupplierPaymentsService {
       );
       const baseByInvoice = new Map<
         string,
-        { carrying: Prisma.Decimal; settled: Prisma.Decimal; fx: Prisma.Decimal }
+        {
+          carrying: Prisma.Decimal;
+          settled: Prisma.Decimal;
+          fx: Prisma.Decimal;
+        }
       >();
       lockedInvoices.forEach((row, index) => {
         const allocationOriginal = allocations.get(row.id) ?? ZERO;

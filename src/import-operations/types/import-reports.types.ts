@@ -70,9 +70,7 @@ export interface ImportOperationSummaryRow {
  * regularización explícita y aprobada).
  */
 export type LegacyImportCandidateKind =
-  | 'NO_INVOICE_LINKS'
-  | 'SINGLE_INVOICE'
-  | 'MULTIPLE_INVOICES';
+  'NO_INVOICE_LINKS' | 'SINGLE_INVOICE' | 'MULTIPLE_INVOICES';
 
 export interface LegacyImportCandidateInvoice {
   purchaseInvoiceId: string;

@@ -46,7 +46,8 @@ export class CreateImportShipmentDto {
 
   @ApiPropertyOptional({
     enum: ['2020'],
-    description: 'Versión de los Incoterms; si se omite con incoterm, se asigna 2020.',
+    description:
+      'Versión de los Incoterms; si se omite con incoterm, se asigna 2020.',
   })
   @IsOptional()
   @IsString()

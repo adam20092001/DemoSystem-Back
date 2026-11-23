@@ -23,7 +23,7 @@ describe('correlativo de operaciones de importación (R4)', () => {
     const tx = { $queryRaw: queryRaw } as unknown as Prisma.TransactionClient;
     await expect(nextImportOperationNumber(tx, 2026)).resolves.toBe(5);
     expect(queryRaw).toHaveBeenCalledTimes(1);
-    const sql = (queryRaw.mock.calls[0][0] as Prisma.Sql).sql;
+    const sql = (queryRaw.mock.calls[0] as [Prisma.Sql])[0].sql;
     expect(sql).toContain('ON CONFLICT (year)');
     expect(sql).toContain('RETURNING');
     expect(sql.toUpperCase()).not.toContain('MAX(');

@@ -346,7 +346,11 @@ export class ImportShipmentsService {
           data.incoterm = next.incoterm;
           data.incotermNamedPlace = next.incotermNamedPlace;
           data.incotermVersion = next.incotermVersion;
-          updatedFields.push('incoterm', 'incotermNamedPlace', 'incotermVersion');
+          updatedFields.push(
+            'incoterm',
+            'incotermNamedPlace',
+            'incotermVersion',
+          );
         }
       }
       if (input.carrierName !== undefined) {
@@ -689,7 +693,10 @@ export class ImportShipmentsService {
         FOR SHARE OF pi
       `,
     );
-    if (rows[0] !== undefined && rows[0].status !== PurchaseInvoiceStatus.CONFIRMED) {
+    if (
+      rows[0] !== undefined &&
+      rows[0].status !== PurchaseInvoiceStatus.CONFIRMED
+    ) {
       throw new BusinessConflictException({
         message:
           'No se puede continuar: la factura de compra de la importación no está CONFIRMED',

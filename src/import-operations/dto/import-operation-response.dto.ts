@@ -50,7 +50,8 @@ export class ImportOperationResponseDto {
     nullable: true,
     type: String,
     format: 'uuid',
-    description: 'Factura de compra principal. null solo en operaciones históricas.',
+    description:
+      'Factura de compra principal. null solo en operaciones históricas.',
   })
   purchaseInvoiceId!: string | null;
 

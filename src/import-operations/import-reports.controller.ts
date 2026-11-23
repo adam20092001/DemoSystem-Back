@@ -62,7 +62,10 @@ export class ImportReportsController {
     description:
       'R4: lista las operaciones anteriores al modelo con factura principal (isLegacyUnlinked) con las facturas que sus líneas de embarque ya referencian (NO_INVOICE_LINKS, SINGLE_INVOICE, MULTIPLE_INVOICES). Nunca regulariza ni asigna nada.',
   })
-  @ApiOkResponse({ description: 'Página de operaciones históricas con sus facturas candidatas.' })
+  @ApiOkResponse({
+    description:
+      'Página de operaciones históricas con sus facturas candidatas.',
+  })
   @Roles(...READ_ROLES)
   @Get('legacy-operations')
   getLegacyOperations(

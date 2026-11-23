@@ -62,11 +62,15 @@ describe('CountriesService (R4)', () => {
   it('por defecto solo lista países activos; includeInactive los incluye', async () => {
     const { service, prisma } = setup();
     await service.list({}, RoleName.ADMIN);
-    expect(prisma.country.findMany.mock.calls[0][0].where).toEqual({
+    expect(
+      (prisma.country.findMany.mock.calls[0] as [{ where: unknown }])[0].where,
+    ).toEqual({
       active: true,
     });
     await service.list({ includeInactive: true }, RoleName.ADMIN);
-    expect(prisma.country.findMany.mock.calls[1][0].where).toEqual({});
+    expect(
+      (prisma.country.findMany.mock.calls[1] as [{ where: unknown }])[0].where,
+    ).toEqual({});
   });
 
   it('ADMIN y PURCHASING registran países; los demás roles reciben 403', async () => {
@@ -82,7 +86,9 @@ describe('CountriesService (R4)', () => {
           name: ' Brasil ',
         }),
       ).resolves.toMatchObject({ code: 'BR' });
-      expect(tx.country.create.mock.calls[0][0].data).toMatchObject({
+      expect(
+        (tx.country.create.mock.calls[0] as [{ data: unknown }])[0].data,
+      ).toMatchObject({
         code: 'BR',
         name: 'Brasil',
         createdByUserId: ACTOR,

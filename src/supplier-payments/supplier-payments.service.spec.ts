@@ -362,7 +362,10 @@ describe('SupplierPaymentsService', () => {
 
     it('overpayment: el monto asignado supera el saldo pendiente recalculado: ConflictException', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('100.00'), carryingBaseAmount: d('100.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('100.00'), carryingBaseAmount: d('100.00') },
+        },
       ]);
       await expect(
         service.create(

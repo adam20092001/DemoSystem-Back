@@ -145,11 +145,11 @@ describe('ImportShipmentsService', () => {
     // Lock de ImportOperation por defecto: DRAFT (primer embarque).
     prisma.tx.$queryRaw.mockResolvedValue([
       {
-          id: OPERATION_ID,
-          status: ImportOperationStatus.DRAFT,
-          purchaseInvoiceId: null,
-          isLegacyUnlinked: true,
-        },
+        id: OPERATION_ID,
+        status: ImportOperationStatus.DRAFT,
+        purchaseInvoiceId: null,
+        isLegacyUnlinked: true,
+      },
     ]);
     prisma.tx.importShipmentLine.groupBy.mockResolvedValue([]);
     prisma.tx.importExpenseAllocation.findFirst.mockResolvedValue(null);
@@ -272,11 +272,11 @@ describe('ImportShipmentsService', () => {
         prisma.tx.$queryRaw
           .mockResolvedValueOnce([
             {
-          id: OPERATION_ID,
-          status: ImportOperationStatus.DRAFT,
-          purchaseInvoiceId: null,
-          isLegacyUnlinked: true,
-        },
+              id: OPERATION_ID,
+              status: ImportOperationStatus.DRAFT,
+              purchaseInvoiceId: null,
+              isLegacyUnlinked: true,
+            },
           ])
           // R4: facturas implicadas (ids) y su lock FOR SHARE, antes de bloquear las líneas.
           .mockResolvedValueOnce([{ id: 'invoice-1' }])

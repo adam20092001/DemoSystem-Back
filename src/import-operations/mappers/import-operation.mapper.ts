@@ -100,7 +100,9 @@ export function toSafeImportOperation(
     purchaseInvoiceId: row.purchaseInvoiceId,
     isLegacyUnlinked: row.isLegacyUnlinked,
     purchaseInvoice:
-      row.purchaseInvoice === null ? null : toLinkedInvoice(row.purchaseInvoice),
+      row.purchaseInvoice === null
+        ? null
+        : toLinkedInvoice(row.purchaseInvoice),
     // Solo el detalle (GET /import-operations/:id) carga las líneas de la compra.
     invoiceLines: null,
     createdBy: row.createdBy,

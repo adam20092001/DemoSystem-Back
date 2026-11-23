@@ -26,6 +26,8 @@ function makeLine(overrides: Partial<ShipmentLineRow> = {}): ShipmentLineRow {
     unitCode: 'kg',
     purchaseInvoiceLineId: 'invoice-line-1',
     plannedQuantity: d('100.000'),
+    incoterm: null,
+    incotermNamedPlace: null,
     ...overrides,
   };
 }

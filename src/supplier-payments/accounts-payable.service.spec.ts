@@ -35,7 +35,8 @@ function makeInvoiceRow(overrides: Partial<Record<string, unknown>> = {}) {
     status: 'CONFIRMED',
     ...overrides,
     // R4: en estas pruebas el original coincide con el contable (tasa 1).
-    ...(overrides.totalAmount !== undefined && overrides.totalAmountOriginal === undefined
+    ...(overrides.totalAmount !== undefined &&
+    overrides.totalAmountOriginal === undefined
       ? { totalAmountOriginal: overrides.totalAmount }
       : {}),
   };
@@ -156,7 +157,10 @@ describe('AccountsPayableService', () => {
 
     it('con pago ACTIVE parcial: balanceDue/status recalculados desde la agregación', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') },
+        },
       ]);
       const result = await service.list({}, RoleName.ADMIN);
       expect(result.data[0].paidAmount).toBe('50.00');
@@ -166,7 +170,10 @@ describe('AccountsPayableService', () => {
 
     it('pago ACTIVE que cubre el total: status=PAID', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') },
+        },
       ]);
       const result = await service.list({}, RoleName.ADMIN);
       expect(result.data[0].status).toBe('PAID');
@@ -216,7 +223,10 @@ describe('AccountsPayableService', () => {
 
     it('incluye historial de pagos ACTIVE y CANCELLED, pero el saldo solo cuenta los ACTIVE', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') },
+        },
       ]);
       prisma.tx.supplierPaymentAllocation.findMany.mockResolvedValue([
         {
@@ -279,7 +289,10 @@ describe('AccountsPayableService', () => {
         }),
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('40.00'), carryingBaseAmount: d('40.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('40.00'), carryingBaseAmount: d('40.00') },
+        },
       ]);
 
       const result = await service.getSummary({}, RoleName.ADMIN);
@@ -385,7 +398,10 @@ describe('AccountsPayableService', () => {
         },
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') },
+        },
       ]);
       prisma.tx.account.findMany.mockResolvedValue([
         { id: LIABILITY_ACCOUNT_ID, code: 'AP', name: 'Cuentas por pagar' },
@@ -414,7 +430,10 @@ describe('AccountsPayableService', () => {
         },
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
+        {
+          purchaseInvoiceId: INVOICE_ID,
+          _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') },
+        },
       ]);
       prisma.tx.account.findMany.mockResolvedValue([
         { id: LIABILITY_ACCOUNT_ID, code: 'AP', name: 'Cuentas por pagar' },

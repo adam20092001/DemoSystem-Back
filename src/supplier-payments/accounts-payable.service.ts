@@ -454,7 +454,9 @@ export class AccountsPayableService {
         baseTotalPending: ZERO,
       };
       currencyEntry.invoiceCount += 1;
-      currencyEntry.totalPending = currencyEntry.totalPending.plus(c.balanceDue);
+      currencyEntry.totalPending = currencyEntry.totalPending.plus(
+        c.balanceDue,
+      );
       currencyEntry.baseTotalPending = currencyEntry.baseTotalPending.plus(
         c.baseBalance,
       );

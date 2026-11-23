@@ -26,6 +26,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { purgePurchasingResidue } from './helpers/purchasing-cleanup';
 import {
   createProductRow,
   getDefaultLocationId,
@@ -488,6 +489,12 @@ describe('R2-FINAL — validación integral multi-almacén (e2e)', () => {
       });
       await prisma.quote.deleteMany({
         where: { id: { in: quotes.map((x) => x.id) } },
+      });
+      // Compras reales propias (facturas, recepciones, valorización, asientos, cuentas
+      // y proveedor): se retiran para no romper otras suites de la base compartida.
+      await purgePurchasingResidue(prisma, {
+        supplierLegalNamePrefix: 'Proveedor e2e R2F',
+        accountCodePrefixes: ['R2FAP', 'R2FRES', 'R2FCOGS'],
       });
       // Restaura los mapeos contables sintéticos (escritura directa de
       // fixture, como otras suites; la API no permite desasignar): otras

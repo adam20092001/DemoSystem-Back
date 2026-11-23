@@ -115,7 +115,7 @@ describe('Import Operations — Fase B1 (e2e)', () => {
     // operaciones históricas conservan intacto.
     const created = await createLegacyImportOperation(prisma, { reference });
     createdImportOperationIds.push(created.id);
-    return created as unknown as SafeImportOperationBody;
+    return created;
   }
 
   async function createSupplier(): Promise<string> {

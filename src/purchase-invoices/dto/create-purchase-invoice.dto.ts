@@ -109,14 +109,16 @@ export class CreatePurchaseInvoiceDto {
   @IsOptional()
   @IsString()
   @Matches(/^\d{1,10}(\.\d{1,8})?$/, {
-    message: 'exchangeRate debe ser un decimal positivo, como texto, con máximo 8 decimales',
+    message:
+      'exchangeRate debe ser un decimal positivo, como texto, con máximo 8 decimales',
   })
   exchangeRate?: string;
 
   @ApiPropertyOptional({
     type: String,
     example: '2026-11-23',
-    description: 'Fecha del tipo de cambio (YYYY-MM-DD). Por defecto, la fecha de emisión.',
+    description:
+      'Fecha del tipo de cambio (YYYY-MM-DD). Por defecto, la fecha de emisión.',
   })
   @IsOptional()
   @IsDateOnly()

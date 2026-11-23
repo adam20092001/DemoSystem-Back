@@ -320,10 +320,16 @@ export class ImportOperationsService {
     ]);
     const zero = new Prisma.Decimal(0);
     const assignedAllMap = new Map(
-      assignedAll.map((r) => [r.purchaseInvoiceLineId, r._sum.plannedQuantity ?? zero]),
+      assignedAll.map((r) => [
+        r.purchaseInvoiceLineId,
+        r._sum.plannedQuantity ?? zero,
+      ]),
     );
     const assignedThisMap = new Map(
-      assignedThis.map((r) => [r.purchaseInvoiceLineId, r._sum.plannedQuantity ?? zero]),
+      assignedThis.map((r) => [
+        r.purchaseInvoiceLineId,
+        r._sum.plannedQuantity ?? zero,
+      ]),
     );
     const receivedMap = new Map(
       received.map((r) => [r.purchaseInvoiceLineId, r._sum.quantity ?? zero]),
@@ -344,9 +350,13 @@ export class ImportOperationsService {
         assignedToThisOperationQuantity: (
           assignedThisMap.get(line.id) ?? zero
         ).toFixed(3),
-        availableQuantity: (available.lessThan(0) ? zero : available).toFixed(3),
+        availableQuantity: (available.lessThan(0) ? zero : available).toFixed(
+          3,
+        ),
         receivedQuantity: receivedQty.toFixed(3),
-        pendingReceiptQuantity: (pending.lessThan(0) ? zero : pending).toFixed(3),
+        pendingReceiptQuantity: (pending.lessThan(0) ? zero : pending).toFixed(
+          3,
+        ),
       };
     });
   }

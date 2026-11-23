@@ -76,16 +76,28 @@ export class PurchaseInvoiceLineResponseDto {
   @ApiProperty({ type: String })
   lineTotal!: string;
 
-  @ApiProperty({ type: String, description: 'taxableBaseAmount en la moneda de la EMPRESA.' })
+  @ApiProperty({
+    type: String,
+    description: 'taxableBaseAmount en la moneda de la EMPRESA.',
+  })
   baseTaxableBaseAmount!: string;
 
-  @ApiProperty({ type: String, description: 'taxAmount en la moneda de la EMPRESA.' })
+  @ApiProperty({
+    type: String,
+    description: 'taxAmount en la moneda de la EMPRESA.',
+  })
   baseTaxAmount!: string;
 
-  @ApiProperty({ type: String, description: 'creditableTaxAmount en la moneda de la EMPRESA.' })
+  @ApiProperty({
+    type: String,
+    description: 'creditableTaxAmount en la moneda de la EMPRESA.',
+  })
   baseCreditableTaxAmount!: string;
 
-  @ApiProperty({ type: String, description: 'lineTotal en la moneda de la EMPRESA.' })
+  @ApiProperty({
+    type: String,
+    description: 'lineTotal en la moneda de la EMPRESA.',
+  })
   baseLineTotal!: string;
 
   @ApiProperty({
@@ -141,7 +153,8 @@ export class PurchaseInvoiceResponseDto {
 
   @ApiProperty({
     example: 'PEN',
-    description: 'Moneda de la EMPRESA (contable): en ella se contabiliza, valoriza y concilia.',
+    description:
+      'Moneda de la EMPRESA (contable): en ella se contabiliza, valoriza y concilia.',
   })
   baseCurrencyCode!: string;
 

@@ -25,6 +25,7 @@ import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
+import { purgePurchasingResidue } from './helpers/purchasing-cleanup';
 import {
   createProductRow,
   getDefaultLocationId,
@@ -294,6 +295,12 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
 
   afterAll(async () => {
     try {
+      // Retira el residuo propio (facturas, pagos, importaciones, asientos, cuentas y
+      // proveedores) para no romper otras suites que comparten la base.
+      await purgePurchasingResidue(prisma, {
+        supplierLegalNamePrefix: 'Proveedor e2e R3',
+        accountCodePrefixes: ['R3AP', 'R3RES'],
+      });
       await prisma.account.updateMany({
         where: {
           systemKey: {

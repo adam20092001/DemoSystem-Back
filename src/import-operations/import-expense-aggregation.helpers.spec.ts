@@ -25,6 +25,8 @@ function makeLine(id: string, plannedQuantity: string): ShipmentLineRow {
     unitCode: 'kg',
     purchaseInvoiceLineId: null,
     plannedQuantity: d(plannedQuantity),
+    incoterm: null,
+    incotermNamedPlace: null,
   };
 }
 

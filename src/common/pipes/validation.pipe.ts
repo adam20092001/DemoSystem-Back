@@ -33,9 +33,7 @@ export const VALIDATION_PIPE_OPTIONS: ValidationPipeOptions = {
  * cada campo (incluidos arreglos: `lines[0].quantity`).
  */
 class ContractValidationPipe extends ValidationPipe {
-  override createExceptionFactory(): (
-    errors?: ValidationError[],
-  ) => unknown {
+  override createExceptionFactory(): (errors?: ValidationError[]) => unknown {
     return (errors: ValidationError[] = []) =>
       new FieldValidationException(
         this.flattenValidationErrors(errors),

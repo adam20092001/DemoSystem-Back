@@ -47,12 +47,18 @@ export class ListImportOperationsQueryDto {
   @MaxLength(2)
   destinationCountry?: string;
 
-  @ApiPropertyOptional({ format: 'uuid', description: 'Operaciones de una factura de compra.' })
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Operaciones de una factura de compra.',
+  })
   @IsOptional()
   @IsUUID()
   purchaseInvoiceId?: string;
 
-  @ApiPropertyOptional({ description: 'true: solo históricas sin factura principal; false: solo vinculadas.' })
+  @ApiPropertyOptional({
+    description:
+      'true: solo históricas sin factura principal; false: solo vinculadas.',
+  })
   @IsOptional()
   @Transform(({ value }: { value: unknown }) =>
     value === 'true' ? true : value === 'false' ? false : value,

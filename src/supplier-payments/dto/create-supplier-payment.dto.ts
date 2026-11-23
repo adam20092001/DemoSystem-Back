@@ -97,7 +97,8 @@ export class CreateSupplierPaymentDto {
   @ApiPropertyOptional({
     type: String,
     example: '2026-11-23',
-    description: 'Fecha del tipo de cambio (YYYY-MM-DD). Por defecto, la fecha del pago.',
+    description:
+      'Fecha del tipo de cambio (YYYY-MM-DD). Por defecto, la fecha del pago.',
   })
   @IsOptional()
   @IsDateOnly()

@@ -76,6 +76,7 @@ export type PurchaseInvoiceSafeRow = Prisma.PurchaseInvoiceGetPayload<{
 
 function toSafePurchaseInvoiceLine(
   row: PurchaseInvoiceLineSafeRow,
+  sameCurrency: boolean,
 ): SafePurchaseInvoiceLine {
   return {
     id: row.id,
@@ -86,7 +87,7 @@ function toSafePurchaseInvoiceLine(
     acquisitionKind: row.acquisitionKind,
     purchasePurpose: row.purchasePurpose,
     quantity: row.quantity.toFixed(3),
-    unitCost: row.unitCostOriginal.toFixed(6),
+    unitCost: row.unitCostOriginal.toFixed(sameCurrency ? 2 : 6),
     baseUnitCost: row.unitCost.toFixed(2),
     taxCategory: row.taxCategory,
     taxBasis: row.taxBasis,
@@ -136,6 +137,11 @@ export function toSafePurchaseInvoice(
     cancellationReason: row.cancellationReason,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    lines: row.lines.map(toSafePurchaseInvoiceLine),
+    lines: row.lines.map((line) =>
+      toSafePurchaseInvoiceLine(
+        line,
+        row.currencyCode === row.baseCurrencyCode,
+      ),
+    ),
   };
 }

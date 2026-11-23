@@ -1404,6 +1404,29 @@ de facturas, la recepción, los pagos a proveedores y las importaciones.
   validaciones intactas, rutas prohibidas, otros roles) y ajuste de las aserciones de R1 que cerraban estas rutas.
 - Contrato y matriz para Angular: `docs/purchasing-full-access-api.md`.
 
+**R4 — Incoterm, compras multimoneda, importación vinculada a compra, países y errores por campo**
+(rama `feat/r4-business-enhancements`, base `main` en `9ee9c72`, **implementada y validada, sin integrar ni desplegar**;
+**4 migraciones nuevas (36–39)**, aplicadas solo en PostgreSQL 16 descartables, nunca en `pos_db`/`pos_db_test`; requieren R2-ACT (34) y R2-C (35)
+aplicadas antes). Contrato para Angular: `docs/r4-business-enhancements-api.md`.
+
+- **Errores:** `kind` (`FORM`/`GENERAL`) y `errors[]` (`field` con índices `lines[0].quantity`, `type` REQUIRED/FORMAT/BUSINESS, `code`) añadidos al cuerpo de error sin
+  cambiar `message` ni los códigos HTTP; el pipe global los genera en todos los módulos; las reglas de negocio de Países, Importaciones, Incoterm, Compras multimoneda y
+  Pagos usan excepciones estructuradas (`src/common/errors/error-contract.ts`).
+- **Incoterm** (`ImportShipment.incoterm/incotermNamedPlace/incotermVersion`): 11 códigos 2020, lugar obligatorio con código, versión 2020 por defecto, `FAS/FOB/CFR/CIF` solo
+  `SEA` (también CHECK en base), edición solo en `PLANNED`; sin efectos de stock, costos ni asientos.
+- **Países** (`countries`, `CountriesModule`): catálogo compartido (CN, PE, IN + códigos históricos `pendingReview`), FK desde proveedores y operaciones; ADMIN y **PURCHASING**
+  registran, solo ADMIN edita/activa/desactiva; nunca se eliminan países usados.
+- **Importación↔compra:** `ImportOperation.purchaseInvoiceId` obligatorio en operaciones **nuevas** (la exige el servicio; histórica = `isLegacyUnlinked`), referencia `IMP-AAAA-NNNNNN`
+  del servidor (correlativo anual transaccional), proveedor heredado, embarques solo con líneas de la factura `CONFIRMED`, anular una factura se bloquea con importación/embarques activos;
+  `GET /import-reports/legacy-operations` (solo lectura). Completar una importación sigue sin generar stock, asientos ni capitalización.
+- **Multimoneda de compras:** moneda contable = la de la empresa; `exchangeRate` = moneda de la empresa por 1 unidad de la del documento, manual por documento y congelada al
+  confirmar. Columnas contables = moneda de la empresa; `*Original` = moneda del documento. **Pagos política A** (una moneda, facturas de esa moneda), valor en libros proporcional
+  con residuo en la asignación que salda, **diferencia de cambio realizada** a `FX_GAIN_REALIZED`/`FX_LOSS_REALIZED` (mapeo de ADMIN; sin él, 409 sin efectos), CxP con saldos por moneda y
+  totales en moneda de la empresa. **No** hay revaluación periódica, pagos cruzados ni tasas externas.
+- **Pruebas:** `test/r4-business-enhancements.e2e-spec.ts` (33), specs unitarias de contrato de errores, Incoterm, correlativo, aritmética de monedas y países; suites existentes
+  adaptadas al modelo nuevo (operaciones históricas por fixture donde se prueba el modelo anterior).
+- **Validación (PostgreSQL 16 descartable):** 155 suites / 4499 pruebas unitarias; 86 de scripts; E2E completa en base nueva (ruta A, migraciones 1–39 desde cero): 61 suites / 2028 pruebas, 0 fallos; ruta B (esquema con migraciones 1–35 y datos históricos sintéticos, luego 36–39): sin deriva, facturas/pagos históricos con tasa 1 e importes intactos, países históricos `pendingReview`, operaciones históricas `isLegacyUnlinked`. Las suites E2E de R4/R3/R2 limpian su residuo (`test/helpers/purchasing-cleanup.ts`).
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

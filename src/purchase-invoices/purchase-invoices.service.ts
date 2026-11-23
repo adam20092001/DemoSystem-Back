@@ -501,7 +501,9 @@ export class PurchaseInvoicesService {
               (keepsForeignRate ? cur.exchangeRate.toFixed() : undefined),
             exchangeRateDate:
               input.exchangeRateDate ??
-              (currencyChanged ? undefined : fromPrismaDate(cur.exchangeRateDate)),
+              (currencyChanged
+                ? undefined
+                : fromPrismaDate(cur.exchangeRateDate)),
           },
           settingsNow.currencyCode,
           fromPrismaDate(cur.issueDate),
@@ -553,7 +555,10 @@ export class PurchaseInvoicesService {
           await tx.purchaseInvoiceLine.update({
             where: { id: line.id },
             data: {
-              unitCost: toBaseAmount(line.unitCostOriginal, currency.exchangeRate),
+              unitCost: toBaseAmount(
+                line.unitCostOriginal,
+                currency.exchangeRate,
+              ),
               taxableBaseAmount: base.taxableBaseAmount,
               taxAmount: base.taxAmount,
               creditableTaxAmount: base.creditableTaxAmount,
@@ -859,7 +864,9 @@ export class PurchaseInvoicesService {
           purchaseInvoiceLine: { purchaseInvoiceId: locked.id },
           importShipment: {
             status: { not: ImportShipmentStatus.CANCELLED },
-            importOperation: { status: { not: ImportOperationStatus.CANCELLED } },
+            importOperation: {
+              status: { not: ImportOperationStatus.CANCELLED },
+            },
           },
         },
       });
@@ -1022,7 +1029,10 @@ export class PurchaseInvoicesService {
       }
 
       const quantity = this.parseDecimalInput(line.quantity, 'quantity');
-      const unitCostOriginal = this.parseDecimalInput(line.unitCost, 'unitCost');
+      const unitCostOriginal = this.parseDecimalInput(
+        line.unitCost,
+        'unitCost',
+      );
       const creditableTaxAmountInput =
         line.creditableTaxAmount !== undefined
           ? this.parseDecimalInput(

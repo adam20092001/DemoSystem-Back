@@ -105,7 +105,8 @@ export class ImportOperationsController {
   }
 
   @ApiOperation({
-    summary: 'Crear una operación de importación (ADMIN, PURCHASING; nace DRAFT)',
+    summary:
+      'Crear una operación de importación (ADMIN, PURCHASING; nace DRAFT)',
     description:
       'R4: exige purchaseInvoiceId (factura de compra DRAFT o CONFIRMED, no anulada); el proveedor se hereda de la factura y la referencia IMP-AAAA-NNNNNN la genera el servidor. Con la factura en DRAFT no se pueden asignar líneas a embarques hasta confirmarla (nunca se confirma automáticamente). Las operaciones históricas (isLegacyUnlinked) siguen consultables sin factura principal.',
   })

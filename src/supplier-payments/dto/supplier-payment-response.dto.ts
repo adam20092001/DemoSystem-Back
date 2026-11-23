@@ -8,16 +8,31 @@ export class SupplierPaymentAllocationResponseDto {
   @ApiProperty({ format: 'uuid' })
   purchaseInvoiceId!: string;
 
-  @ApiProperty({ type: String, description: 'En la moneda del PAGO (= moneda de la factura).' })
+  @ApiProperty({
+    type: String,
+    description: 'En la moneda del PAGO (= moneda de la factura).',
+  })
   amount!: string;
 
-  @ApiProperty({ type: String, description: 'Valor en libros cancelado, en la moneda de la EMPRESA (a la tasa histórica de la factura).' })
+  @ApiProperty({
+    type: String,
+    description:
+      'Valor en libros cancelado, en la moneda de la EMPRESA (a la tasa histórica de la factura).',
+  })
   carryingBaseAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Importe pagado, en la moneda de la EMPRESA (a la tasa del pago).' })
+  @ApiProperty({
+    type: String,
+    description:
+      'Importe pagado, en la moneda de la EMPRESA (a la tasa del pago).',
+  })
   settledBaseAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Pagado menos valor en libros (moneda de la empresa): positivo = pérdida cambiaria, negativo = ganancia.' })
+  @ApiProperty({
+    type: String,
+    description:
+      'Pagado menos valor en libros (moneda de la empresa): positivo = pérdida cambiaria, negativo = ganancia.',
+  })
   fxDifferenceAmount!: string;
 }
 
@@ -32,25 +47,47 @@ export class SupplierPaymentResponseDto {
   @ApiProperty({ type: String, example: '2026-10-21' })
   paymentDate!: string;
 
-  @ApiProperty({ type: String, description: 'En la moneda del PAGO (currencyCode).' })
+  @ApiProperty({
+    type: String,
+    description: 'En la moneda del PAGO (currencyCode).',
+  })
   amount!: string;
 
-  @ApiProperty({ type: String, example: 'USD', description: 'Moneda del pago = moneda de todas las facturas que paga.' })
+  @ApiProperty({
+    type: String,
+    example: 'USD',
+    description: 'Moneda del pago = moneda de todas las facturas que paga.',
+  })
   currencyCode!: string;
 
-  @ApiProperty({ type: String, example: 'PEN', description: 'Moneda de la EMPRESA (contable).' })
+  @ApiProperty({
+    type: String,
+    example: 'PEN',
+    description: 'Moneda de la EMPRESA (contable).',
+  })
   baseCurrencyCode!: string;
 
-  @ApiProperty({ type: String, example: '3.80000000', description: 'Moneda de la empresa por 1 unidad de moneda del pago.' })
+  @ApiProperty({
+    type: String,
+    example: '3.80000000',
+    description: 'Moneda de la empresa por 1 unidad de moneda del pago.',
+  })
   exchangeRate!: string;
 
   @ApiProperty({ type: String, example: '2026-11-23' })
   exchangeRateDate!: string;
 
-  @ApiProperty({ type: String, description: 'Equivalente del pago en la moneda de la EMPRESA.' })
+  @ApiProperty({
+    type: String,
+    description: 'Equivalente del pago en la moneda de la EMPRESA.',
+  })
   baseAmount!: string;
 
-  @ApiProperty({ type: String, description: 'Suma de las diferencias de cambio realizadas (positivo = pérdida, negativo = ganancia).' })
+  @ApiProperty({
+    type: String,
+    description:
+      'Suma de las diferencias de cambio realizadas (positivo = pérdida, negativo = ganancia).',
+  })
   fxDifferenceAmount!: string;
 
   @ApiProperty({

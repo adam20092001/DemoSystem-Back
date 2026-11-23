@@ -177,7 +177,7 @@ describe('Import Reports — Fase B4 (e2e)', () => {
     // R4: operación HISTÓRICA por fixture (la API ya exige factura de compra).
     const created = await createLegacyImportOperation(prisma, { reference });
     createdImportOperationIds.push(created.id);
-    return created as unknown as SafeImportOperationBody;
+    return created;
   }
 
   async function createArrivedShipmentWithLine(
