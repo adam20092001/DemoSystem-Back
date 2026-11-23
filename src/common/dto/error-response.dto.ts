@@ -32,4 +32,31 @@ export class ErrorResponseDto {
       'sin depender del texto de message. Ausente en la mayoría de errores.',
   })
   code?: string;
+
+  @ApiProperty({
+    enum: ['FORM', 'GENERAL'],
+    example: 'FORM',
+    description:
+      'FORM: el error se atribuye a uno o más campos (ver errors). GENERAL: conflicto general sin campo responsable.',
+  })
+  kind!: 'FORM' | 'GENERAL';
+
+  @ApiPropertyOptional({
+    description:
+      'Errores por campo. Solo presente cuando kind=FORM. field usa notación de arreglo (lines[0].quantity); type es REQUIRED, FORMAT o BUSINESS.',
+    example: [
+      {
+        field: 'lines[0].quantity',
+        code: 'REQUIRED',
+        type: 'REQUIRED',
+        message: 'quantity should not be empty',
+      },
+    ],
+  })
+  errors?: {
+    field: string;
+    code: string;
+    type: 'REQUIRED' | 'FORMAT' | 'BUSINESS';
+    message: string;
+  }[];
 }

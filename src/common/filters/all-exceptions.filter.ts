@@ -9,6 +9,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
 import { ErrorResponseDto } from '../dto/error-response.dto';
+import { ApiFieldError, ErrorKind } from '../errors/error-contract';
 
 /** Resultado intermedio antes de construir la respuesta final. */
 interface ResolvedError {
@@ -17,6 +18,9 @@ interface ResolvedError {
   error: string;
   /** Código estable para el frontend (p. ej. "ACCOUNT_BLOCKED"). Opcional. */
   code?: string;
+  /** R4: FORM si hay errores atribuibles a campos; GENERAL en otro caso. */
+  kind?: ErrorKind;
+  errors?: ApiFieldError[];
 }
 
 /** Cuerpo que NestJS adjunta a sus HttpException estándar. */
@@ -24,6 +28,8 @@ interface HttpExceptionBody {
   message?: string | string[];
   error?: string;
   code?: string;
+  kind?: ErrorKind;
+  errors?: ApiFieldError[];
 }
 
 /** A partir de este código el fallo se considera no controlado y se registra. */
@@ -74,6 +80,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       timestamp: new Date().toISOString(),
       path: request.url,
       ...(resolved.code !== undefined ? { code: resolved.code } : {}),
+      kind: resolved.kind ?? 'GENERAL',
+      ...(resolved.errors !== undefined && resolved.errors.length > 0
+        ? { errors: resolved.errors }
+        : {}),
     };
 
     response.status(resolved.statusCode).json(body);
@@ -131,6 +141,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       message: body.message ?? exception.message,
       error: body.error ?? label(statusCode),
       ...(typeof body.code === 'string' ? { code: body.code } : {}),
+      ...(Array.isArray(body.errors) && body.errors.length > 0
+        ? { errors: body.errors, kind: 'FORM' as const }
+        : {}),
     };
   }
 
