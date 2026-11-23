@@ -27,6 +27,7 @@ import {
   ShipmentReconciliationResponseDto,
 } from './dto/import-reports-response.dto';
 import { ImportOperationSummaryQueryDto } from './dto/import-operation-summary-query.dto';
+import { LegacyImportOperationsQueryDto } from './dto/legacy-import-operations-query.dto';
 import { ShipmentReconciliationQueryDto } from './dto/shipment-reconciliation-query.dto';
 import { ImportReportsService } from './import-reports.service';
 
@@ -55,6 +56,21 @@ const READ_ROLES = [
 @Controller('import-reports')
 export class ImportReportsController {
   constructor(private readonly importReportsService: ImportReportsService) {}
+
+  @ApiOperation({
+    summary: 'Operaciones históricas sin factura principal (solo lectura)',
+    description:
+      'R4: lista las operaciones anteriores al modelo con factura principal (isLegacyUnlinked) con las facturas que sus líneas de embarque ya referencian (NO_INVOICE_LINKS, SINGLE_INVOICE, MULTIPLE_INVOICES). Nunca regulariza ni asigna nada.',
+  })
+  @ApiOkResponse({ description: 'Página de operaciones históricas con sus facturas candidatas.' })
+  @Roles(...READ_ROLES)
+  @Get('legacy-operations')
+  getLegacyOperations(
+    @Query() query: LegacyImportOperationsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.importReportsService.getLegacyOperations(query, user.role);
+  }
 
   @ApiOperation({
     summary: 'Resumen por operación de importación',

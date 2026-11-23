@@ -93,10 +93,12 @@ describe('PurchaseInvoicesController', () => {
           ipAddress: '10.0.0.1',
         }),
       );
-      expect(
-        'currencyCode' in
-          (service.create.mock.calls[0][0] as Record<string, unknown>),
-      ).toBe(false);
+      // R4: la moneda del documento SÍ puede venir del DTO (por defecto la de la
+      // empresa); lo que nunca se acepta es el estado ni los importes del cliente.
+      const input = service.create.mock.calls[0][0] as Record<string, unknown>;
+      expect(input.currencyCode).toBeUndefined();
+      expect('status' in input).toBe(false);
+      expect('totalAmount' in input).toBe(false);
     });
 
     it('confirm delega id + actor, sin body', async () => {

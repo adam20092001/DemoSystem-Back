@@ -201,7 +201,10 @@ export function convertLineToBase(
   original: LineOriginalAmounts,
   exchangeRate: Prisma.Decimal,
 ): LineOriginalAmounts {
-  const taxableBaseAmount = toBaseAmount(original.taxableBaseAmount, exchangeRate);
+  const taxableBaseAmount = toBaseAmount(
+    original.taxableBaseAmount,
+    exchangeRate,
+  );
   const taxAmount = toBaseAmount(original.taxAmount, exchangeRate);
   let creditableTaxAmount = toBaseAmount(
     original.creditableTaxAmount,

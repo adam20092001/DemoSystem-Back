@@ -95,6 +95,18 @@ describe('Suppliers — Fase A5.1 (e2e)', () => {
     prisma = createTestPrismaClient();
     app = await createE2eApp();
 
+    // R4: los países del catálogo compartido que usan estas pruebas (CN/PE/IN ya vienen de la migración).
+    for (const [code, name] of [
+      ['US', 'Estados Unidos'],
+      ['CL', 'Chile'],
+    ]) {
+      await prisma.country.upsert({
+        where: { code },
+        update: {},
+        create: { code, name },
+      });
+    }
+
     await upsertFixtureUser(prisma, {
       username: MANAGEMENT_USERNAME,
       email: 'e2e_management_suppliers@demosystem.test',

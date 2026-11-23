@@ -32,6 +32,9 @@ function makeOperationRow(overrides: Partial<Record<string, unknown>> = {}) {
     status: ImportOperationStatus.DRAFT,
     externalReference: null,
     notes: null,
+    purchaseInvoiceId: null,
+    isLegacyUnlinked: true,
+    purchaseInvoice: null,
     createdBy: makeActor(),
     createdAt: NOW,
     updatedAt: NOW,
@@ -54,6 +57,10 @@ function createTxMock() {
     },
     importShipment: {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
+    // R4: catálogo de países (existente y activo).
+    country: {
+      findUnique: jest.fn().mockResolvedValue({ active: true }),
     },
     $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
   };
@@ -98,11 +105,25 @@ describe('ImportOperationsService', () => {
   });
 
   describe('create', () => {
-    it('crea una operación DRAFT con los campos normalizados', async () => {
+    const INVOICE_ID = '11111111-1111-4111-8111-111111111111';
+
+    /** Primera llamada: lock de la factura; segunda: correlativo anual. */
+    function mockInvoiceAndSequence(
+      status: string = 'DRAFT',
+      sequence = 1,
+    ): void {
+      prisma.tx.$queryRaw.mockReset();
+      prisma.tx.$queryRaw
+        .mockResolvedValueOnce([{ id: INVOICE_ID, status }])
+        .mockResolvedValueOnce([{ lastNumber: sequence }]);
+    }
+
+    it('crea una operación DRAFT vinculada a la factura, con referencia generada IMP-AAAA-NNNNNN', async () => {
+      mockInvoiceAndSequence('DRAFT', 7);
       prisma.tx.importOperation.create.mockResolvedValue(makeOperationRow());
 
       const result = await service.create({
-        reference: '  imp-2026-0001  ',
+        purchaseInvoiceId: INVOICE_ID,
         originCountry: 'cn',
         destinationCountry: 'pe',
         actorUserId: ACTOR_ID,
@@ -113,18 +134,65 @@ describe('ImportOperationsService', () => {
       const call = prisma.tx.importOperation.create.mock.calls[0][0] as {
         data: Record<string, unknown>;
       };
-      expect(call.data.reference).toBe('imp-2026-0001');
+      expect(call.data.reference).toMatch(/^IMP-\d{4}-000007$/);
+      expect(call.data.purchaseInvoiceId).toBe(INVOICE_ID);
+      expect(call.data.isLegacyUnlinked).toBe(false);
       expect(call.data.originCountry).toBe('CN');
       expect(call.data.destinationCountry).toBe('PE');
       expect(call.data.status).toBe(ImportOperationStatus.DRAFT);
       expect(auditService.record).toHaveBeenCalledTimes(1);
     });
 
-    it('originCountry/destinationCountry con formato inválido: BadRequestException', async () => {
+    it('admite una factura CONFIRMED', async () => {
+      mockInvoiceAndSequence('CONFIRMED');
+      prisma.tx.importOperation.create.mockResolvedValue(makeOperationRow());
       await expect(
         service.create({
-          reference: 'IMP-1',
-          originCountry: 'CHN',
+          purchaseInvoiceId: INVOICE_ID,
+          originCountry: 'CN',
+          destinationCountry: 'PE',
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('factura inexistente: 400 (campo purchaseInvoiceId) y nunca crea ni consume correlativo', async () => {
+      prisma.tx.$queryRaw.mockReset();
+      prisma.tx.$queryRaw.mockResolvedValueOnce([]);
+      await expect(
+        service.create({
+          purchaseInvoiceId: INVOICE_ID,
+          originCountry: 'CN',
+          destinationCountry: 'PE',
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.importOperation.create).not.toHaveBeenCalled();
+      expect(prisma.tx.$queryRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('factura anulada: 409 y nunca crea', async () => {
+      mockInvoiceAndSequence('CANCELLED');
+      await expect(
+        service.create({
+          purchaseInvoiceId: INVOICE_ID,
+          originCountry: 'CN',
+          destinationCountry: 'PE',
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.tx.importOperation.create).not.toHaveBeenCalled();
+    });
+
+    it('país inexistente en el catálogo: 400 y nunca crea', async () => {
+      prisma.tx.country.findUnique.mockResolvedValueOnce(null);
+      await expect(
+        service.create({
+          purchaseInvoiceId: INVOICE_ID,
+          originCountry: 'ZZ',
           destinationCountry: 'PE',
           actorUserId: ACTOR_ID,
           ipAddress: null,
@@ -133,16 +201,30 @@ describe('ImportOperationsService', () => {
       expect(prisma.tx.importOperation.create).not.toHaveBeenCalled();
     });
 
-    it('reference vacía: BadRequestException', async () => {
+    it('país inactivo: 409 y nunca crea', async () => {
+      prisma.tx.country.findUnique.mockResolvedValueOnce({ active: false });
       await expect(
         service.create({
-          reference: '   ',
+          purchaseInvoiceId: INVOICE_ID,
           originCountry: 'CN',
           destinationCountry: 'PE',
           actorUserId: ACTOR_ID,
           ipAddress: null,
         }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('originCountry/destinationCountry con formato inválido: BadRequestException', async () => {
+      await expect(
+        service.create({
+          purchaseInvoiceId: INVOICE_ID,
+          originCountry: 'CHN',
+          destinationCountry: 'PE',
+          actorUserId: ACTOR_ID,
+          ipAddress: null,
+        }),
       ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.tx.importOperation.create).not.toHaveBeenCalled();
     });
   });
 

@@ -57,9 +57,15 @@ function makeSafeInvoiceRow(overrides: Partial<Record<string, unknown>> = {}) {
     dueDate: null,
     paymentTermsDays: null,
     currencyCode: 'PEN',
+    baseCurrencyCode: 'PEN',
+    exchangeRate: d('1'),
+    exchangeRateDate: new Date('2026-03-01T00:00:00.000Z'),
     subtotal: d('100.00'),
     taxAmount: d('18.00'),
     totalAmount: d('118.00'),
+    subtotalOriginal: d('100.00'),
+    taxAmountOriginal: d('18.00'),
+    totalAmountOriginal: d('118.00'),
     status: PurchaseInvoiceStatus.DRAFT,
     postedEntryId: null,
     createdByUserId: ACTOR_ID,
@@ -83,6 +89,7 @@ function makeDetailedInvoiceRow(
     documentSeries: 'F001',
     documentNumber: '123',
     accountingDate: new Date('2026-03-01T00:00:00.000Z'),
+    baseCurrencyCode: 'PEN',
     supplier: { status: SupplierStatus.ACTIVE },
     lines: [
       {
@@ -120,6 +127,13 @@ function createTxMock() {
     // Fase A5.3: guardia de cancel() contra pagos ACTIVE asignados.
     supplierPaymentAllocation: {
       count: jest.fn<Promise<number>, [unknown]>(),
+    },
+    // R4: guardias de cancel() contra importaciones y embarques activos.
+    importOperation: {
+      count: jest.fn<Promise<number>, [unknown]>().mockResolvedValue(0),
+    },
+    importShipmentLine: {
+      count: jest.fn<Promise<number>, [unknown]>().mockResolvedValue(0),
     },
     $queryRaw: jest.fn<Promise<unknown[]>, [unknown]>(),
   };

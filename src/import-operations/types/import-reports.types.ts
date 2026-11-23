@@ -47,6 +47,13 @@ export interface ImportOperationSummaryRow {
   status: ImportOperationStatus;
   originCountry: string;
   destinationCountry: string;
+  /** R4: factura de compra principal (null solo en operaciones históricas). */
+  purchaseInvoiceId: string | null;
+  isLegacyUnlinked: boolean;
+  purchaseInvoiceDocument: string | null;
+  purchaseInvoiceStatus: string | null;
+  supplierId: string | null;
+  supplierLegalName: string | null;
   createdAt: Date;
   completedAt: Date | null;
   cancelledAt: Date | null;
@@ -54,6 +61,43 @@ export interface ImportOperationSummaryRow {
   cargoByUnit: CargoUnitAggregate[];
   relatedPurchaseInvoices: RelatedPurchaseInvoiceRef[];
   expensesByCurrency: ExpenseCurrencyAggregate[];
+}
+
+/**
+ * R4: operación HISTÓRICA (anterior al modelo con factura principal). El reporte
+ * es de SOLO LECTURA y nunca regulariza nada: lista, para cada una, las facturas
+ * de compra que sus líneas de embarque ya referencian (candidatas a una futura
+ * regularización explícita y aprobada).
+ */
+export type LegacyImportCandidateKind =
+  | 'NO_INVOICE_LINKS'
+  | 'SINGLE_INVOICE'
+  | 'MULTIPLE_INVOICES';
+
+export interface LegacyImportCandidateInvoice {
+  purchaseInvoiceId: string;
+  documentLabel: string;
+  status: string;
+  supplierId: string;
+  supplierLegalName: string;
+}
+
+export interface LegacyImportOperationRow {
+  id: string;
+  reference: string;
+  status: ImportOperationStatus;
+  originCountry: string;
+  destinationCountry: string;
+  createdAt: Date;
+  shipmentCount: number;
+  shipmentLineCount: number;
+  candidateKind: LegacyImportCandidateKind;
+  candidateInvoices: LegacyImportCandidateInvoice[];
+}
+
+export interface LegacyImportOperationsQuery {
+  page?: number;
+  limit?: number;
 }
 
 export interface ImportOperationSummaryQuery {
@@ -92,6 +136,9 @@ export interface ShipmentReconciliationRow {
   descriptionSnapshot: string;
   unitCode: string | null;
   purchaseInvoiceLineId: string | null;
+  /** R4: Incoterm del embarque (null si no lo declara o es histórico). */
+  incoterm: string | null;
+  incotermNamedPlace: string | null;
   plannedQuantity: string;
   linkedQuantity: string;
   remainingQuantity: string;

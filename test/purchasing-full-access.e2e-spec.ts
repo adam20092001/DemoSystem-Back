@@ -511,7 +511,8 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       // Operación
       const op = mustOk<IdBody & { status: string }>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3-${nextSuffix()}`,
+          // R4: la operación se vincula a la factura de compra (referencia generada por el servidor).
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),
@@ -769,9 +770,11 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
     });
 
     it('I2. anulaciones según estado: operación, embarque y gasto (200) y estados terminales siguen rechazando (409)', async () => {
+      const supplierId = await newSupplier();
+      const invoice = await confirmedInvoice(supplierId, '2.000');
       const op = mustOk<IdBody>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3C-${nextSuffix()}`,
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),
@@ -781,7 +784,13 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       const shipment = mustOk<ShipmentBody>(
         await asPurchasing('post', `/import-operations/${op.id}/shipments`, {
           transportMode: ImportTransportMode.AIR,
-          lines: [{ descriptionSnapshot: 'Carga', plannedQuantity: '1.000' }],
+          lines: [
+            {
+              descriptionSnapshot: 'Carga',
+              plannedQuantity: '1.000',
+              purchaseInvoiceLineId: invoice.lines[0].id,
+            },
+          ],
         }),
         201,
         'crear embarque',
@@ -1014,7 +1023,7 @@ describe('R3 — PURCHASING: Compras e Importaciones completas (e2e)', () => {
       const invoice = await confirmedInvoice(supplierId, '4.000');
       const op = mustOk<IdBody>(
         await asPurchasing('post', '/import-operations', {
-          reference: `IMP-R3V-${nextSuffix()}`,
+          purchaseInvoiceId: invoice.id,
           originCountry: 'CN',
           destinationCountry: 'PE',
         }),

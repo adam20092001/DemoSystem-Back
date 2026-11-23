@@ -25,11 +25,19 @@ function makeInvoiceRow(overrides: Partial<Record<string, unknown>> = {}) {
     issueDate: new Date('2026-03-01T00:00:00.000Z'),
     dueDate: null,
     currencyCode: 'PEN',
+    baseCurrencyCode: 'PEN',
+    exchangeRate: d('1'),
+    exchangeRateDate: new Date('2026-03-01T00:00:00.000Z'),
     totalAmount: d('150.00'),
+    totalAmountOriginal: d('150.00'),
     postedEntryId: ENTRY_ID,
     supplier: { legalName: 'Proveedor Uno', documentNumber: '20123456789' },
     status: 'CONFIRMED',
     ...overrides,
+    // R4: en estas pruebas el original coincide con el contable (tasa 1).
+    ...(overrides.totalAmount !== undefined && overrides.totalAmountOriginal === undefined
+      ? { totalAmountOriginal: overrides.totalAmount }
+      : {}),
   };
 }
 
@@ -148,7 +156,7 @@ describe('AccountsPayableService', () => {
 
     it('con pago ACTIVE parcial: balanceDue/status recalculados desde la agregación', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') } },
       ]);
       const result = await service.list({}, RoleName.ADMIN);
       expect(result.data[0].paidAmount).toBe('50.00');
@@ -158,7 +166,7 @@ describe('AccountsPayableService', () => {
 
     it('pago ACTIVE que cubre el total: status=PAID', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
       ]);
       const result = await service.list({}, RoleName.ADMIN);
       expect(result.data[0].status).toBe('PAID');
@@ -208,15 +216,20 @@ describe('AccountsPayableService', () => {
 
     it('incluye historial de pagos ACTIVE y CANCELLED, pero el saldo solo cuenta los ACTIVE', async () => {
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('50.00'), carryingBaseAmount: d('50.00') } },
       ]);
       prisma.tx.supplierPaymentAllocation.findMany.mockResolvedValue([
         {
           amount: d('50.00'),
+          carryingBaseAmount: d('50.00'),
+          settledBaseAmount: d('50.00'),
+          fxDifferenceAmount: d('0.00'),
           createdAt: new Date('2026-03-05T00:00:00.000Z'),
           supplierPayment: {
             id: 'payment-1',
             status: 'ACTIVE',
+            currencyCode: 'PEN',
+            exchangeRate: d('1'),
             paymentDate: new Date('2026-03-05T00:00:00.000Z'),
             paymentMethodCode: 'CASH',
             reference: null,
@@ -224,10 +237,15 @@ describe('AccountsPayableService', () => {
         },
         {
           amount: d('30.00'),
+          carryingBaseAmount: d('30.00'),
+          settledBaseAmount: d('30.00'),
+          fxDifferenceAmount: d('0.00'),
           createdAt: new Date('2026-03-01T00:00:00.000Z'),
           supplierPayment: {
             id: 'payment-2',
             status: 'CANCELLED',
+            currencyCode: 'PEN',
+            exchangeRate: d('1'),
             paymentDate: new Date('2026-03-01T00:00:00.000Z'),
             paymentMethodCode: 'TRANSFER',
             reference: 'OP-001',
@@ -261,7 +279,7 @@ describe('AccountsPayableService', () => {
         }),
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('40.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('40.00'), carryingBaseAmount: d('40.00') } },
       ]);
 
       const result = await service.getSummary({}, RoleName.ADMIN);
@@ -367,7 +385,7 @@ describe('AccountsPayableService', () => {
         },
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
       ]);
       prisma.tx.account.findMany.mockResolvedValue([
         { id: LIABILITY_ACCOUNT_ID, code: 'AP', name: 'Cuentas por pagar' },
@@ -396,7 +414,7 @@ describe('AccountsPayableService', () => {
         },
       ]);
       prisma.tx.supplierPaymentAllocation.groupBy.mockResolvedValue([
-        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00') } },
+        { purchaseInvoiceId: INVOICE_ID, _sum: { amount: d('150.00'), carryingBaseAmount: d('150.00') } },
       ]);
       prisma.tx.account.findMany.mockResolvedValue([
         { id: LIABILITY_ACCOUNT_ID, code: 'AP', name: 'Cuentas por pagar' },

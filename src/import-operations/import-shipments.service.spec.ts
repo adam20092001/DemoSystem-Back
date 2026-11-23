@@ -83,6 +83,11 @@ function createTxMock() {
   return {
     importOperation: {
       update: jest.fn<Promise<unknown>, [unknown]>(),
+      findUniqueOrThrow: jest.fn().mockResolvedValue({
+        id: 'operation-1',
+        purchaseInvoiceId: null,
+        isLegacyUnlinked: true,
+      }),
     },
     importShipment: {
       create: jest.fn<Promise<unknown>, [unknown]>(),
@@ -139,7 +144,12 @@ describe('ImportShipmentsService', () => {
     auditService.record.mockResolvedValue(undefined);
     // Lock de ImportOperation por defecto: DRAFT (primer embarque).
     prisma.tx.$queryRaw.mockResolvedValue([
-      { id: OPERATION_ID, status: ImportOperationStatus.DRAFT },
+      {
+          id: OPERATION_ID,
+          status: ImportOperationStatus.DRAFT,
+          purchaseInvoiceId: null,
+          isLegacyUnlinked: true,
+        },
     ]);
     prisma.tx.importShipmentLine.groupBy.mockResolvedValue([]);
     prisma.tx.importExpenseAllocation.findFirst.mockResolvedValue(null);
@@ -181,7 +191,12 @@ describe('ImportShipmentsService', () => {
 
     it('operación IN_PROGRESS: NO vuelve a transicionar (idempotente)', async () => {
       prisma.tx.$queryRaw.mockResolvedValue([
-        { id: OPERATION_ID, status: ImportOperationStatus.IN_PROGRESS },
+        {
+          id: OPERATION_ID,
+          status: ImportOperationStatus.IN_PROGRESS,
+          purchaseInvoiceId: null,
+          isLegacyUnlinked: true,
+        },
       ]);
       prisma.tx.importShipment.create.mockResolvedValue(makeShipmentRow());
 
@@ -256,11 +271,20 @@ describe('ImportShipmentsService', () => {
       ): void {
         prisma.tx.$queryRaw
           .mockResolvedValueOnce([
-            { id: OPERATION_ID, status: ImportOperationStatus.DRAFT },
+            {
+          id: OPERATION_ID,
+          status: ImportOperationStatus.DRAFT,
+          purchaseInvoiceId: null,
+          isLegacyUnlinked: true,
+        },
           ])
+          // R4: facturas implicadas (ids) y su lock FOR SHARE, antes de bloquear las líneas.
+          .mockResolvedValueOnce([{ id: 'invoice-1' }])
+          .mockResolvedValueOnce([{ id: 'invoice-1' }])
           .mockResolvedValueOnce([
             {
               id: INVOICE_LINE_ID,
+              invoiceId: 'invoice-1',
               quantity: d(quantity),
               productId,
               invoiceStatus,
@@ -466,13 +490,16 @@ describe('ImportShipmentsService', () => {
 
   describe('depart', () => {
     it('PLANNED -> IN_TRANSIT', async () => {
-      prisma.tx.$queryRaw.mockResolvedValue([
-        {
-          id: SHIPMENT_ID,
-          importOperationId: OPERATION_ID,
-          status: ImportShipmentStatus.PLANNED,
-        },
-      ]);
+      prisma.tx.$queryRaw
+        .mockResolvedValueOnce([
+          {
+            id: SHIPMENT_ID,
+            importOperationId: OPERATION_ID,
+            status: ImportShipmentStatus.PLANNED,
+          },
+        ])
+        // R4: la operación no tiene factura vinculada (histórica): sin guardia.
+        .mockResolvedValueOnce([]);
       prisma.tx.importShipment.update.mockResolvedValue(
         makeShipmentRow({ status: ImportShipmentStatus.IN_TRANSIT }),
       );

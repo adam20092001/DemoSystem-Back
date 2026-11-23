@@ -97,7 +97,8 @@ export function resolveIncotermState(
       : normalizePlace(current.incotermNamedPlace);
   if (place === null) {
     throw new FieldBadRequestException({
-      message: 'Con un incoterm es obligatorio indicar el lugar o puerto convenido',
+      message:
+        'Con un incoterm es obligatorio indicar el lugar o puerto convenido',
       code: 'INCOTERM_NAMED_PLACE_REQUIRED',
       field: 'incotermNamedPlace',
       type: 'REQUIRED',
@@ -105,7 +106,9 @@ export function resolveIncotermState(
   }
 
   const version =
-    patch.incotermVersion ?? current.incotermVersion ?? DEFAULT_INCOTERM_VERSION;
+    patch.incotermVersion ??
+    current.incotermVersion ??
+    DEFAULT_INCOTERM_VERSION;
   if (!SUPPORTED_INCOTERM_VERSIONS.includes(version)) {
     throw new FieldBadRequestException({
       message: `incotermVersion no soportada: solo ${SUPPORTED_INCOTERM_VERSIONS.join(', ')}`,
@@ -119,7 +122,8 @@ export function resolveIncotermState(
     MARITIME_ONLY_INCOTERMS.has(nextIncoterm) &&
     transportMode !== ImportTransportMode.SEA
   ) {
-    const blamesMode = context.transportModeChanged && patch.incoterm === undefined;
+    const blamesMode =
+      context.transportModeChanged && patch.incoterm === undefined;
     throw new FieldBadRequestException({
       message: `El incoterm ${nextIncoterm} solo es compatible con transporte marítimo (SEA)`,
       code: 'INCOTERM_REQUIRES_SEA_TRANSPORT',

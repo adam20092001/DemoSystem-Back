@@ -22,6 +22,7 @@ import {
 import { createE2eApp } from './helpers/e2e-app';
 import { upsertFixtureUser } from './helpers/fixtures';
 import { login } from './helpers/http';
+import { createLegacyImportOperation } from './helpers/import-fixtures';
 import { createTestPrismaClient } from './helpers/prisma-test-client';
 import { createProductRow, deleteProductRows } from './helpers/stock-fixtures';
 
@@ -387,19 +388,10 @@ describe('Import Receipt Links — Fase B3 (e2e)', () => {
   async function createOperationOrThrow(
     reference: string,
   ): Promise<SafeImportOperationBody> {
-    const response = await createOperation({
-      reference,
-      originCountry: 'CN',
-      destinationCountry: 'PE',
-    });
-    if (response.status !== 201) {
-      throw new Error(
-        `No se pudo crear la operación fixture: ${JSON.stringify(response.body)}`,
-      );
-    }
-    const body = response.body as SafeImportOperationBody;
-    createdImportOperationIds.push(body.id);
-    return body;
+    // R4: operación HISTÓRICA por fixture (la API ya exige factura de compra).
+    const created = await createLegacyImportOperation(prisma, { reference });
+    createdImportOperationIds.push(created.id);
+    return created as unknown as SafeImportOperationBody;
   }
 
   /** Embarque con UNA línea, opcionalmente vinculada a una factura, y lo lleva a ARRIVED. */

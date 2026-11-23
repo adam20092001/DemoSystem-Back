@@ -23,6 +23,9 @@ import {
   ExpenseReconciliationRow,
   ImportOperationSummaryQuery,
   ImportOperationSummaryRow,
+  LegacyImportCandidateInvoice,
+  LegacyImportOperationRow,
+  LegacyImportOperationsQuery,
   PendingFinancialStatus,
   RelatedPurchaseInvoiceRef,
   ShipmentCountsByStatus,
@@ -32,6 +35,52 @@ import {
 } from './types/import-reports.types';
 
 const ZERO = new Prisma.Decimal(0);
+
+/** R4: factura de compra principal y proveedor heredado de cada operación. */
+const OPERATION_INVOICE_SELECT = {
+  purchaseInvoiceId: true,
+  isLegacyUnlinked: true,
+  purchaseInvoice: {
+    select: {
+      documentType: true,
+      documentSeries: true,
+      documentNumber: true,
+      status: true,
+      supplier: { select: { id: true, legalName: true } },
+    },
+  },
+} satisfies Prisma.ImportOperationSelect;
+
+type OperationInvoiceRow = Prisma.ImportOperationGetPayload<{
+  select: typeof OPERATION_INVOICE_SELECT;
+}>;
+
+function toOperationInvoiceFields(op: OperationInvoiceRow): {
+  purchaseInvoiceId: string | null;
+  isLegacyUnlinked: boolean;
+  purchaseInvoiceDocument: string | null;
+  purchaseInvoiceStatus: string | null;
+  supplierId: string | null;
+  supplierLegalName: string | null;
+} {
+  const invoice = op.purchaseInvoice;
+  return {
+    purchaseInvoiceId: op.purchaseInvoiceId,
+    isLegacyUnlinked: op.isLegacyUnlinked,
+    purchaseInvoiceDocument:
+      invoice === null
+        ? null
+        : `${invoice.documentType} ${
+            invoice.documentSeries !== null
+              ? `${invoice.documentSeries}-${invoice.documentNumber}`
+              : invoice.documentNumber
+          }`,
+    purchaseInvoiceStatus: invoice?.status ?? null,
+    supplierId: invoice?.supplier.id ?? null,
+    supplierLegalName: invoice?.supplier.legalName ?? null,
+  };
+}
+
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -89,6 +138,145 @@ export class ImportReportsService {
   ) {}
 
   // ========================================================================
+  // R4 — Operaciones históricas sin factura principal (solo lectura)
+  // ========================================================================
+
+  /**
+   * Lista las operaciones anteriores al modelo con factura principal
+   * (isLegacyUnlinked) y, para cada una, las facturas de compra que sus líneas
+   * de embarque ya referencian. NUNCA asigna ni modifica nada: es la base para
+   * una regularización explícita y aprobada (fuera del alcance de R4).
+   */
+  async getLegacyOperations(
+    query: LegacyImportOperationsQuery,
+    requesterRole: RoleName,
+  ): Promise<{
+    data: LegacyImportOperationRow[];
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  }> {
+    assertCanRead(requesterRole);
+    const page = normalizePage(query.page);
+    const limit = normalizeLimit(query.limit);
+    const where: Prisma.ImportOperationWhereInput = { isLegacyUnlinked: true };
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const [operations, total] = await Promise.all([
+          tx.importOperation.findMany({
+            where,
+            select: {
+              id: true,
+              reference: true,
+              status: true,
+              originCountry: true,
+              destinationCountry: true,
+              createdAt: true,
+              shipments: {
+                select: {
+                  lines: { select: { purchaseInvoiceLineId: true } },
+                },
+              },
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            skip: (page - 1) * limit,
+            take: limit,
+          }),
+          tx.importOperation.count({ where }),
+        ]);
+
+        const lineIds = Array.from(
+          new Set(
+            operations
+              .flatMap((op) => op.shipments)
+              .flatMap((s) => s.lines)
+              .map((l) => l.purchaseInvoiceLineId)
+              .filter((id): id is string => id !== null),
+          ),
+        );
+        const invoiceLines =
+          lineIds.length === 0
+            ? []
+            : await tx.purchaseInvoiceLine.findMany({
+                where: { id: { in: lineIds } },
+                select: {
+                  id: true,
+                  purchaseInvoice: {
+                    select: {
+                      id: true,
+                      documentType: true,
+                      documentSeries: true,
+                      documentNumber: true,
+                      status: true,
+                      supplier: { select: { id: true, legalName: true } },
+                    },
+                  },
+                },
+              });
+        const invoiceByLineId = new Map(
+          invoiceLines.map((l) => [l.id, l.purchaseInvoice]),
+        );
+
+        const data: LegacyImportOperationRow[] = operations.map((op) => {
+          const candidates = new Map<string, LegacyImportCandidateInvoice>();
+          let shipmentLineCount = 0;
+          for (const shipment of op.shipments) {
+            for (const line of shipment.lines) {
+              shipmentLineCount += 1;
+              const invoice =
+                line.purchaseInvoiceLineId === null
+                  ? undefined
+                  : invoiceByLineId.get(line.purchaseInvoiceLineId);
+              if (invoice !== undefined) {
+                candidates.set(invoice.id, {
+                  purchaseInvoiceId: invoice.id,
+                  documentLabel: `${invoice.documentType} ${
+                    invoice.documentSeries !== null
+                      ? `${invoice.documentSeries}-${invoice.documentNumber}`
+                      : invoice.documentNumber
+                  }`,
+                  status: invoice.status,
+                  supplierId: invoice.supplier.id,
+                  supplierLegalName: invoice.supplier.legalName,
+                });
+              }
+            }
+          }
+          const candidateInvoices = Array.from(candidates.values());
+          return {
+            id: op.id,
+            reference: op.reference,
+            status: op.status,
+            originCountry: op.originCountry,
+            destinationCountry: op.destinationCountry,
+            createdAt: op.createdAt,
+            shipmentCount: op.shipments.length,
+            shipmentLineCount,
+            candidateKind:
+              candidateInvoices.length === 0
+                ? 'NO_INVOICE_LINKS'
+                : candidateInvoices.length === 1
+                  ? 'SINGLE_INVOICE'
+                  : 'MULTIPLE_INVOICES',
+            candidateInvoices,
+          };
+        });
+
+        return {
+          data,
+          page,
+          limit,
+          total,
+          totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
+  }
+
+  // ========================================================================
   // Reporte 1 — Resumen por operación de importación
   // ========================================================================
 
@@ -118,6 +306,7 @@ export class ImportReportsService {
               status: true,
               originCountry: true,
               destinationCountry: true,
+              ...OPERATION_INVOICE_SELECT,
               createdAt: true,
               completedAt: true,
               cancelledAt: true,
@@ -141,6 +330,7 @@ export class ImportReportsService {
               status: op.status,
               originCountry: op.originCountry,
               destinationCountry: op.destinationCountry,
+              ...toOperationInvoiceFields(op),
               createdAt: op.createdAt,
               completedAt: op.completedAt,
               cancelledAt: op.cancelledAt,
@@ -199,6 +389,7 @@ export class ImportReportsService {
               status: true,
               originCountry: true,
               destinationCountry: true,
+              ...OPERATION_INVOICE_SELECT,
               createdAt: true,
               completedAt: true,
               cancelledAt: true,
@@ -215,6 +406,7 @@ export class ImportReportsService {
               status: op.status,
               originCountry: op.originCountry,
               destinationCountry: op.destinationCountry,
+              ...toOperationInvoiceFields(op),
               createdAt: op.createdAt,
               completedAt: op.completedAt,
               cancelledAt: op.cancelledAt,
@@ -242,6 +434,8 @@ export class ImportReportsService {
 
     interface ExportRow {
       reference: string;
+      purchaseInvoiceDocument: string;
+      supplierLegalName: string;
       status: string;
       originCountry: string;
       destinationCountry: string;
@@ -282,6 +476,9 @@ export class ImportReportsService {
       for (const c of currencyRows) {
         exportRows.push({
           reference: op.reference,
+          purchaseInvoiceDocument:
+            op.purchaseInvoiceDocument ?? '(histórica sin factura)',
+          supplierLegalName: op.supplierLegalName ?? '',
           status: op.status,
           originCountry: op.originCountry,
           destinationCountry: op.destinationCountry,
@@ -524,7 +721,12 @@ export class ImportReportsService {
         purchaseInvoiceLineId: true,
         plannedQuantity: true,
         importShipment: {
-          select: { status: true, importOperationId: true },
+          select: {
+            status: true,
+            importOperationId: true,
+            incoterm: true,
+            incotermNamedPlace: true,
+          },
         },
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -538,6 +740,8 @@ export class ImportReportsService {
       descriptionSnapshot: l.descriptionSnapshot,
       unitCode: l.unitCode,
       purchaseInvoiceLineId: l.purchaseInvoiceLineId,
+      incoterm: l.importShipment.incoterm,
+      incotermNamedPlace: l.importShipment.incotermNamedPlace,
       plannedQuantity: l.plannedQuantity,
     }));
 
@@ -894,7 +1098,12 @@ export class ImportReportsService {
         purchaseInvoiceLineId: true,
         plannedQuantity: true,
         importShipment: {
-          select: { status: true, importOperationId: true },
+          select: {
+            status: true,
+            importOperationId: true,
+            incoterm: true,
+            incotermNamedPlace: true,
+          },
         },
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -910,6 +1119,8 @@ export class ImportReportsService {
       descriptionSnapshot: l.descriptionSnapshot,
       unitCode: l.unitCode,
       purchaseInvoiceLineId: l.purchaseInvoiceLineId,
+      incoterm: l.importShipment.incoterm,
+      incotermNamedPlace: l.importShipment.incotermNamedPlace,
       plannedQuantity: l.plannedQuantity,
     }));
 

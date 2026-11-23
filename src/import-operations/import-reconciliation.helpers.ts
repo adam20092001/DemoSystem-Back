@@ -22,6 +22,8 @@ export interface ShipmentLineRow {
   descriptionSnapshot: string;
   unitCode: string | null;
   purchaseInvoiceLineId: string | null;
+  incoterm: string | null;
+  incotermNamedPlace: string | null;
   plannedQuantity: Prisma.Decimal;
 }
 
@@ -108,6 +110,8 @@ export function buildReconciliationRow(
     descriptionSnapshot: line.descriptionSnapshot,
     unitCode: line.unitCode,
     purchaseInvoiceLineId: line.purchaseInvoiceLineId,
+    incoterm: line.incoterm,
+    incotermNamedPlace: line.incotermNamedPlace,
     plannedQuantity: line.plannedQuantity.toFixed(3),
     linkedQuantity: linkedQuantity.toFixed(3),
     remainingQuantity: remainingQuantity.toFixed(3),
