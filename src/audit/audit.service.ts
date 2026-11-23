@@ -609,6 +609,30 @@ const ALLOWED_METADATA_KEYS_BY_ACTION: Readonly<
     'importReceiptLinkId',
   ],
   [AuditAction.IMPORT_RECEIPT_LINK_CANCELLED]: ['importReceiptLinkId'],
+  [AuditAction.PURCHASE_INVOICE_ATTACHMENT_UPLOADED]: [
+    'attachmentId',
+    'purchaseInvoiceId',
+    'invoiceStatus',
+    'mimeType',
+    'fileSize',
+  ],
+  [AuditAction.PURCHASE_INVOICE_ATTACHMENT_DELETED]: [
+    'attachmentId',
+    'purchaseInvoiceId',
+  ],
+  [AuditAction.IMPORT_RECEIVING_RECEIVED]: [
+    'importOperationId',
+    'importShipmentId',
+    'purchaseReceiptId',
+    'lineCount',
+    'completedOperation',
+  ],
+  [AuditAction.IMPORT_RECEIVING_LINKED]: [
+    'importOperationId',
+    'importShipmentId',
+    'linkCount',
+    'completedOperation',
+  ],
   // SIRE_DEMO_PROPOSAL_* (S2). Solo identificadores y conteos: nunca RUC,
   // nombres de clientes/proveedores ni importes.
   [AuditAction.SIRE_DEMO_PROPOSAL_IMPORTED]: [

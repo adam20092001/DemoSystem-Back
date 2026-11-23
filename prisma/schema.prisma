@@ -249,6 +249,9 @@ model User {
   // que PurchaseInvoice/PurchaseReceipt/ImportShipment arriba (quien lo
   // crea y, si aplica, quien lo cancela/desvincula).
   createdImportReceiptLinks   ImportReceiptLink[] @relation("ImportReceiptLinkCreatedBy")
+  uploadedPurchaseInvoiceAttachments PurchaseInvoiceAttachment[] @relation("PurchaseInvoiceAttachmentUploadedBy")
+  deletedPurchaseInvoiceAttachments  PurchaseInvoiceAttachment[] @relation("PurchaseInvoiceAttachmentDeletedBy")
+  createdImportReceivingRequests     ImportReceivingRequest[]    @relation("ImportReceivingRequestCreatedBy")
   cancelledImportReceiptLinks ImportReceiptLink[] @relation("ImportReceiptLinkCancelledBy")
   createdSireDemoProposals    SireDemoProposal[]  @relation("SireDemoProposalCreatedBy")
   discardedSireDemoProposals  SireDemoProposal[]  @relation("SireDemoProposalDiscardedBy")
@@ -1104,6 +1107,8 @@ model PurchaseInvoice {
 
   lines PurchaseInvoiceLine[]
 
+  attachments PurchaseInvoiceAttachment[]
+
   // Recepciones físicas (Fase A5.2b): una factura CONFIRMED puede tener
   // varias, cada una referenciando líneas isReceiptEligible=true de ESTA
   // factura. Nunca presente mientras DRAFT (no se puede recibir contra un
@@ -1282,6 +1287,8 @@ model PurchaseReceipt {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   lines PurchaseReceiptLine[]
+
+  importReceivingRequests ImportReceivingRequest[]
 
   // El CHECK de consistencia de cancelación (status/cancelledAt/
   // cancelledByUserId/cancellationReason, mismo criterio exacto que
@@ -3184,6 +3191,8 @@ model ImportOperation {
 
   shipments ImportShipment[]
 
+  receivingRequests ImportReceivingRequest[]
+
   // Fase B2: gastos de importación de esta operación (fletes, seguros,
   // aduanas, etc.) — nunca bloqueados por el estado logístico de la
   // operación (CLAUDE.md B2 §5: "Logistical completion of an
@@ -3581,6 +3590,11 @@ model ImportReceiptLink {
   // A5.2b): opcional, único por línea de embarque, nunca global.
   idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
 
+  // R5: solicitud de "recibir desde Importaciones" que originó este vínculo
+  // (NULL en vínculos creados por el endpoint propio de vínculos).
+  receivingRequestId String?                 @map("receiving_request_id") @db.Uuid
+  receivingRequest   ImportReceivingRequest? @relation(fields: [receivingRequestId], references: [id], onDelete: Restrict)
+
   createdByUserId String @map("created_by_user_id") @db.Uuid
   createdBy       User   @relation("ImportReceiptLinkCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
 
@@ -3597,6 +3611,7 @@ model ImportReceiptLink {
   // cantidad positiva y consistencia de cancelación se agregan a mano en
   // migration.sql.
   @@unique([importShipmentLineId, idempotencyKey])
+  @@index([receivingRequestId])
   @@index([importShipmentLineId])
   @@index([purchaseReceiptLineId])
   @@map("import_receipt_links")
@@ -3720,4 +3735,82 @@ model ImportOperationSequence {
   lastNumber Int @default(0) @map("last_number")
 
   @@map("import_operation_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// R5 — Documentos adjuntos de facturas de compra y recepción desde Importaciones
+// ---------------------------------------------------------------------------
+
+enum PurchaseInvoiceAttachmentStatus {
+  ACTIVE
+  DELETED
+}
+
+enum ImportReceivingMode {
+  RECEIVE
+  LINK_EXISTING
+}
+
+/// Archivo (PDF/JPEG/PNG) adjunto a una factura de compra. El binario vive en
+/// almacenamiento privado (nunca en PostgreSQL); aquí solo metadatos y la clave
+/// privada de almacenamiento. Nunca se elimina la fila: DELETED conserva la
+/// trazabilidad. Los CHECK (tamaño, MIME, coherencia de borrado) van a mano.
+model PurchaseInvoiceAttachment {
+  id String @id @default(uuid()) @db.Uuid
+
+  purchaseInvoiceId String          @map("purchase_invoice_id") @db.Uuid
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
+
+  originalFileName String @map("original_file_name") @db.VarChar(255)
+  mimeType         String @map("mime_type") @db.VarChar(100)
+  fileSize         Int    @map("file_size")
+  sha256           String @map("sha256") @db.Char(64)
+
+  /// Clave privada generada por el backend (nunca derivada del nombre original).
+  storageKey String @unique @map("storage_key") @db.VarChar(200)
+
+  /// Idempotencia opcional por carga, única por factura (NULL múltiples permitidos).
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(100)
+
+  status PurchaseInvoiceAttachmentStatus @default(ACTIVE)
+
+  uploadedByUserId String   @map("uploaded_by_user_id") @db.Uuid
+  uploadedBy       User     @relation("PurchaseInvoiceAttachmentUploadedBy", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  uploadedAt       DateTime @default(now()) @map("uploaded_at")
+
+  deletedAt       DateTime? @map("deleted_at")
+  deletedByUserId String?   @map("deleted_by_user_id") @db.Uuid
+  deletedBy       User?     @relation("PurchaseInvoiceAttachmentDeletedBy", fields: [deletedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([purchaseInvoiceId, idempotencyKey])
+  @@index([purchaseInvoiceId, status, uploadedAt])
+  @@map("purchase_invoice_attachments")
+}
+
+/// Registro persistente de idempotencia de "recibir desde Importaciones":
+/// misma clave + mismo contenido (requestHash) devuelve el resultado original;
+/// misma clave + contenido distinto es 409. Única por operación de importación.
+model ImportReceivingRequest {
+  id String @id @default(uuid()) @db.Uuid
+
+  importOperationId String          @map("import_operation_id") @db.Uuid
+  importOperation   ImportOperation @relation(fields: [importOperationId], references: [id], onDelete: Restrict)
+
+  idempotencyKey     String              @map("idempotency_key") @db.VarChar(100)
+  requestHash        String              @map("request_hash") @db.Char(64)
+  mode               ImportReceivingMode
+  completedOperation Boolean             @default(false) @map("completed_operation")
+
+  /// Recepción creada por esta solicitud (solo modo RECEIVE).
+  purchaseReceiptId String?          @map("purchase_receipt_id") @db.Uuid
+  purchaseReceipt   PurchaseReceipt? @relation(fields: [purchaseReceiptId], references: [id], onDelete: Restrict)
+
+  createdByUserId String   @map("created_by_user_id") @db.Uuid
+  createdBy       User     @relation("ImportReceivingRequestCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  receiptLinks ImportReceiptLink[]
+
+  @@unique([importOperationId, idempotencyKey])
+  @@map("import_receiving_requests")
 }

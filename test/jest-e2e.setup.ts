@@ -29,6 +29,17 @@ process.env.PRODUCT_UPLOAD_DIR = resolve(
 );
 
 /**
+ * R5: raíz AISLADA de los documentos adjuntos de facturas de compra para este
+ * archivo de prueba (bajo el directorio temporal, nunca en uploads/ de
+ * desarrollo). LocalDiskPurchaseDocumentStorageService la crea bajo demanda y
+ * la suite que sube documentos la retira al terminar.
+ */
+process.env.PURCHASE_DOCUMENTS_DIR = resolve(
+  tmpdir(),
+  `demosystem-e2e-purchase-docs-${process.pid}-${randomUUID()}`,
+);
+
+/**
  * Guardia de base de datos (INC-E2E-database-guard): NO se usa coincidencia de
  * texto sobre DATABASE_URL. Se reevalúa la política estructural compartida
  * (scripts/lib/test-db-guard.js), se exige la huella emitida por

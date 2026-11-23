@@ -81,6 +81,11 @@ export async function purgePurchasingResidue(
       ],
     },
   });
+  // R5: solicitudes de recepción desde Importaciones (referencian recepciones y
+  // son referenciadas por los vínculos ya retirados arriba).
+  await prisma.importReceivingRequest.deleteMany({
+    where: { importOperationId: { in: operationIds } },
+  });
   const batches = await prisma.importExpenseAllocationBatch.findMany({
     where: { importExpenseId: { in: expenseIds } },
     select: { id: true },
@@ -155,6 +160,11 @@ export async function purgePurchasingResidue(
   )
     .map((i) => i.postedEntryId)
     .filter((id): id is string => id !== null);
+  // R5: documentos adjuntos de las facturas (los archivos físicos viven en un
+  // directorio temporal de la suite).
+  await prisma.purchaseInvoiceAttachment.deleteMany({
+    where: { purchaseInvoiceId: { in: invoiceIds } },
+  });
   await prisma.purchaseInvoice.deleteMany({
     where: { id: { in: invoiceIds } },
   });

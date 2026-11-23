@@ -294,6 +294,15 @@ export enum AuditAction {
   // solo vincula y previsualiza) — solo identificadores/cantidades.
   IMPORT_RECEIPT_LINK_CREATED = 'IMPORT_RECEIPT_LINK_CREATED',
   IMPORT_RECEIPT_LINK_CANCELLED = 'IMPORT_RECEIPT_LINK_CANCELLED',
+  // R5. PurchaseInvoiceAttachmentsService es su único emisor. Nunca contenido
+  // binario ni nombre original del archivo: solo identificadores y metadatos
+  // técnicos (tipo, tamaño).
+  PURCHASE_INVOICE_ATTACHMENT_UPLOADED = 'PURCHASE_INVOICE_ATTACHMENT_UPLOADED',
+  PURCHASE_INVOICE_ATTACHMENT_DELETED = 'PURCHASE_INVOICE_ATTACHMENT_DELETED',
+  // R5. ImportReceivingService es su único emisor (además de los eventos que ya
+  // emiten la recepción, los vínculos y el cierre reutilizados).
+  IMPORT_RECEIVING_RECEIVED = 'IMPORT_RECEIVING_RECEIVED',
+  IMPORT_RECEIVING_LINKED = 'IMPORT_RECEIVING_LINKED',
   // SIRE DEMO (S2). SireDemoProposalsService es su único emisor. Solo
   // demostración, sin validez ante SUNAT. Nunca RUC, nombres ni importes.
   SIRE_DEMO_PROPOSAL_IMPORTED = 'SIRE_DEMO_PROPOSAL_IMPORTED',
