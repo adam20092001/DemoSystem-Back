@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ExcelExportService } from '../common/excel/excel-export.service';
 import { ConfigurationModule } from '../configuration/configuration.module';
+import { PurchaseReceiptsModule } from '../purchase-receipts/purchase-receipts.module';
 import {
   ImportExpensesController,
   ImportOperationExpensesController,
@@ -8,6 +9,8 @@ import {
 import { ImportExpensesService } from './import-expenses.service';
 import { ImportOperationsController } from './import-operations.controller';
 import { ImportOperationsService } from './import-operations.service';
+import { ImportReceivingController } from './import-receiving.controller';
+import { ImportReceivingService } from './import-receiving.service';
 import {
   ImportExpenseAllocationCostPreviewController,
   ImportReceiptLinksController,
@@ -39,7 +42,7 @@ import { ImportShipmentsService } from './import-shipments.service';
  * nunca reimplementar el cálculo de atribución de costo.
  */
 @Module({
-  imports: [ConfigurationModule],
+  imports: [ConfigurationModule, PurchaseReceiptsModule],
   controllers: [
     ImportOperationsController,
     ImportShipmentsController,
@@ -49,6 +52,7 @@ import { ImportShipmentsService } from './import-shipments.service';
     ImportReceiptLinksController,
     ImportExpenseAllocationCostPreviewController,
     ImportReportsController,
+    ImportReceivingController,
   ],
   providers: [
     ImportOperationsService,
@@ -56,6 +60,7 @@ import { ImportShipmentsService } from './import-shipments.service';
     ImportExpensesService,
     ImportReceiptLinksService,
     ImportReportsService,
+    ImportReceivingService,
     ExcelExportService,
   ],
   exports: [

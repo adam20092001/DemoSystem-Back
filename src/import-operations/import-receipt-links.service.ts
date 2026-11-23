@@ -68,13 +68,28 @@ export class ImportReceiptLinksService {
   async create(
     input: CreateImportReceiptLinkInput,
   ): Promise<SafeImportReceiptLink> {
+    return this.prisma.$transaction((tx) =>
+      this.createInTransaction(tx, input),
+    );
+  }
+
+  /**
+   * R5: crea el vínculo dentro de una transacción YA abierta (coordinador de
+   * recepción desde Importaciones): mismas validaciones, locks (línea de
+   * embarque y luego línea de recepción), idempotencia y auditoría; un fallo
+   * revierte toda la transacción del llamador. NUNCA mueve stock ni valoriza.
+   */
+  async createInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreateImportReceiptLinkInput,
+  ): Promise<SafeImportReceiptLink> {
     const linkedQuantity = parsePositiveQuantity(
       input.linkedQuantity,
       'linkedQuantity',
     );
     const idempotencyKey = normalizeOptionalText(input.idempotencyKey, 100);
 
-    return this.prisma.$transaction(async (tx) => {
+    {
       // Orden de lock FIJO (nunca por valor de id): siempre la línea de
       // embarque primero, luego la línea de recepción — evita deadlocks
       // entre operaciones concurrentes de vinculación.
@@ -176,6 +191,7 @@ export class ImportReceiptLinksService {
           purchaseReceiptLineId: input.purchaseReceiptLineId,
           linkedQuantity,
           idempotencyKey,
+          receivingRequestId: input.receivingRequestId ?? null,
           createdByUserId: input.actorUserId,
         },
         select: IMPORT_RECEIPT_LINK_SAFE_SELECT,
@@ -198,7 +214,7 @@ export class ImportReceiptLinksService {
       });
 
       return toSafeImportReceiptLink(created);
-    });
+    }
   }
 
   async listByShipmentLine(

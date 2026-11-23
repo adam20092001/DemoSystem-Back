@@ -30,5 +30,7 @@ import { PurchaseReceivingService } from './purchase-receiving.service';
     PurchaseReceivingController,
   ],
   providers: [PurchaseReceiptsService, PurchaseReceivingService],
+  // R5: ImportReceivingService compone createInTransaction() en su transacción.
+  exports: [PurchaseReceiptsService],
 })
 export class PurchaseReceiptsModule {}

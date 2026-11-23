@@ -97,6 +97,8 @@ export interface R5Context {
   ) => Promise<ShipmentBody>;
   arriveShipment: (shipmentId: string) => Promise<void>;
   newLocation: () => Promise<string>;
+  /** Producto inventariable nuevo (stock 0): cada escenario usa el suyo para aislar el stock. */
+  newProduct: (valued: boolean) => Promise<string>;
   dispose: () => Promise<void>;
 }
 
@@ -414,6 +416,7 @@ export async function createR5Context(tag: string): Promise<R5Context> {
     createShipment,
     arriveShipment,
     newLocation,
+    newProduct: mkProduct,
     dispose,
   };
 }
