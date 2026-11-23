@@ -369,6 +369,7 @@ export async function createR5Context(tag: string): Promise<R5Context> {
       await purgePurchasingResidue(prisma, {
         supplierLegalNamePrefix: supplierPrefix,
         accountCodePrefixes: [accountPrefix],
+        importOperationReferencePrefixes: ['R5LEG-'],
       });
       await prisma.companySettings.updateMany({ data: originalTax });
       await prisma.account.updateMany({

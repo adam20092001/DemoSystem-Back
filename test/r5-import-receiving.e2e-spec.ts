@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
 import { E2E_ADMIN_USERNAME } from './helpers/constants';
+import { createLegacyImportOperation } from './helpers/import-fixtures';
 import { ImportOperationsService } from '../src/import-operations/import-operations.service';
 import {
   createR5Context,
@@ -1096,5 +1097,45 @@ describe('R5 — recepción de mercadería desde Importaciones (e2e)', () => {
     expect(foreignLine.status).toBe(400);
     expect(ctx.err(foreignLine).code).toBe('SHIPMENT_LINE_NOT_IN_SHIPMENT');
     expect(await stock(s.productId)).toBe('0.000');
+  });
+
+  it('B16. operación histórica sin factura: se conserva, no recibe desde Importaciones y su resumen lo explica', async () => {
+    const legacy = await createLegacyImportOperation(ctx.prisma, {
+      reference: `R5LEG-${ctx.nextSuffix()}`,
+      createdByUserId: ctx.purchasingUserId,
+    });
+    const sum = ctx.ok<Summary>(
+      await ctx.asP('get', `/import-operations/${legacy.id}/receiving`),
+      200,
+      'resumen histórica',
+    );
+    expect(sum).toMatchObject({
+      canReceive: false,
+      purchaseInvoiceStatus: null,
+      shipments: [],
+    });
+    expect(sum.cannotReceiveReason).toMatch(/histórica/);
+    const res = await request(app.getHttpServer())
+      .post(
+        `/api/v1/import-operations/${legacy.id}/shipments/00000000-0000-4000-8000-000000000001/receive`,
+      )
+      .set('Cookie', ctx.purchasingCookie)
+      .set('Idempotency-Key', nextKey())
+      .send({
+        lines: [
+          {
+            importShipmentLineId: '00000000-0000-4000-8000-000000000002',
+            quantity: '1.000',
+          },
+        ],
+      });
+    expect(res.status).toBe(409);
+    expect(ctx.err(res).code).toBe('IMPORT_NOT_LINKED_TO_INVOICE');
+    // Sin efectos: ninguna solicitud de recepción quedó registrada
+    expect(
+      await ctx.prisma.importReceivingRequest.count({
+        where: { importOperationId: legacy.id },
+      }),
+    ).toBe(0);
   });
 });
