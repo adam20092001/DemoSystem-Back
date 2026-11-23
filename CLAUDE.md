@@ -1348,6 +1348,22 @@ desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable)
   desactivación. **Las ventas siguen usando `MAIN/DEFAULT`** (R2-B3 pendiente); sin transferencias (R2-C).
 - Contrato para Angular: `docs/purchase-receipts-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.10.
 
+**R2-B3 — ventas por ubicación de origen** (rama `feat/r2-b3-sales-locations`,
+base `main` en `8cb2a5b`, **implementada y validada, sin commit/push/PR todavía — NO integrada en `main` ni
+desplegada**; sin migraciones nuevas, probada solo en PostgreSQL 16 descartable). Requiere R2-ACT aplicado.
+
+- `locationId` opcional (UUID) por ítem de `POST /sales` y `locations` opcional (`[{productId, locationId}]`) en `POST /sales/from-quote/:quoteId`;
+  sin ellos, `MAIN/DEFAULT`. Se resuelven y bloquean todas las ubicaciones de la venta con `lockLocationsShared()` antes de los productos, se
+  asocian por `productId`, se persisten en `SaleItem.locationId` y se usan en el EXIT. Una ubicación por producto; los servicios no tienen
+  ubicación (un `locationId` para un servicio responde 400). El producto sigue sin poder repetirse en una venta (400). En la conversión,
+  `locations` solo admite productos inventariables de la cotización, sin repetidos (400); `Quote`/`QuoteItem` no cambian.
+- El motor sigue siendo autoritativo (ubicación inexistente 404; ubicación/almacén inactivos o stock insuficiente en la ubicación 409, sin
+  sustituir por otra); el 409 de stock nombra producto y ubicación. La anulación reingresa a la ubicación original (histórica NULL →
+  `MAIN/DEFAULT`). Las respuestas incluyen `location` por ítem (`null` en servicios e históricos); el impreso no cambia.
+- Sin cambios en permisos, precios, IGV, pagos, comprobantes, contabilidad, costos, valorización, COGS, `StockMovementEngine`, recepciones,
+  inventario manual ni reglas de desactivación. Transferencias (R2-C) pendientes.
+- Contrato para Angular: `docs/sales-locations-api.md`; detalle técnico: `docs/r2-migration-plan.md` §5.11.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

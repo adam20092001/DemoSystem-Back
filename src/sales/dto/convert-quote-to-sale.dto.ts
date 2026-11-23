@@ -1,14 +1,26 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsOptional,
+  IsUUID,
   ValidateNested,
 } from 'class-validator';
 import { MAX_INITIAL_PAYMENTS } from '../../payments/constants/payment.constants';
 import { InitialPaymentDto } from '../../payments/dto/initial-payment.dto';
+
+/** R2-B3: ubicación de origen de UN producto inventariable de la cotización. */
+export class ConvertQuoteLocationDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  productId!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  locationId!: string;
+}
 
 /**
  * Cuerpo de POST /sales/from-quote/:quoteId (Fase 7, Bloque C). Sin cuerpo
@@ -20,6 +32,17 @@ import { InitialPaymentDto } from '../../payments/dto/initial-payment.dto';
  * `{ payment: {...} }` y `{ payments: [...] }` por igual.
  */
 export class ConvertQuoteToSaleDto {
+  @ApiPropertyOptional({
+    type: [ConvertQuoteLocationDto],
+    description:
+      'R2-B3: ubicación de origen por producto INVENTARIABLE de la cotización. Los productos omitidos salen de MAIN/DEFAULT. Un producto ajeno a la cotización, repetido o no inventariable responde 400.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConvertQuoteLocationDto)
+  locations?: ConvertQuoteLocationDto[];
+
   @ApiPropertyOptional({
     type: InitialPaymentDto,
     description:

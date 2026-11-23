@@ -9,6 +9,7 @@ import {
   SalePaymentStatus,
   SaleStatus,
 } from '@prisma/client';
+import { MovementLocationResponseDto } from '../../inventory/dto/movement-response.dto';
 import { PaymentResponseDto } from '../../payments/dto/payment-response.dto';
 
 /** Identidad mínima del vendedor: nunca role/passwordHash/campos de seguridad. */
@@ -105,6 +106,14 @@ export class SaleItemResponseDto {
     example: '0.00',
   })
   discountAmount!: string;
+
+  @ApiProperty({
+    type: MovementLocationResponseDto,
+    nullable: true,
+    description:
+      'R2-B3. Ubicación de origen del stock de la línea. null en servicios (no mueven stock) y en ventas históricas anteriores a R2-ACT.',
+  })
+  location!: MovementLocationResponseDto | null;
 }
 
 /**

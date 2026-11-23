@@ -37,6 +37,15 @@ const SALE_ITEM_SELECT = {
   discountType: true,
   discountValue: true,
   discountAmount: true,
+  // R2-B3: ubicación de origen (null en servicios e históricos).
+  location: {
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      warehouse: { select: { id: true, code: true } },
+    },
+  },
 } satisfies Prisma.SaleItemSelect;
 
 /**
@@ -188,6 +197,7 @@ function toSafeSaleItem(row: SaleItemRow): SafeSaleItem {
     discountType: row.discountType,
     discountValue: row.discountValue?.toFixed(2) ?? null,
     discountAmount: row.discountAmount.toFixed(2),
+    location: row.location,
   };
 }
 

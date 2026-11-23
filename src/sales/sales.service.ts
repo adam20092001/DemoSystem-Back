@@ -246,6 +246,7 @@ export class SalesService {
     const parsedItems = input.items.map((item) => ({
       productId: item.productId,
       quantity: parseQuantity(item.quantity),
+      locationId: item.locationId,
     }));
     // R1: `payment` (forma singular existente) o `payments` (lote), nunca
     // ambos. Parseo PURO fuera de la transacción: un lote malformado falla
@@ -279,10 +280,18 @@ export class SalesService {
       const customer = await this.lockCustomerForSale(tx, input.customerId);
       this.assertCustomerUsable(customer);
 
-      // R2-ACT: orden global de bloqueos — Warehouse/Location FOR SHARE
-      // ANTES de bloquear productos (el motor los reutiliza sin costo).
-      const [stockLocationId] =
-        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+      // R2-ACT/R2-B3: orden global de bloqueos — Warehouse/Location FOR
+      // SHARE de TODAS las líneas, en una sola operación determinista,
+      // ANTES de bloquear productos. Ubicación por producto (omitida =>
+      // MAIN/DEFAULT), asociada por productId (nunca por índice tras
+      // ordenar).
+      const locationByProduct = await this.lockSaleLocations(
+        tx,
+        parsedItems.map((item) => ({
+          productId: item.productId,
+          locationId: item.locationId,
+        })),
+      );
 
       const productIds = parsedItems.map((item) => item.productId);
       const lockedProducts = await this.lockProductsForSale(tx, productIds);
@@ -291,6 +300,13 @@ export class SalesService {
           this.requireLockedProduct(lockedProducts, productId),
         );
       }
+      this.assertLocationsOnlyForTrackedProducts(
+        lockedProducts,
+        parsedItems.map((item) => ({
+          productId: item.productId,
+          locationId: item.locationId,
+        })),
+      );
 
       const lines: SaleItemLine[] = parsedItems.map((item) => {
         const locked = this.requireLockedProduct(
@@ -315,7 +331,9 @@ export class SalesService {
           discountValue: null,
           discountAmount: new Prisma.Decimal(0),
           isInventoryTracked: locked.isInventoryTracked,
-          locationId: locked.isInventoryTracked ? stockLocationId : null,
+          locationId: locked.isInventoryTracked
+            ? (locationByProduct.get(locked.productId) ?? null)
+            : null,
         };
       });
 
@@ -586,9 +604,22 @@ export class SalesService {
         );
       }
 
-      // R2-ACT: orden global de bloqueos (catálogo antes de productos).
-      const [stockLocationId] =
-        await this.stockMovementEngine.lockLocationsShared(tx, [null]);
+      // R2-B3: `locations` solo puede referenciar productos de la
+      // cotización (sin repetidos); el resto sale de MAIN/DEFAULT.
+      const requestedLocations = this.indexQuoteLocations(
+        input.locations,
+        quoteItems.map((item) => item.productId),
+      );
+
+      // R2-ACT/R2-B3: orden global de bloqueos (catálogo de TODAS las
+      // líneas, en una sola operación, antes de productos).
+      const locationByProduct = await this.lockSaleLocations(
+        tx,
+        quoteItems.map((item) => ({
+          productId: item.productId,
+          locationId: requestedLocations.get(item.productId),
+        })),
+      );
 
       const productIds = quoteItems.map((item) => item.productId);
       const lockedProducts = await this.lockProductsForSale(tx, productIds);
@@ -597,6 +628,13 @@ export class SalesService {
           this.requireLockedProduct(lockedProducts, productId),
         );
       }
+      this.assertLocationsOnlyForTrackedProducts(
+        lockedProducts,
+        quoteItems.map((item) => ({
+          productId: item.productId,
+          locationId: requestedLocations.get(item.productId),
+        })),
+      );
 
       const lines: SaleItemLine[] = quoteItems.map((item) => {
         const locked = this.requireLockedProduct(
@@ -626,7 +664,9 @@ export class SalesService {
           discountValue: item.discountValue,
           discountAmount: item.discountAmount,
           isInventoryTracked: locked.isInventoryTracked,
-          locationId: locked.isInventoryTracked ? stockLocationId : null,
+          locationId: locked.isInventoryTracked
+            ? (locationByProduct.get(item.productId) ?? null)
+            : null,
         };
       });
 
@@ -1670,6 +1710,65 @@ export class SalesService {
   // Helpers privados — validación
   // ==================================================================
 
+  /**
+   * R2-B3: resuelve y bloquea (FOR SHARE, en una sola operación del motor,
+   * orden determinista por id) las ubicaciones de TODAS las líneas; las
+   * omitidas usan MAIN/DEFAULT. Devuelve productId -> locationId. La
+   * asociación se construye sobre la lista alineada con el resultado del
+   * motor, nunca sobre una lista reordenada después.
+   */
+  private async lockSaleLocations(
+    tx: Prisma.TransactionClient,
+    items: { productId: string; locationId?: string }[],
+  ): Promise<Map<string, string>> {
+    const resolved = await this.stockMovementEngine.lockLocationsShared(
+      tx,
+      items.map((item) => item.locationId ?? null),
+    );
+    return new Map(
+      items.map((item, index) => [item.productId, resolved[index]]),
+    );
+  }
+
+  /** R2-B3: una ubicación explícita solo tiene sentido para productos inventariables. */
+  private assertLocationsOnlyForTrackedProducts(
+    lockedProducts: Map<string, LockedProductRow>,
+    items: { productId: string; locationId?: string }[],
+  ): void {
+    for (const item of items) {
+      if (item.locationId === undefined) continue;
+      const locked = this.requireLockedProduct(lockedProducts, item.productId);
+      if (!locked.isInventoryTracked) {
+        throw new BadRequestException(
+          `El producto ${locked.sku} no controla inventario: no admite ubicación de origen`,
+        );
+      }
+    }
+  }
+
+  /** R2-B3: indexa `locations` de la conversión; repetidos o ajenos a la cotización → 400. */
+  private indexQuoteLocations(
+    locations: { productId: string; locationId: string }[] | undefined,
+    quoteProductIds: string[],
+  ): Map<string, string> {
+    const result = new Map<string, string>();
+    const inQuote = new Set(quoteProductIds);
+    for (const entry of locations ?? []) {
+      if (result.has(entry.productId)) {
+        throw new BadRequestException(
+          'No se puede repetir el mismo producto en las ubicaciones de origen',
+        );
+      }
+      if (!inQuote.has(entry.productId)) {
+        throw new BadRequestException(
+          `El producto ${entry.productId} no pertenece a la cotización`,
+        );
+      }
+      result.set(entry.productId, entry.locationId);
+    }
+    return result;
+  }
+
   private assertNoDuplicateProductIds(productIds: string[]): void {
     const seen = new Set<string>();
     for (const productId of productIds) {
@@ -1868,19 +1967,24 @@ export class SalesService {
     >();
 
     for (const line of trackedLines) {
-      const movement = await this.stockMovementEngine.apply(tx, {
-        productId: line.productId,
-        quantity: line.quantity,
-        movementType: InventoryMovementType.EXIT,
-        origin: InventoryMovementOrigin.SALE,
-        reason: `Salida por venta ${saleNumber}`,
-        notes: null,
-        actorUserId,
-        ipAddress,
-        referenceType: SALE_REFERENCE_TYPE,
-        referenceId: saleId,
-        locationId: line.locationId ?? undefined,
-      });
+      let movement: { id: string };
+      try {
+        movement = await this.stockMovementEngine.apply(tx, {
+          productId: line.productId,
+          quantity: line.quantity,
+          movementType: InventoryMovementType.EXIT,
+          origin: InventoryMovementOrigin.SALE,
+          reason: `Salida por venta ${saleNumber}`,
+          notes: null,
+          actorUserId,
+          ipAddress,
+          referenceType: SALE_REFERENCE_TYPE,
+          referenceId: saleId,
+          locationId: line.locationId ?? undefined,
+        });
+      } catch (error) {
+        throw await this.describeInsufficientLocationStock(tx, error, line);
+      }
 
       const saleItemId = saleItemIdByProductId.get(line.productId);
       if (saleItemId === undefined) {
@@ -1938,6 +2042,40 @@ export class SalesService {
         ipAddress,
       });
     }
+  }
+
+  /**
+   * R2-B3: el motor sigue siendo la validación AUTORITATIVA. Solo enriquece
+   * el mensaje de su 409 de stock insuficiente con el producto y la
+   * ubicación (consulta únicamente en el camino de error; la transacción
+   * se revierte igual). Cualquier otro error se relanza sin cambios.
+   */
+  private async describeInsufficientLocationStock(
+    tx: Prisma.TransactionClient,
+    error: unknown,
+    line: SaleItemLine,
+  ): Promise<unknown> {
+    if (
+      !(error instanceof ConflictException) ||
+      !error.message.startsWith('Stock insuficiente') ||
+      line.locationId === null
+    ) {
+      return error;
+    }
+    try {
+      const location = await tx.warehouseLocation.findUnique({
+        where: { id: line.locationId },
+        select: { code: true, warehouse: { select: { code: true } } },
+      });
+      if (location !== null) {
+        return new ConflictException(
+          `Stock insuficiente para el producto ${line.productSku} en la ubicación ${location.warehouse.code}/${location.code}`,
+        );
+      }
+    } catch {
+      // Conserva el mensaje original del motor.
+    }
+    return error;
   }
 
   /** Promueve PROSPECT->CUSTOMER dentro de la MISMA transacción (D6/D20). Nunca llama a CustomersService.convertToCustomer(). */

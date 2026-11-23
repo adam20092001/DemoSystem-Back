@@ -26,6 +26,14 @@ export interface SafeSaleQuoteReference {
   number: string;
 }
 
+/** R2-B3: ubicación de origen de la línea (sin importes). */
+export interface SafeSaleItemLocation {
+  id: string;
+  code: string;
+  name: string;
+  warehouse: { id: string; code: string };
+}
+
 export interface SafeSaleItem {
   id: string;
   productId: string;
@@ -42,6 +50,8 @@ export interface SafeSaleItem {
   discountValue: string | null;
   /** NR-03: siempre presente; "0.00" cuando la línea no tiene descuento. */
   discountAmount: string;
+  /** R2-B3: null en servicios y en ventas históricas (anteriores a R2-ACT). */
+  location: SafeSaleItemLocation | null;
 }
 
 /**

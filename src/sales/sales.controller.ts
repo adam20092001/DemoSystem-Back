@@ -81,19 +81,20 @@ export class SalesController {
   @ApiOperation({
     summary: 'Registrar una venta directa (nace confirmada)',
     description:
-      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse. Si se incluye `payment`, se registra directamente (sin requerir apertura de caja) en la misma transacción; si falla, la venta completa no se confirma (la transacción revierte por completo, incluida la venta). R1: alternativamente admite `payments` (lote de 1 a 10 pagos iniciales, métodos repetidos admitidos), excluyente con `payment`; todos se registran en la misma transacción y en el orden recibido y, si cualquiera falla, la venta completa no se confirma.',
+      'POST /sales confirma la venta inmediatamente: no existe un estado previo de borrador. El precio de cada ítem se toma siempre de Product.salePrice vigente; el cliente nunca lo controla. El stock actual se valida al confirmar y, si es suficiente, se descuenta mediante movimientos de inventario reales. Admite un pago inicial opcional (`payment`), registrado en la misma transacción. Una venta a Público general o a un cliente bloqueado solo se confirma si el saldo pendiente resultante es exactamente 0: sin pago inicial, o con uno que no salde el total por completo, esa venta no puede confirmarse. Si se incluye `payment`, se registra directamente (sin requerir apertura de caja) en la misma transacción; si falla, la venta completa no se confirma (la transacción revierte por completo, incluida la venta). R1: alternativamente admite `payments` (lote de 1 a 10 pagos iniciales, métodos repetidos admitidos), excluyente con `payment`; todos se registran en la misma transacción y en el orden recibido y, si cualquiera falla, la venta completa no se confirma. R2-B3: cada ítem inventariable admite `locationId` opcional (ubicación de origen; por defecto MAIN/DEFAULT); los servicios no tienen ubicación.',
   })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
     description:
-      'Payload inválido, sin ítems, producto repetido, cantidad/descuento inválidos, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
+      'Payload inválido (incluido un locationId mal formado o enviado para un servicio), sin ítems, producto repetido, cantidad/descuento inválidos, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
   })
   @ApiNotFoundResponse({
-    description: 'El cliente o algún producto no existe.',
+    description:
+      'El cliente, algún producto o alguna ubicación de origen (locationId) no existe.',
   })
   @ApiConflictResponse({
     description:
-      'Cliente/producto/categoría/unidad inactivos, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente genérico/bloqueado.',
+      'Cliente/producto/categoría/unidad inactivos, ubicación o almacén de origen inactivos, stock insuficiente (incluido el de la ubicación elegida), el pago inicial supera el total, o saldo pendiente positivo con cliente genérico/bloqueado.',
   })
   @Roles(...WRITE_ROLES)
   @Post()
@@ -108,6 +109,7 @@ export class SalesController {
       items: dto.items.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
+        locationId: item.locationId,
       })),
       payment: dto.payment
         ? {
@@ -130,21 +132,21 @@ export class SalesController {
     summary:
       'Confirmar una venta a partir de una cotización PENDIENTE o ACEPTADA',
     description:
-      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`) o un lote de 1 a 10 pagos iniciales (`payments`, R1), excluyentes entre sí; sin cuerpo, `{}`, `{ payment: {...} }` y `{ payments: [...] }` son todos válidos. Los pagos incluidos se registran directamente, sin requerir apertura de caja. Si cualquier pago del lote falla, la conversión completa no se confirma.',
+      'El precio, los ítems y los montos se copian exactamente de la cotización (nunca se repriecian con el catálogo vigente). El producto/categoría/unidad y el stock actual sí se revalidan al confirmar. Cotizaciones RECHAZADAS, VENCIDAS (efectiva o almacenada) o ya CONVERTIDAS no pueden convertirse. Tras el éxito, la cotización queda CONVERTIDA de forma permanente. Admite un cuerpo opcional con un pago inicial (`payment`) o un lote de 1 a 10 pagos iniciales (`payments`, R1), excluyentes entre sí; sin cuerpo, `{}`, `{ payment: {...} }` y `{ payments: [...] }` son todos válidos. Los pagos incluidos se registran directamente, sin requerir apertura de caja. Si cualquier pago del lote falla, la conversión completa no se confirma. R2-B3: `locations` opcional (`[{productId, locationId}]`) elige la ubicación de origen de los productos inventariables de la cotización; los omitidos salen de MAIN/DEFAULT.',
   })
   @ApiParam({ name: 'quoteId', format: 'uuid' })
   @ApiCreatedResponse({ type: SaleResponseDto })
   @ApiBadRequestResponse({
     description:
-      'quoteId inválido, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
+      'quoteId inválido, `locations` con UUID inválido, producto ajeno a la cotización, repetido o no inventariable, pago inicial mal formado (monto no positivo o falta la referencia obligatoria del método), `payment` y `payments` enviados a la vez, o `payments` vacío o con más de 10 elementos.',
   })
   @ApiNotFoundResponse({
     description:
-      'La cotización, el cliente o algún producto no existe. Una cotización de otro vendedor (rol SELLER), con o sin pagos iniciales, responde el mismo 404 "La cotización no existe".',
+      'La cotización, el cliente, algún producto o alguna ubicación de origen no existe. Una cotización de otro vendedor (rol SELLER), con o sin pagos iniciales, responde el mismo 404 "La cotización no existe".',
   })
   @ApiConflictResponse({
     description:
-      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, stock insuficiente, el pago inicial supera el total, o saldo pendiente positivo con cliente bloqueado.',
+      'Cotización no convertible (rechazada/vencida/ya convertida), ya tiene una venta asociada, entidades inactivas, unidad ya no admite la cantidad histórica, ubicación o almacén de origen inactivos, stock insuficiente (incluido el de la ubicación elegida), el pago inicial supera el total, o saldo pendiente positivo con cliente bloqueado.',
   })
   @Roles(...WRITE_ROLES)
   @Post('from-quote/:quoteId')
@@ -156,6 +158,10 @@ export class SalesController {
   ): Promise<SafeSale> {
     return this.salesService.createFromQuote({
       quoteId,
+      locations: dto?.locations?.map((location) => ({
+        productId: location.productId,
+        locationId: location.locationId,
+      })),
       payment: dto?.payment
         ? {
             method: dto.payment.method,
