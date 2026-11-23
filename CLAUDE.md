@@ -1427,6 +1427,32 @@ aplicadas antes). Contrato para Angular: `docs/r4-business-enhancements-api.md`.
   adaptadas al modelo nuevo (operaciones históricas por fixture donde se prueba el modelo anterior).
 - **Validación (PostgreSQL 16 descartable):** 155 suites / 4499 pruebas unitarias; 86 de scripts; E2E completa en base nueva (ruta A, migraciones 1–39 desde cero): 61 suites / 2028 pruebas, 0 fallos; ruta B (esquema con migraciones 1–35 y datos históricos sintéticos, luego 36–39): sin deriva, facturas/pagos históricos con tasa 1 e importes intactos, países históricos `pendingReview`, operaciones históricas `isLegacyUnlinked`. Las suites E2E de R4/R3/R2 limpian su residuo (`test/helpers/purchasing-cleanup.ts`).
 
+**R5 — Documentos adjuntos de facturas de compra y recepción desde Importaciones**
+(rama `feat/r5-purchase-documents-import-receiving`, base `main` en `13bd2c6` con R4 integrado, **implementada y validada,
+sin integrar ni desplegar**; **1 migración nueva (40)** `20261125000000_add_purchase_attachments_and_import_receiving`, aditiva,
+aplicada solo en PostgreSQL 16 descartables, nunca en `pos_db`/`pos_db_test`). Contrato para Angular:
+`docs/r5-purchase-attachments-import-receiving-api.md`.
+
+- **Adjuntos:** `PurchaseInvoiceAttachmentsModule` (`/purchase-invoices/:id/attachments*` y lectura desde
+  `/import-operations/:id/documents*`, mismos archivos sin copias). PDF/JPG/PNG de hasta 10 MB validados por su CONTENIDO real
+  (firma + estructura; PDF sin JavaScript/Launch), nombres saneados, claves de almacenamiento aleatorias en
+  `PURCHASE_DOCUMENTS_DIR` (volumen privado y persistente, nunca público), entrega autenticada con `nosniff` y CSP, 404 idéntico
+  para adjuntos ajenos (sin IDOR). Idempotencia por `Idempotency-Key` + sha256; compensación archivo↔fila. `DRAFT`: subir/eliminar;
+  `CONFIRMED`: solo complementarios (nunca eliminar); `CANCELLED`: solo lectura. Escribe ADMIN/PURCHASING; lee además MANAGEMENT/
+  ACCOUNTANT; WAREHOUSE/SELLER 403. Adjuntar nunca cambia estado ni importes de la factura. Auditoría sin binarios ni nombre de archivo.
+- **Recepción desde Importaciones:** `ImportReceivingService` (`GET /import-operations/:id/receiving`, `POST …/shipments/:id/receive`
+  y `…/link-receipts`) NO tiene inventario propio: compone en UNA transacción `PurchaseReceiptsService.createInTransaction()` (stock,
+  valorización, reclasificación, multimoneda R4), `ImportReceiptLinksService.createInTransaction()` y, con `completeOperation=true`,
+  `ImportOperationsService.completeInTransaction()` (todo o nada; exige que no queden pendientes recibibles). Requiere embarque
+  `ARRIVED`, operación `IN_PROGRESS` y factura `CONFIRMED`; nunca confirma la factura ni duplica deuda/valorización/asientos ni
+  capitaliza gastos. `Idempotency-Key` obligatoria con registro persistente (`ImportReceivingRequest`, hash del contenido, 409 si
+  difiere). Orden de locks: operación → embarque → factura → líneas de factura → líneas de embarque → ubicaciones/productos → líneas
+  de recepción. Solo ADMIN/PURCHASING escriben (WAREHOUSE registra recepciones en Compras, no desde Importaciones). Los endpoints
+  existentes (`complete`, vínculos, recepciones de Compras) no cambian.
+- **Validación (PostgreSQL 16 descartable):** specs unitarias nuevas (validador de contenido, servicios) y E2E dedicadas
+  `test/r5-purchase-attachments.e2e-spec.ts` (10) y `test/r5-import-receiving.e2e-spec.ts` (15, incl. concurrencia real y rollback);
+  regresión dirigida de Compras, recepciones, pagos, importaciones, vínculos, multialmacén, valorización y PURCHASING.
+
 **Decisiones funcionales todavía pendientes (NO implementadas; distintas del
 requerimiento de propiedad por vendedor, ya cerrado arriba):** crédito
 opcional; descuentos por producto;

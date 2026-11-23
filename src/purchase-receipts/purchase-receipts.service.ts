@@ -124,6 +124,15 @@ function assertCanCancel(requesterRole: RoleName): void {
   }
 }
 
+interface PreparedReceiptInput {
+  receivedDateString: string;
+  receivedDate: Date;
+  requested: Map<string, Prisma.Decimal>;
+  requestedLocations: Map<string, string | null>;
+  notes: string | null;
+  idempotencyKey: string | null;
+}
+
 interface LockedPurchaseInvoiceRow {
   id: string;
   status: PurchaseInvoiceStatus;
@@ -263,6 +272,30 @@ export class PurchaseReceiptsService {
   async create(
     input: CreatePurchaseReceiptInput,
   ): Promise<SafePurchaseReceipt> {
+    const prepared = this.prepareCreate(input);
+    return this.prisma.$transaction((tx) =>
+      this.executeCreate(tx, input, prepared),
+    );
+  }
+
+  /**
+   * R5: misma operación que create() pero dentro de una transacción YA abierta
+   * por el llamador (coordinador de recepción desde Importaciones). Mantiene los
+   * mismos locks, validaciones, movimientos de inventario, valorización,
+   * reclasificación contable y auditoría; si falla, la transacción del llamador
+   * se revierte completa.
+   */
+  async createInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreatePurchaseReceiptInput,
+  ): Promise<SafePurchaseReceipt> {
+    const prepared = this.prepareCreate(input);
+    return this.executeCreate(tx, input, prepared);
+  }
+
+  private prepareCreate(
+    input: CreatePurchaseReceiptInput,
+  ): PreparedReceiptInput {
     assertCanCreate(input.requesterRole);
 
     const receivedDateString = input.receivedDate ?? businessToday();
@@ -285,34 +318,55 @@ export class PurchaseReceiptsService {
     );
     const notes = this.normalizeNotes(input.notes);
     const idempotencyKey = this.normalizeIdempotencyKey(input.idempotencyKey);
+    return {
+      receivedDateString,
+      receivedDate,
+      requested,
+      requestedLocations,
+      notes,
+      idempotencyKey,
+    };
+  }
 
-    return this.prisma.$transaction(async (tx) => {
-      const invoiceLock = await this.lockInvoice(tx, input.purchaseInvoiceId);
-      if (invoiceLock.status !== PurchaseInvoiceStatus.CONFIRMED) {
-        throw new ConflictException(
-          'Solo se puede recibir mercadería contra una factura de compra CONFIRMED',
-        );
-      }
+  private async executeCreate(
+    tx: Prisma.TransactionClient,
+    input: CreatePurchaseReceiptInput,
+    prepared: PreparedReceiptInput,
+  ): Promise<SafePurchaseReceipt> {
+    const {
+      receivedDateString,
+      receivedDate,
+      requested,
+      requestedLocations,
+      notes,
+      idempotencyKey,
+    } = prepared;
+    const invoiceLock = await this.lockInvoice(tx, input.purchaseInvoiceId);
+    if (invoiceLock.status !== PurchaseInvoiceStatus.CONFIRMED) {
+      throw new ConflictException(
+        'Solo se puede recibir mercadería contra una factura de compra CONFIRMED',
+      );
+    }
 
-      if (idempotencyKey !== null) {
-        const existing = await tx.purchaseReceipt.findUnique({
-          where: {
-            purchaseInvoiceId_idempotencyKey: {
-              purchaseInvoiceId: input.purchaseInvoiceId,
-              idempotencyKey,
-            },
+    if (idempotencyKey !== null) {
+      const existing = await tx.purchaseReceipt.findUnique({
+        where: {
+          purchaseInvoiceId_idempotencyKey: {
+            purchaseInvoiceId: input.purchaseInvoiceId,
+            idempotencyKey,
           },
-          select: PURCHASE_RECEIPT_SAFE_SELECT,
-        });
-        if (existing !== null) {
-          // Reintento idempotente real: mismo resultado, sin duplicar
-          // ningún efecto (stock/auditoría/contabilidad).
-          return toSafePurchaseReceipt(existing, input.requesterRole);
-        }
+        },
+        select: PURCHASE_RECEIPT_SAFE_SELECT,
+      });
+      if (existing !== null) {
+        // Reintento idempotente real: mismo resultado, sin duplicar
+        // ningún efecto (stock/auditoría/contabilidad).
+        return toSafePurchaseReceipt(existing, input.requesterRole);
       }
+    }
 
-      const lineIds = Array.from(requested.keys()).sort();
-      const lockedLines = await tx.$queryRaw<LockedInvoiceLineRow[]>(Prisma.sql`
+    const lineIds = Array.from(requested.keys()).sort();
+    const lockedLines = await tx.$queryRaw<LockedInvoiceLineRow[]>(Prisma.sql`
         SELECT id, purchase_invoice_id AS "purchaseInvoiceId",
                is_receipt_eligible AS "isReceiptEligible",
                quantity, product_id AS "productId",
@@ -325,233 +379,232 @@ export class PurchaseReceiptsService {
         ORDER BY id ASC
         FOR UPDATE
       `);
-      if (lockedLines.length !== lineIds.length) {
+    if (lockedLines.length !== lineIds.length) {
+      throw new BadRequestException(
+        'Alguna línea de factura referenciada no existe',
+      );
+    }
+    for (const row of lockedLines) {
+      if (row.purchaseInvoiceId !== input.purchaseInvoiceId) {
         throw new BadRequestException(
-          'Alguna línea de factura referenciada no existe',
+          'La línea referenciada no pertenece a la factura indicada',
         );
       }
-      for (const row of lockedLines) {
-        if (row.purchaseInvoiceId !== input.purchaseInvoiceId) {
-          throw new BadRequestException(
-            'La línea referenciada no pertenece a la factura indicada',
-          );
-        }
-        if (row.isReceiptEligible !== true) {
-          throw new BadRequestException(
-            'La línea no es elegible para recepción física (servicio, bien no inventariable, u otro concepto)',
-          );
-        }
-      }
-
-      // R2-ACT/R2-B2: orden global de bloqueos — documento (factura y sus
-      // líneas, ya bloqueadas arriba) -> Warehouse/Location FOR SHARE ->
-      // productos. Una ubicación por línea (omitida => MAIN/DEFAULT). El
-      // resultado se asocia a cada línea por su id (nunca por índice tras
-      // reordenar): lockedLines solo se recorre en el mismo orden en que
-      // se construye la lista solicitada.
-      const resolvedLocations =
-        await this.stockMovementEngine.lockLocationsShared(
-          tx,
-          lockedLines.map((row) => requestedLocations.get(row.id) ?? null),
+      if (row.isReceiptEligible !== true) {
+        throw new BadRequestException(
+          'La línea no es elegible para recepción física (servicio, bien no inventariable, u otro concepto)',
         );
-      const locationByInvoiceLineId = new Map<string, string>();
-      lockedLines.forEach((row, index) => {
-        locationByInvoiceLineId.set(row.id, resolvedLocations[index]);
-      });
-
-      const alreadyReceived = await tx.purchaseReceiptLine.groupBy({
-        by: ['purchaseInvoiceLineId'],
-        where: {
-          purchaseInvoiceLineId: { in: lineIds },
-          purchaseReceipt: { status: 'ACTIVE' },
-        },
-        _sum: { quantity: true },
-      });
-      const alreadyReceivedMap = new Map(
-        alreadyReceived.map((r) => [
-          r.purchaseInvoiceLineId,
-          r._sum.quantity ?? ZERO,
-        ]),
-      );
-
-      for (const row of lockedLines) {
-        const requestedQty = requested.get(row.id);
-        if (requestedQty === undefined) {
-          throw new InternalServerErrorException(
-            'Línea bloqueada sin cantidad solicitada; invariante interno roto',
-          );
-        }
-        const prior = alreadyReceivedMap.get(row.id) ?? ZERO;
-        if (prior.plus(requestedQty).greaterThan(row.quantity)) {
-          throw new ConflictException(
-            `La cantidad recibida excede lo facturado para la línea ${row.id}`,
-          );
-        }
       }
+    }
 
-      const reclassificationPlan = await this.resolveReclassificationPlan(
+    // R2-ACT/R2-B2: orden global de bloqueos — documento (factura y sus
+    // líneas, ya bloqueadas arriba) -> Warehouse/Location FOR SHARE ->
+    // productos. Una ubicación por línea (omitida => MAIN/DEFAULT). El
+    // resultado se asocia a cada línea por su id (nunca por índice tras
+    // reordenar): lockedLines solo se recorre en el mismo orden en que
+    // se construye la lista solicitada.
+    const resolvedLocations =
+      await this.stockMovementEngine.lockLocationsShared(
         tx,
-        lockedLines,
-        requested,
-        invoiceLock,
-        alreadyReceivedMap,
-        input.requesterRole,
+        lockedLines.map((row) => requestedLocations.get(row.id) ?? null),
       );
+    const locationByInvoiceLineId = new Map<string, string>();
+    lockedLines.forEach((row, index) => {
+      locationByInvoiceLineId.set(row.id, resolvedLocations[index]);
+    });
 
-      const created = await tx.purchaseReceipt.create({
-        data: {
-          purchaseInvoiceId: input.purchaseInvoiceId,
-          receivedDate,
-          idempotencyKey,
-          notes,
-          createdByUserId: input.actorUserId,
-          lines: {
-            create: lockedLines.map((row) => {
-              const qty = requested.get(row.id);
-              if (qty === undefined) {
-                throw new InternalServerErrorException(
-                  'Línea bloqueada sin cantidad solicitada; invariante interno roto',
-                );
-              }
-              return {
-                purchaseInvoiceLineId: row.id,
-                quantity: qty,
-                locationId: locationByInvoiceLineId.get(row.id),
-              };
-            }),
-          },
+    const alreadyReceived = await tx.purchaseReceiptLine.groupBy({
+      by: ['purchaseInvoiceLineId'],
+      where: {
+        purchaseInvoiceLineId: { in: lineIds },
+        purchaseReceipt: { status: 'ACTIVE' },
+      },
+      _sum: { quantity: true },
+    });
+    const alreadyReceivedMap = new Map(
+      alreadyReceived.map((r) => [
+        r.purchaseInvoiceLineId,
+        r._sum.quantity ?? ZERO,
+      ]),
+    );
+
+    for (const row of lockedLines) {
+      const requestedQty = requested.get(row.id);
+      if (requestedQty === undefined) {
+        throw new InternalServerErrorException(
+          'Línea bloqueada sin cantidad solicitada; invariante interno roto',
+        );
+      }
+      const prior = alreadyReceivedMap.get(row.id) ?? ZERO;
+      if (prior.plus(requestedQty).greaterThan(row.quantity)) {
+        throw new ConflictException(
+          `La cantidad recibida excede lo facturado para la línea ${row.id}`,
+        );
+      }
+    }
+
+    const reclassificationPlan = await this.resolveReclassificationPlan(
+      tx,
+      lockedLines,
+      requested,
+      invoiceLock,
+      alreadyReceivedMap,
+      input.requesterRole,
+    );
+
+    const created = await tx.purchaseReceipt.create({
+      data: {
+        purchaseInvoiceId: input.purchaseInvoiceId,
+        receivedDate,
+        idempotencyKey,
+        notes,
+        createdByUserId: input.actorUserId,
+        lines: {
+          create: lockedLines.map((row) => {
+            const qty = requested.get(row.id);
+            if (qty === undefined) {
+              throw new InternalServerErrorException(
+                'Línea bloqueada sin cantidad solicitada; invariante interno roto',
+              );
+            }
+            return {
+              purchaseInvoiceLineId: row.id,
+              quantity: qty,
+              locationId: locationByInvoiceLineId.get(row.id),
+            };
+          }),
         },
-        select: PURCHASE_RECEIPT_SAFE_SELECT,
-      });
-      const createdLineIdByInvoiceLineId = new Map(
-        created.lines.map((l) => [l.purchaseInvoiceLineId, l.id]),
-      );
+      },
+      select: PURCHASE_RECEIPT_SAFE_SELECT,
+    });
+    const createdLineIdByInvoiceLineId = new Map(
+      created.lines.map((l) => [l.purchaseInvoiceLineId, l.id]),
+    );
 
-      // Capa física: SIEMPRE, sin importar el resultado contable — la
-      // elegibilidad congelada (isReceiptEligible=true) ya garantiza
-      // productId no nulo.
-      // D1 (aprobada): los productos se procesan en orden ascendente de
-      // productId (desempate por id de línea) — nunca en el orden en que
-      // llegaron las líneas — para que dos recepciones con productos
-      // solapados en orden inverso no formen un ciclo de bloqueos.
-      const linesInProductOrder = [...lockedLines].sort((a, b) =>
-        compareProductThenLine(a.productId, a.id, b.productId, b.id),
+    // Capa física: SIEMPRE, sin importar el resultado contable — la
+    // elegibilidad congelada (isReceiptEligible=true) ya garantiza
+    // productId no nulo.
+    // D1 (aprobada): los productos se procesan en orden ascendente de
+    // productId (desempate por id de línea) — nunca en el orden en que
+    // llegaron las líneas — para que dos recepciones con productos
+    // solapados en orden inverso no formen un ciclo de bloqueos.
+    const linesInProductOrder = [...lockedLines].sort((a, b) =>
+      compareProductThenLine(a.productId, a.id, b.productId, b.id),
+    );
+    for (const row of linesInProductOrder) {
+      const qty = requested.get(row.id);
+      if (qty === undefined || row.productId === null) {
+        throw new InternalServerErrorException(
+          'Línea elegible sin productId; invariante interno roto',
+        );
+      }
+      const movement = await this.stockMovementEngine.apply(tx, {
+        productId: row.productId,
+        quantity: qty,
+        movementType: InventoryMovementType.ENTRY,
+        origin: InventoryMovementOrigin.PURCHASE_RECEIPT,
+        reason: 'Entrada por recepción de compra',
+        notes: null,
+        actorUserId: input.actorUserId,
+        ipAddress: input.ipAddress,
+        referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
+        referenceId: created.id,
+        locationId: locationByInvoiceLineId.get(row.id),
+      });
+
+      // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si
+      // el producto no tiene valuationMethod configurado — cero
+      // cambio de comportamiento del inventario físico. Misma
+      // transacción `tx` que el movimiento físico: si falla, nada se
+      // confirma (atomicidad).
+      const receiptLineId = createdLineIdByInvoiceLineId.get(row.id);
+      if (receiptLineId === undefined) {
+        throw new InternalServerErrorException(
+          'No se encontró la línea de recepción recién creada; invariante interno roto',
+        );
+      }
+      await this.inventoryValuationEngine.recordOriginal(tx, {
+        productId: row.productId,
+        inventoryMovementId: movement.id,
+        purchaseReceiptLineId: receiptLineId,
+        purchaseInvoiceLineId: row.id,
+        quantity: qty,
+        invoicedQuantity: row.quantity,
+        priorReceivedQuantity: alreadyReceivedMap.get(row.id) ?? ZERO,
+        lineFinancials: {
+          taxableBaseAmount: row.taxableBaseAmount,
+          taxAmount: row.taxAmount,
+          creditableTaxAmount: row.creditableTaxAmount,
+        },
+        actorUserId: input.actorUserId,
+        ipAddress: input.ipAddress,
+      });
+    }
+
+    // Capa contable OPCIONAL: solo si al menos una línea requiere
+    // reclasificación (cuenta destino configurada como tránsito). El
+    // caso predeterminado y seguro (sin ninguna cuenta configurada así)
+    // nunca llama a AccountingEngine — cero efecto contable.
+    let reclassificationEntryId: string | null = null;
+    if (reclassificationPlan.length > 0) {
+      const documentLabel = this.formatDocumentLabel(
+        invoiceLock.documentType,
+        invoiceLock.documentSeries,
+        invoiceLock.documentNumber,
       );
-      for (const row of linesInProductOrder) {
-        const qty = requested.get(row.id);
-        if (qty === undefined || row.productId === null) {
-          throw new InternalServerErrorException(
-            'Línea elegible sin productId; invariante interno roto',
-          );
-        }
-        const movement = await this.stockMovementEngine.apply(tx, {
-          productId: row.productId,
-          quantity: qty,
-          movementType: InventoryMovementType.ENTRY,
-          origin: InventoryMovementOrigin.PURCHASE_RECEIPT,
-          reason: 'Entrada por recepción de compra',
-          notes: null,
+      const resolvedLines =
+        this.buildNettedReclassificationLines(reclassificationPlan);
+      const posted =
+        await this.accountingEngine.postPurchaseReceiptReclassification(tx, {
+          purchaseReceiptId: created.id,
+          description:
+            buildPurchaseReceiptReclassificationDescription(documentLabel),
+          accountingDateOnly: receivedDateString,
+          lines: resolvedLines,
           actorUserId: input.actorUserId,
           ipAddress: input.ipAddress,
-          referenceType: PURCHASE_RECEIPT_REFERENCE_TYPE,
-          referenceId: created.id,
-          locationId: locationByInvoiceLineId.get(row.id),
         });
-
-        // Capa de valorización OPCIONAL (Fase A6.1): no-op silencioso si
-        // el producto no tiene valuationMethod configurado — cero
-        // cambio de comportamiento del inventario físico. Misma
-        // transacción `tx` que el movimiento físico: si falla, nada se
-        // confirma (atomicidad).
-        const receiptLineId = createdLineIdByInvoiceLineId.get(row.id);
+      reclassificationEntryId = posted.id;
+      for (const plan of reclassificationPlan) {
+        const receiptLineId = createdLineIdByInvoiceLineId.get(plan.lineId);
         if (receiptLineId === undefined) {
           throw new InternalServerErrorException(
             'No se encontró la línea de recepción recién creada; invariante interno roto',
           );
         }
-        await this.inventoryValuationEngine.recordOriginal(tx, {
-          productId: row.productId,
-          inventoryMovementId: movement.id,
-          purchaseReceiptLineId: receiptLineId,
-          purchaseInvoiceLineId: row.id,
-          quantity: qty,
-          invoicedQuantity: row.quantity,
-          priorReceivedQuantity: alreadyReceivedMap.get(row.id) ?? ZERO,
-          lineFinancials: {
-            taxableBaseAmount: row.taxableBaseAmount,
-            taxAmount: row.taxAmount,
-            creditableTaxAmount: row.creditableTaxAmount,
-          },
-          actorUserId: input.actorUserId,
-          ipAddress: input.ipAddress,
+        await tx.purchaseReceiptLine.update({
+          where: { id: receiptLineId },
+          data: { reclassifiedAmount: plan.amount },
         });
       }
-
-      // Capa contable OPCIONAL: solo si al menos una línea requiere
-      // reclasificación (cuenta destino configurada como tránsito). El
-      // caso predeterminado y seguro (sin ninguna cuenta configurada así)
-      // nunca llama a AccountingEngine — cero efecto contable.
-      let reclassificationEntryId: string | null = null;
-      if (reclassificationPlan.length > 0) {
-        const documentLabel = this.formatDocumentLabel(
-          invoiceLock.documentType,
-          invoiceLock.documentSeries,
-          invoiceLock.documentNumber,
-        );
-        const resolvedLines =
-          this.buildNettedReclassificationLines(reclassificationPlan);
-        const posted =
-          await this.accountingEngine.postPurchaseReceiptReclassification(tx, {
-            purchaseReceiptId: created.id,
-            description:
-              buildPurchaseReceiptReclassificationDescription(documentLabel),
-            accountingDateOnly: receivedDateString,
-            lines: resolvedLines,
-            actorUserId: input.actorUserId,
-            ipAddress: input.ipAddress,
-          });
-        reclassificationEntryId = posted.id;
-        for (const plan of reclassificationPlan) {
-          const receiptLineId = createdLineIdByInvoiceLineId.get(plan.lineId);
-          if (receiptLineId === undefined) {
-            throw new InternalServerErrorException(
-              'No se encontró la línea de recepción recién creada; invariante interno roto',
-            );
-          }
-          await tx.purchaseReceiptLine.update({
-            where: { id: receiptLineId },
-            data: { reclassifiedAmount: plan.amount },
-          });
-        }
-        await tx.purchaseReceipt.update({
-          where: { id: created.id },
-          data: { reclassificationEntryId },
-        });
-      }
-
-      const finalRow = await tx.purchaseReceipt.findUniqueOrThrow({
+      await tx.purchaseReceipt.update({
         where: { id: created.id },
-        select: PURCHASE_RECEIPT_SAFE_SELECT,
+        data: { reclassificationEntryId },
       });
+    }
 
-      await this.auditService.record({
-        userId: input.actorUserId,
-        module: 'PURCHASE_RECEIPTS',
-        action: AuditAction.PURCHASE_RECEIPT_CREATED,
-        entityType: 'PurchaseReceipt',
-        entityId: created.id,
-        description: `Recepción de compra ${created.id} registrada`,
-        metadata: {
-          purchaseInvoiceId: input.purchaseInvoiceId,
-          lineCount: lockedLines.length,
-          reclassified: reclassificationEntryId !== null,
-        },
-        ipAddress: input.ipAddress ?? null,
-        client: tx,
-      });
-
-      return toSafePurchaseReceipt(finalRow, input.requesterRole);
+    const finalRow = await tx.purchaseReceipt.findUniqueOrThrow({
+      where: { id: created.id },
+      select: PURCHASE_RECEIPT_SAFE_SELECT,
     });
+
+    await this.auditService.record({
+      userId: input.actorUserId,
+      module: 'PURCHASE_RECEIPTS',
+      action: AuditAction.PURCHASE_RECEIPT_CREATED,
+      entityType: 'PurchaseReceipt',
+      entityId: created.id,
+      description: `Recepción de compra ${created.id} registrada`,
+      metadata: {
+        purchaseInvoiceId: input.purchaseInvoiceId,
+        lineCount: lockedLines.length,
+        reclassified: reclassificationEntryId !== null,
+      },
+      ipAddress: input.ipAddress ?? null,
+      client: tx,
+    });
+
+    return toSafePurchaseReceipt(finalRow, input.requesterRole);
   }
 
   // ==================================================================

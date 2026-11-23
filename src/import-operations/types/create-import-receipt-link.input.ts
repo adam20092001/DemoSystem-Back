@@ -4,6 +4,8 @@ export interface CreateImportReceiptLinkInput {
   purchaseReceiptLineId: string;
   linkedQuantity: string;
   idempotencyKey?: string;
+  /** R5: solicitud de recepción desde Importaciones que origina el vínculo. */
+  receivingRequestId?: string;
   actorUserId: string;
   ipAddress: string | null;
 }

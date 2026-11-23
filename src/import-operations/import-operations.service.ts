@@ -470,7 +470,20 @@ export class ImportOperationsService {
   async complete(
     input: CompleteImportOperationInput,
   ): Promise<SafeImportOperation> {
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction((tx) =>
+      this.completeInTransaction(tx, input),
+    );
+  }
+
+  /**
+   * R5: mismo cierre OPERATIVO dentro de una transacción ya abierta (recibir y
+   * completar). No mueve stock ni genera efectos contables.
+   */
+  async completeInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CompleteImportOperationInput,
+  ): Promise<SafeImportOperation> {
+    {
       const locked = await this.lockOperation(tx, input.importOperationId);
       if (locked.status !== ImportOperationStatus.IN_PROGRESS) {
         throw new ConflictException(
@@ -516,7 +529,7 @@ export class ImportOperationsService {
       });
 
       return toSafeImportOperation(updated);
-    });
+    }
   }
 
   /**

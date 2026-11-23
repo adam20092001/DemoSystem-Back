@@ -109,6 +109,15 @@ export class EnvironmentVariables {
   @IsNotEmpty({ message: 'PRODUCT_UPLOAD_DIR es obligatorio' })
   PRODUCT_UPLOAD_DIR!: string;
 
+  /**
+   * R5: raíz del almacenamiento PRIVADO de documentos adjuntos de facturas de
+   * compra. Debe apuntar a un volumen persistente en producción (nunca a un
+   * directorio temporal) y NO debe publicarse por ningún servidor web.
+   */
+  @IsString()
+  @IsNotEmpty({ message: 'PURCHASE_DOCUMENTS_DIR es obligatorio' })
+  PURCHASE_DOCUMENTS_DIR!: string;
+
   @IsInt({ message: 'PRODUCT_IMAGE_MAX_SIZE_BYTES debe ser un número entero' })
   @Min(1024, {
     message: 'PRODUCT_IMAGE_MAX_SIZE_BYTES debe ser al menos 1024 bytes',
@@ -187,6 +196,8 @@ export function validateEnv(
     LOGIN_THROTTLE_TTL_MS: toInt(raw.LOGIN_THROTTLE_TTL_MS, 60000),
     LOGIN_THROTTLE_LIMIT: toInt(raw.LOGIN_THROTTLE_LIMIT, 10),
     PRODUCT_UPLOAD_DIR: raw.PRODUCT_UPLOAD_DIR ?? 'uploads/products',
+    PURCHASE_DOCUMENTS_DIR:
+      raw.PURCHASE_DOCUMENTS_DIR ?? 'uploads/purchase-documents',
     PRODUCT_IMAGE_MAX_SIZE_BYTES: toInt(
       raw.PRODUCT_IMAGE_MAX_SIZE_BYTES,
       5242880,

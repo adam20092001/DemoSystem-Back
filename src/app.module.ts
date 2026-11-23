@@ -16,6 +16,7 @@ import { InventoryValuationModule } from './inventory-valuation/inventory-valuat
 import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
 import { PaymentsModule } from './payments/payments.module';
 import { ProductsModule } from './products/products.module';
+import { PurchaseInvoiceAttachmentsModule } from './purchase-invoices/attachments/purchase-invoice-attachments.module';
 import { PurchaseInvoicesModule } from './purchase-invoices/purchase-invoices.module';
 import { PurchaseReceiptsModule } from './purchase-receipts/purchase-receipts.module';
 import { QuotesModule } from './quotes/quotes.module';
@@ -56,6 +57,7 @@ import { UsersModule } from './users/users.module';
     PaymentsModule,
     AccountingModule,
     PurchaseInvoicesModule,
+    PurchaseInvoiceAttachmentsModule,
     PurchaseReceiptsModule,
     SupplierPaymentsModule,
     ImportOperationsModule,
