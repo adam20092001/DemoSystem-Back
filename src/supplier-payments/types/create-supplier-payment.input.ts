@@ -17,6 +17,11 @@ export interface CreateSupplierPaymentInput {
   paymentDate?: string;
   amount: string;
   method: string;
+  /** R4: moneda del pago (por defecto la de la empresa). Debe coincidir con la de TODAS las facturas pagadas. */
+  currencyCode?: string;
+  /** R4: moneda de la empresa por 1 unidad de moneda del pago (obligatoria si la moneda difiere de la de la empresa). */
+  exchangeRate?: string;
+  exchangeRateDate?: string;
   reference?: string;
   idempotencyKey?: string;
   allocations: CreateSupplierPaymentAllocationInput[];

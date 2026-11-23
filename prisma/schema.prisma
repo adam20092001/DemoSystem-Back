@@ -170,6 +170,7 @@ model User {
   auditLogs                  AuditLog[]
   inventoryMovements         InventoryMovement[]
   createdStockTransfers      StockTransfer[]
+  createdCountries           Country[]            @relation("CountryCreatedBy")
   // Cotizaciones donde este usuario es el emisor comercial (sellerId =
   // actor autenticado que creó la cotización; ver D12, Fase 5). No implica
   // que el usuario tenga rol SELLER: un ADMIN también puede emitir.
@@ -909,7 +910,9 @@ model Supplier {
   // ProductsService/stockMinimum, NR-04) — nunca un @default de columna,
   // para que la normalización (incluida la validación de formato) pase
   // siempre por el servicio.
-  countryCode String @map("country_code") @db.VarChar(2)
+  countryCode String  @map("country_code") @db.VarChar(2)
+  // R4: FK al catálogo compartido de países (el texto de 2 letras se conserva en la API).
+  country     Country @relation(fields: [countryCode], references: [code], onDelete: Restrict, onUpdate: Restrict)
 
   legalName     String  @map("legal_name") @db.VarChar(150)
   tradeName     String? @map("trade_name") @db.VarChar(150)
@@ -1054,12 +1057,29 @@ model PurchaseInvoice {
   // Importaciones que sí acepte otra.
   currencyCode String @map("currency_code") @db.VarChar(3)
 
+  // R4 (compras multimoneda). currencyCode = MONEDA DEL DOCUMENTO. Las columnas
+  // subtotal/taxAmount/totalAmount (y las de sus líneas) están SIEMPRE en la
+  // moneda de la EMPRESA (baseCurrencyCode, la contable): son las que leen la
+  // contabilización, la valorización y los saldos del libro. Los importes en la
+  // moneda del documento van en las columnas *Original. exchangeRate = unidades
+  // de moneda de la empresa por 1 unidad de moneda del documento (1 si coinciden);
+  // se congela al confirmar (el servicio solo edita en DRAFT). Históricos: tasa 1
+  // y originales = importes contables.
+  baseCurrencyCode String   @map("base_currency_code") @db.VarChar(3)
+  exchangeRate     Decimal  @map("exchange_rate") @db.Decimal(18, 8)
+  exchangeRateDate DateTime @map("exchange_rate_date") @db.Date
+
   // Siempre una SUMA de las líneas (nunca un valor independiente ni
   // recalculado por una tasa única de documento): subtotal=ΣtaxableBase,
-  // taxAmount=Σtax, totalAmount=Σtotal de línea.
+  // taxAmount=Σtax, totalAmount=Σtotal de línea. MONEDA DE LA EMPRESA.
   subtotal    Decimal @db.Decimal(14, 2)
   taxAmount   Decimal @map("tax_amount") @db.Decimal(14, 2)
   totalAmount Decimal @map("total_amount") @db.Decimal(14, 2)
+
+  // Mismas sumas en la MONEDA DEL DOCUMENTO.
+  subtotalOriginal    Decimal @map("subtotal_original") @db.Decimal(14, 2)
+  taxAmountOriginal   Decimal @map("tax_amount_original") @db.Decimal(14, 2)
+  totalAmountOriginal Decimal @map("total_amount_original") @db.Decimal(14, 2)
 
   status PurchaseInvoiceStatus @default(DRAFT)
 
@@ -1097,6 +1117,7 @@ model PurchaseInvoice {
   // isReceiptEligible/receiptLines arriba: nunca una fuente de verdad
   // duplicada).
   paymentAllocations SupplierPaymentAllocation[]
+  importOperations   ImportOperation[]
 
   // El índice único funcional (supplier_id, document_type,
   // UPPER(BTRIM(COALESCE(document_series,''))), UPPER(BTRIM(document_number)))
@@ -1143,7 +1164,11 @@ model PurchaseInvoiceLine {
   purchasePurpose PurchasePurpose         @map("purchase_purpose")
 
   quantity  Decimal @db.Decimal(14, 3)
+  // R4: unitCost y los importes de la línea están en la moneda de la EMPRESA
+  // (informativo/contable); unitCostOriginal y los *Original, en la moneda del
+  // DOCUMENTO (los que ingresa el usuario; hasta 6 decimales de precio unitario).
   unitCost  Decimal @map("unit_cost") @db.Decimal(14, 2)
+  unitCostOriginal Decimal @map("unit_cost_original") @db.Decimal(18, 6)
 
   taxCategory       PurchaseLineTaxCategory @map("tax_category")
   taxBasis          PurchaseLineTaxBasis?   @map("tax_basis")
@@ -1156,6 +1181,11 @@ model PurchaseInvoiceLine {
   creditableTaxAmount Decimal @default(0) @map("creditable_tax_amount") @db.Decimal(14, 2)
 
   lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  taxableBaseAmountOriginal   Decimal @map("taxable_base_amount_original") @db.Decimal(14, 2)
+  taxAmountOriginal           Decimal @map("tax_amount_original") @db.Decimal(14, 2)
+  creditableTaxAmountOriginal Decimal @map("creditable_tax_amount_original") @db.Decimal(14, 2)
+  lineTotalOriginal           Decimal @map("line_total_original") @db.Decimal(14, 2)
 
   isReceiptEligible Boolean? @map("is_receipt_eligible")
 
@@ -1350,6 +1380,15 @@ model SupplierPayment {
   // nunca una vía real de multimoneda.
   currencyCode String @map("currency_code") @db.VarChar(3)
 
+  // R4: amount/currencyCode son la MONEDA DEL PAGO (igual a la de todas las facturas
+  // que paga: política A). baseAmount = equivalente en la moneda de la empresa
+  // (round(amount × exchangeRate, 2)); exchangeRate = moneda de la empresa por 1
+  // unidad de moneda del pago, a la fecha exchangeRateDate. Históricos: tasa 1.
+  baseCurrencyCode String   @map("base_currency_code") @db.VarChar(3)
+  exchangeRate     Decimal  @map("exchange_rate") @db.Decimal(18, 8)
+  exchangeRateDate DateTime @map("exchange_rate_date") @db.Date
+  baseAmount       Decimal  @map("base_amount") @db.Decimal(14, 2)
+
   // FK viva + snapshot histórico hacia el método de pago dinámico (mismo
   // criterio exacto que Payment, Ticket C, Bloque C3): un pago ya
   // registrado nunca cambia de significado porque un ADMIN edite el
@@ -1413,7 +1452,17 @@ model SupplierPaymentAllocation {
   purchaseInvoiceId String          @map("purchase_invoice_id") @db.Uuid
   purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
 
+  // Moneda del pago (= moneda de la factura): cuánto de la deuda en moneda del
+  // documento cancela esta asignación.
   amount Decimal @db.Decimal(14, 2)
+
+  // R4 (moneda de la empresa): valor en libros cancelado (a la tasa histórica de
+  // la factura), importe pagado (a la tasa del pago) y diferencia de cambio
+  // realizada = settled − carrying (>0 pérdida, <0 ganancia). Nunca modifican el
+  // costo del inventario.
+  carryingBaseAmount  Decimal @map("carrying_base_amount") @db.Decimal(14, 2)
+  settledBaseAmount   Decimal @map("settled_base_amount") @db.Decimal(14, 2)
+  fxDifferenceAmount  Decimal @map("fx_difference_amount") @db.Decimal(14, 2)
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -2096,6 +2145,12 @@ enum AccountingSystemKey {
   // la cuenta histórica que la compra original de ese producto realmente
   // usó (ver AccountingEngine.postCogsRecognition()).
   COST_OF_GOODS_SOLD
+
+  // R4 (compras multimoneda): diferencia de cambio REALIZADA al pagar facturas en
+  // moneda extranjera. Sin mapeo real hasta que ADMIN lo asigne; un pago con
+  // diferencia distinta de cero sin este mapeo responde 409.
+  FX_GAIN_REALIZED
+  FX_LOSS_REALIZED
 }
 
 // Qué evento de negocio origina un AccountingEntry. Sin FK real hacia
@@ -3038,6 +3093,23 @@ enum ImportTransportMode {
 // ARRIVED significa que la mercadería llegó a destino LOGÍSTICO — nunca que
 // se recibió físicamente en inventario (eso sigue siendo exclusivamente
 // PurchaseReceipt, Fase A5.2b).
+// R4: Incoterms® 2020 (11 códigos). FAS/FOB/CFR/CIF solo son compatibles con
+// transporte SEA (CHECK en migration.sql). Solo describen el acuerdo comercial:
+// nunca generan gastos, stock, valorización ni asientos.
+enum ImportIncoterm {
+  EXW
+  FCA
+  CPT
+  CIP
+  DAP
+  DPU
+  DDP
+  FAS
+  FOB
+  CFR
+  CIF
+}
+
 enum ImportShipmentStatus {
   PLANNED
   IN_TRANSIT
@@ -3073,8 +3145,18 @@ model ImportOperation {
 
   // ISO 3166-1 alpha-2, validado en el DTO — nunca una tabla de países
   // nueva (fuera de alcance de B1).
-  originCountry      String @map("origin_country") @db.VarChar(2)
-  destinationCountry String @map("destination_country") @db.VarChar(2)
+  originCountry      String  @map("origin_country") @db.VarChar(2)
+  originCountryRef   Country @relation("ImportOperationOrigin", fields: [originCountry], references: [code], onDelete: Restrict, onUpdate: Restrict)
+  destinationCountry String  @map("destination_country") @db.VarChar(2)
+  destinationCountryRef Country @relation("ImportOperationDestination", fields: [destinationCountry], references: [code], onDelete: Restrict, onUpdate: Restrict)
+
+  // R4: factura de compra principal. Obligatoria para operaciones NUEVAS
+  // (la exige el servicio); NULL solo en operaciones históricas, identificadas
+  // explícitamente con isLegacyUnlinked (CHECK en migration.sql). Nunca se
+  // asigna automáticamente una factura a una operación histórica.
+  purchaseInvoiceId String?          @map("purchase_invoice_id") @db.Uuid
+  purchaseInvoice   PurchaseInvoice? @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
+  isLegacyUnlinked  Boolean          @default(false) @map("is_legacy_unlinked")
 
   status ImportOperationStatus @default(DRAFT)
 
@@ -3114,6 +3196,7 @@ model ImportOperation {
   // UPPER()/BTRIM() ni CHECK).
   @@index([status, createdAt])
   @@index([createdAt, id])
+  @@index([purchaseInvoiceId])
   @@map("import_operations")
 }
 
@@ -3131,6 +3214,12 @@ model ImportShipment {
   importOperation   ImportOperation @relation(fields: [importOperationId], references: [id], onDelete: Restrict)
 
   transportMode ImportTransportMode @map("transport_mode")
+
+  // R4: Incoterm opcional (NULL en embarques históricos y en los que no lo declaran).
+  // incoterm + incotermNamedPlace + incotermVersion van juntos o todos NULL (CHECK).
+  incoterm            ImportIncoterm? @map("incoterm")
+  incotermNamedPlace  String?         @map("incoterm_named_place") @db.VarChar(150)
+  incotermVersion     String?         @map("incoterm_version") @db.VarChar(4)
 
   // Todos opcionales a propósito: ninguno aplica igual a los cuatro modos
   // de transporte (CLAUDE.md B1 §2: "Avoid requiring fields that do not
@@ -3591,4 +3680,44 @@ model SireDemoProposalLine {
 
   @@unique([proposalId, lineNumber])
   @@map("sire_demo_proposal_lines")
+}
+
+// --- Catálogo compartido de países (R4) --------------------------------------
+//
+// Clave natural: código ISO 3166-1 alpha-2 en mayúsculas. Los países usados por
+// documentos históricos NUNCA se eliminan (FK Restrict, sin endpoint de borrado):
+// se desactivan. pendingReview=true marca códigos incorporados desde datos
+// históricos cuya identidad no se verificó (el nombre es provisional = el código).
+model Country {
+  code String @id @db.VarChar(2)
+  name String @db.VarChar(100)
+
+  active        Boolean @default(true)
+  pendingReview Boolean @default(false) @map("pending_review")
+
+  createdByUserId String? @map("created_by_user_id") @db.Uuid
+  createdBy       User?   @relation("CountryCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  suppliers                Supplier[]
+  importOperationsAsOrigin ImportOperation[] @relation("ImportOperationOrigin")
+  importOperationsAsDestination ImportOperation[] @relation("ImportOperationDestination")
+
+  // Unicidad insensible a mayúsculas/espacios del nombre y CHECK de formato
+  // del código: a mano en migration.sql.
+  @@map("countries")
+}
+
+// Correlativo anual de operaciones de importación (R4): IMP-AAAA-NNNNNN, con
+// reinicio por año. Se incrementa con un único UPDATE ... RETURNING (o INSERT
+// ... ON CONFLICT DO UPDATE) dentro de la transacción que crea la operación:
+// un rollback devuelve el número (sin huecos), y dos transacciones simultáneas
+// se serializan por la fila del año.
+model ImportOperationSequence {
+  year       Int @id
+  lastNumber Int @default(0) @map("last_number")
+
+  @@map("import_operation_sequences")
 }

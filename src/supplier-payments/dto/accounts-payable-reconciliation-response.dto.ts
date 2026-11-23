@@ -65,6 +65,9 @@ export class ApReconciliationReportResponseDto {
   @ApiProperty({ type: String, format: 'date-time' })
   generatedAt!: string;
 
+  @ApiProperty({ type: String, nullable: true, example: 'PEN', description: 'Moneda de la EMPRESA: todos los importes de la conciliación son valores contables (en libros).' })
+  baseCurrencyCode!: string | null;
+
   @ApiProperty({ type: [ApInvoiceReconciliationRowResponseDto] })
   invoices!: ApInvoiceReconciliationRowResponseDto[];
 

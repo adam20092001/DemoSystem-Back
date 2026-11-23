@@ -41,6 +41,7 @@ import {
   ApReconciliationReport,
 } from './types/accounts-payable-reconciliation';
 import {
+  AccountsPayableCurrencySummary,
   AccountsPayableSummaryReport,
   AccountsPayableSupplierSummary,
 } from './types/accounts-payable-summary';
@@ -93,7 +94,12 @@ const AP_INVOICE_SELECT = {
   issueDate: true,
   dueDate: true,
   currencyCode: true,
+  baseCurrencyCode: true,
+  exchangeRate: true,
+  exchangeRateDate: true,
+  // R4: totalAmount = moneda de la EMPRESA (contable); totalAmountOriginal = moneda del DOCUMENTO.
   totalAmount: true,
+  totalAmountOriginal: true,
   postedEntryId: true,
   supplier: { select: { legalName: true, documentNumber: true } },
 } satisfies Prisma.PurchaseInvoiceSelect;
@@ -105,8 +111,12 @@ type ApInvoiceRow = Prisma.PurchaseInvoiceGetPayload<{
 /** Fila ya computada (Decimal, nunca string) — base común de list()/getSummary()/getAging(). */
 interface ApComputedRow {
   row: ApInvoiceRow;
+  /** Moneda del DOCUMENTO. */
   paidAmount: Prisma.Decimal;
   balanceDue: Prisma.Decimal;
+  /** Moneda de la EMPRESA: valor en libros cancelado y saldo en libros. */
+  basePaid: Prisma.Decimal;
+  baseBalance: Prisma.Decimal;
   status: ReturnType<typeof computeAccountsPayableStatus>;
   agingBucket: AgingBucket;
   daysOverdue: number | null;
@@ -125,9 +135,15 @@ function toAccountsPayableItem(computed: ApComputedRow): AccountsPayableItem {
     issueDate: fromPrismaDate(row.issueDate),
     dueDate: row.dueDate !== null ? fromPrismaDate(row.dueDate) : null,
     currencyCode: row.currencyCode,
-    originalAmount: row.totalAmount.toFixed(2),
+    originalAmount: row.totalAmountOriginal.toFixed(2),
     paidAmount: computed.paidAmount.toFixed(2),
     balanceDue: computed.balanceDue.toFixed(2),
+    baseCurrencyCode: row.baseCurrencyCode,
+    exchangeRate: row.exchangeRate.toFixed(),
+    exchangeRateDate: fromPrismaDate(row.exchangeRateDate),
+    baseOriginalAmount: row.totalAmount.toFixed(2),
+    basePaidAmount: computed.basePaid.toFixed(2),
+    baseBalanceDue: computed.baseBalance.toFixed(2),
     status: computed.status,
     agingBucket: computed.agingBucket,
     daysOverdue: computed.daysOverdue,
@@ -224,7 +240,7 @@ export class AccountsPayableService {
       const paidMap = await this.computePaidAmounts(tx, [row.id]);
       const computed = this.toComputedRow(
         row,
-        paidMap.get(row.id) ?? ZERO,
+        paidMap.get(row.id) ?? { paid: ZERO, carrying: ZERO },
         businessToday(),
       );
 
@@ -232,12 +248,17 @@ export class AccountsPayableService {
         where: { purchaseInvoiceId: row.id },
         select: {
           amount: true,
+          carryingBaseAmount: true,
+          settledBaseAmount: true,
+          fxDifferenceAmount: true,
           createdAt: true,
           supplierPayment: {
             select: {
               id: true,
               status: true,
               paymentDate: true,
+              currencyCode: true,
+              exchangeRate: true,
               paymentMethodCode: true,
               reference: true,
             },
@@ -252,6 +273,11 @@ export class AccountsPayableService {
           status: allocation.supplierPayment.status,
           paymentDate: fromPrismaDate(allocation.supplierPayment.paymentDate),
           amountApplied: allocation.amount.toFixed(2),
+          currencyCode: allocation.supplierPayment.currencyCode,
+          exchangeRate: allocation.supplierPayment.exchangeRate.toFixed(),
+          baseCarryingAmount: allocation.carryingBaseAmount.toFixed(2),
+          baseSettledAmount: allocation.settledBaseAmount.toFixed(2),
+          fxDifferenceAmount: allocation.fxDifferenceAmount.toFixed(2),
           paymentMethodCode: allocation.supplierPayment.paymentMethodCode,
           reference: allocation.supplierPayment.reference,
         }),
@@ -296,12 +322,12 @@ export class AccountsPayableService {
           supplierDocumentNumber: c.row.supplier.documentNumber,
           invoiceCount: 1,
           totalOriginal: c.row.totalAmount,
-          totalPaid: c.paidAmount,
+          totalPaid: c.basePaid,
         });
       } else {
         existing.invoiceCount += 1;
         existing.totalOriginal = existing.totalOriginal.plus(c.row.totalAmount);
-        existing.totalPaid = existing.totalPaid.plus(c.paidAmount);
+        existing.totalPaid = existing.totalPaid.plus(c.basePaid);
       }
     }
 
@@ -324,11 +350,50 @@ export class AccountsPayableService {
       ZERO,
     );
     const grandTotalPaid = computed.reduce(
-      (sum, c) => sum.plus(c.paidAmount),
+      (sum, c) => sum.plus(c.basePaid),
       ZERO,
     );
 
+    // R4: bySupplier/grandTotal están en la moneda de la EMPRESA (valor contable);
+    // la deuda en la moneda original de cada documento va aparte, por moneda.
+    const currencyMap = new Map<
+      string,
+      {
+        invoiceCount: number;
+        totalOriginal: Prisma.Decimal;
+        totalPaid: Prisma.Decimal;
+        baseTotalPending: Prisma.Decimal;
+      }
+    >();
+    for (const c of computed) {
+      const entry = currencyMap.get(c.row.currencyCode) ?? {
+        invoiceCount: 0,
+        totalOriginal: ZERO,
+        totalPaid: ZERO,
+        baseTotalPending: ZERO,
+      };
+      entry.invoiceCount += 1;
+      entry.totalOriginal = entry.totalOriginal.plus(c.row.totalAmountOriginal);
+      entry.totalPaid = entry.totalPaid.plus(c.paidAmount);
+      entry.baseTotalPending = entry.baseTotalPending.plus(c.baseBalance);
+      currencyMap.set(c.row.currencyCode, entry);
+    }
+    const byCurrency: AccountsPayableCurrencySummary[] = Array.from(
+      currencyMap.entries(),
+    )
+      .map(([currencyCode, v]) => ({
+        currencyCode,
+        invoiceCount: v.invoiceCount,
+        totalOriginal: v.totalOriginal.toFixed(2),
+        totalPaid: v.totalPaid.toFixed(2),
+        totalPending: v.totalOriginal.minus(v.totalPaid).toFixed(2),
+        baseTotalPending: v.baseTotalPending.toFixed(2),
+      }))
+      .sort((a, b) => a.currencyCode.localeCompare(b.currencyCode));
+
     return {
+      baseCurrencyCode: computed[0]?.row.baseCurrencyCode ?? null,
+      byCurrency,
       bySupplier,
       grandTotal: {
         invoiceCount: computed.length,
@@ -371,14 +436,35 @@ export class AccountsPayableService {
     >();
     let overallTotalPending = ZERO;
 
+    const agingCurrencyMap = new Map<
+      string,
+      {
+        invoiceCount: number;
+        totalPending: Prisma.Decimal;
+        baseTotalPending: Prisma.Decimal;
+      }
+    >();
     for (const c of computed) {
-      overallTotalPending = overallTotalPending.plus(c.balanceDue);
+      // R4: los montos de este reporte son SIEMPRE valores en libros (moneda de la
+      // empresa), así que sumar proveedores y monedas distintas es válido.
+      overallTotalPending = overallTotalPending.plus(c.baseBalance);
+      const currencyEntry = agingCurrencyMap.get(c.row.currencyCode) ?? {
+        invoiceCount: 0,
+        totalPending: ZERO,
+        baseTotalPending: ZERO,
+      };
+      currencyEntry.invoiceCount += 1;
+      currencyEntry.totalPending = currencyEntry.totalPending.plus(c.balanceDue);
+      currencyEntry.baseTotalPending = currencyEntry.baseTotalPending.plus(
+        c.baseBalance,
+      );
+      agingCurrencyMap.set(c.row.currencyCode, currencyEntry);
       const overallBucket = overallBuckets.get(c.agingBucket) ?? {
         count: 0,
         amount: ZERO,
       };
       overallBucket.count += 1;
-      overallBucket.amount = overallBucket.amount.plus(c.balanceDue);
+      overallBucket.amount = overallBucket.amount.plus(c.baseBalance);
       overallBuckets.set(c.agingBucket, overallBucket);
 
       const supplierId = c.row.supplierId;
@@ -392,14 +478,14 @@ export class AccountsPayableService {
         >(),
       };
       supplierEntry.totalPending = supplierEntry.totalPending.plus(
-        c.balanceDue,
+        c.baseBalance,
       );
       const supplierBucket = supplierEntry.buckets.get(c.agingBucket) ?? {
         count: 0,
         amount: ZERO,
       };
       supplierBucket.count += 1;
-      supplierBucket.amount = supplierBucket.amount.plus(c.balanceDue);
+      supplierBucket.amount = supplierBucket.amount.plus(c.baseBalance);
       supplierEntry.buckets.set(c.agingBucket, supplierBucket);
       bySupplierMap.set(supplierId, supplierEntry);
     }
@@ -421,6 +507,15 @@ export class AccountsPayableService {
 
     return {
       asOfDate,
+      baseCurrencyCode: computed[0]?.row.baseCurrencyCode ?? null,
+      byCurrency: Array.from(agingCurrencyMap.entries())
+        .map(([currencyCode, v]) => ({
+          currencyCode,
+          invoiceCount: v.invoiceCount,
+          totalPending: v.totalPending.toFixed(2),
+          baseTotalPending: v.baseTotalPending.toFixed(2),
+        }))
+        .sort((a, b) => a.currencyCode.localeCompare(b.currencyCode)),
       totals: {
         totalPending: overallTotalPending.toFixed(2),
         buckets: Array.from(overallBuckets.entries()).map(([bucket, b]) => ({
@@ -518,7 +613,7 @@ export class AccountsPayableService {
             historicalLiabilityAccountId,
             (
               operationalPaidByAccount.get(historicalLiabilityAccountId) ?? ZERO
-            ).plus(c.paidAmount),
+            ).plus(c.basePaid),
           );
         }
 
@@ -530,8 +625,9 @@ export class AccountsPayableService {
           historicalLiabilityAccountId,
           creditedAmount:
             creditedAmount !== null ? creditedAmount.toFixed(2) : null,
-          operationalPaidAmount: c.paidAmount.toFixed(2),
-          operationalPendingBalance: c.balanceDue.toFixed(2),
+          // Valores EN LIBROS (moneda de la empresa), comparables con el Mayor.
+          operationalPaidAmount: c.basePaid.toFixed(2),
+          operationalPendingBalance: c.baseBalance.toFixed(2),
           discrepancies,
         });
       }
@@ -587,6 +683,7 @@ export class AccountsPayableService {
 
       return {
         generatedAt: new Date().toISOString(),
+        baseCurrencyCode: computed[0]?.row.baseCurrencyCode ?? null,
         invoices: invoiceRows,
         accounts: accountRows,
         overallConsistent,
@@ -683,6 +780,30 @@ export class AccountsPayableService {
         header: 'Saldo pendiente',
         type: 'number',
         value: (r) => Number(r.balanceDue),
+      },
+      {
+        key: 'baseCurrencyCode',
+        header: 'Moneda de la empresa',
+        type: 'string',
+        value: (r) => r.baseCurrencyCode,
+      },
+      {
+        key: 'exchangeRate',
+        header: 'Tipo de cambio',
+        type: 'number',
+        value: (r) => Number(r.exchangeRate),
+      },
+      {
+        key: 'baseOriginalAmount',
+        header: 'Importe en moneda de la empresa',
+        type: 'number',
+        value: (r) => Number(r.baseOriginalAmount),
+      },
+      {
+        key: 'baseBalanceDue',
+        header: 'Saldo en libros (moneda de la empresa)',
+        type: 'number',
+        value: (r) => Number(r.baseBalanceDue),
       },
       {
         key: 'status',
@@ -949,7 +1070,11 @@ export class AccountsPayableService {
     );
 
     let computed = rows.map((row) =>
-      this.toComputedRow(row, paidMap.get(row.id) ?? ZERO, today),
+      this.toComputedRow(
+        row,
+        paidMap.get(row.id) ?? { paid: ZERO, carrying: ZERO },
+        today,
+      ),
     );
     if (query.status !== undefined) {
       computed = computed.filter((c) => c.status === query.status);
@@ -959,10 +1084,13 @@ export class AccountsPayableService {
 
   private toComputedRow(
     row: ApInvoiceRow,
-    paidAmount: Prisma.Decimal,
+    paid: { paid: Prisma.Decimal; carrying: Prisma.Decimal },
     today: string,
   ): ApComputedRow {
-    const balanceDue = row.totalAmount.minus(paidAmount);
+    const paidAmount = paid.paid;
+    // Saldo en la moneda del DOCUMENTO y saldo en libros (moneda de la empresa).
+    const balanceDue = row.totalAmountOriginal.minus(paidAmount);
+    const baseBalance = row.totalAmount.minus(paid.carrying);
     const { bucket, daysOverdue } = computeAgingBucket(
       row.dueDate !== null ? fromPrismaDate(row.dueDate) : null,
       today,
@@ -971,7 +1099,9 @@ export class AccountsPayableService {
       row,
       paidAmount,
       balanceDue,
-      status: computeAccountsPayableStatus(paidAmount, row.totalAmount),
+      basePaid: paid.carrying,
+      baseBalance,
+      status: computeAccountsPayableStatus(paidAmount, row.totalAmountOriginal),
       agingBucket: bucket,
       daysOverdue,
     };
@@ -980,7 +1110,7 @@ export class AccountsPayableService {
   private async computePaidAmounts(
     tx: Prisma.TransactionClient,
     purchaseInvoiceIds: string[],
-  ): Promise<Map<string, Prisma.Decimal>> {
+  ): Promise<Map<string, { paid: Prisma.Decimal; carrying: Prisma.Decimal }>> {
     if (purchaseInvoiceIds.length === 0) {
       return new Map();
     }
@@ -990,10 +1120,16 @@ export class AccountsPayableService {
         purchaseInvoiceId: { in: purchaseInvoiceIds },
         supplierPayment: { status: SupplierPaymentStatus.ACTIVE },
       },
-      _sum: { amount: true },
+      _sum: { amount: true, carryingBaseAmount: true },
     });
     return new Map(
-      sums.map((row) => [row.purchaseInvoiceId, row._sum.amount ?? ZERO]),
+      sums.map((row) => [
+        row.purchaseInvoiceId,
+        {
+          paid: row._sum.amount ?? ZERO,
+          carrying: row._sum.carryingBaseAmount ?? ZERO,
+        },
+      ]),
     );
   }
 

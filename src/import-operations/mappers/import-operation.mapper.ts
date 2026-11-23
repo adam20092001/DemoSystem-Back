@@ -1,5 +1,8 @@
 import { Prisma } from '@prisma/client';
-import { SafeImportOperation } from '../types/safe-import-operation';
+import {
+  SafeImportOperation,
+  SafeLinkedPurchaseInvoice,
+} from '../types/safe-import-operation';
 
 const ACTOR_SUMMARY_SELECT = {
   id: true,
@@ -7,6 +10,24 @@ const ACTOR_SUMMARY_SELECT = {
   firstName: true,
   lastName: true,
 } satisfies Prisma.UserSelect;
+
+const LINKED_INVOICE_SELECT = {
+  id: true,
+  documentType: true,
+  documentSeries: true,
+  documentNumber: true,
+  status: true,
+  currencyCode: true,
+  supplier: {
+    select: {
+      id: true,
+      legalName: true,
+      documentType: true,
+      documentNumber: true,
+      countryCode: true,
+    },
+  },
+} satisfies Prisma.PurchaseInvoiceSelect;
 
 export const IMPORT_OPERATION_SAFE_SELECT = {
   id: true,
@@ -17,6 +38,9 @@ export const IMPORT_OPERATION_SAFE_SELECT = {
   status: true,
   externalReference: true,
   notes: true,
+  purchaseInvoiceId: true,
+  isLegacyUnlinked: true,
+  purchaseInvoice: { select: LINKED_INVOICE_SELECT },
   createdBy: { select: ACTOR_SUMMARY_SELECT },
   createdAt: true,
   updatedAt: true,
@@ -32,6 +56,35 @@ export type ImportOperationSafeRow = Prisma.ImportOperationGetPayload<{
   select: typeof IMPORT_OPERATION_SAFE_SELECT;
 }>;
 
+/** «F001-123» o «123» (sin serie). */
+export function formatInvoiceDocumentLabel(
+  series: string | null,
+  number: string,
+): string {
+  return series !== null && series.trim().length > 0
+    ? `${series}-${number}`
+    : number;
+}
+
+function toLinkedInvoice(
+  invoice: NonNullable<ImportOperationSafeRow['purchaseInvoice']>,
+): SafeLinkedPurchaseInvoice {
+  return {
+    id: invoice.id,
+    documentType: invoice.documentType,
+    documentSeries: invoice.documentSeries,
+    documentNumber: invoice.documentNumber,
+    documentLabel: formatInvoiceDocumentLabel(
+      invoice.documentSeries,
+      invoice.documentNumber,
+    ),
+    status: invoice.status,
+    currencyCode: invoice.currencyCode,
+    canAssignLines: invoice.status === 'CONFIRMED',
+    supplier: invoice.supplier,
+  };
+}
+
 export function toSafeImportOperation(
   row: ImportOperationSafeRow,
 ): SafeImportOperation {
@@ -44,6 +97,12 @@ export function toSafeImportOperation(
     status: row.status,
     externalReference: row.externalReference,
     notes: row.notes,
+    purchaseInvoiceId: row.purchaseInvoiceId,
+    isLegacyUnlinked: row.isLegacyUnlinked,
+    purchaseInvoice:
+      row.purchaseInvoice === null ? null : toLinkedInvoice(row.purchaseInvoice),
+    // Solo el detalle (GET /import-operations/:id) carga las líneas de la compra.
+    invoiceLines: null,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

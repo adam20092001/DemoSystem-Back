@@ -1,4 +1,4 @@
-import { ImportTransportMode } from '@prisma/client';
+import { ImportIncoterm, ImportTransportMode } from '@prisma/client';
 import { ImportShipmentLineInput } from './import-shipment-line.input';
 
 /**
@@ -10,6 +10,9 @@ import { ImportShipmentLineInput } from './import-shipment-line.input';
 export interface UpdateImportShipmentInput {
   importShipmentId: string;
   transportMode?: ImportTransportMode;
+  incoterm?: ImportIncoterm | null;
+  incotermNamedPlace?: string | null;
+  incotermVersion?: string | null;
   carrierName?: string | null;
   trackingReference?: string | null;
   billOfLadingNumber?: string | null;

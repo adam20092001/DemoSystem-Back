@@ -171,10 +171,21 @@ export interface PostSupplierPaymentCollectionCommand {
   description: string;
   accountingDateOnly: string;
   accountingDestination: PaymentMethodAccountingDestination;
+  /**
+   * Valor en libros (moneda de la EMPRESA, a la tasa histórica de cada factura)
+   * que cancela el pago, por cuenta de pasivo histórica.
+   */
   liabilityLines: {
     accountId: string;
     amount: Prisma.Decimal;
   }[];
+  /**
+   * R4: diferencia de cambio REALIZADA = importe pagado (a la tasa del pago) −
+   * valor en libros cancelado, en moneda de la empresa. >0 pérdida (Debe
+   * FX_LOSS_REALIZED); <0 ganancia (Haber FX_GAIN_REALIZED); 0/omitido: sin
+   * línea de diferencia. Nunca modifica el costo del inventario.
+   */
+  fxDifferenceAmount?: Prisma.Decimal;
   actorUserId: string;
   ipAddress: string | null;
 }

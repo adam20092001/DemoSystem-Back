@@ -23,8 +23,21 @@ export interface AgingBySupplier {
  * anulaciones no garantizan esa reconstrucción fiel (ver
  * `limitations`), así que este reporte deliberadamente no la ofrece.
  */
+export interface AgingCurrencyTotal {
+  currencyCode: string;
+  invoiceCount: number;
+  /** Saldo pendiente en la moneda del documento. */
+  totalPending: string;
+  /** Saldo pendiente en libros (moneda de la empresa). */
+  baseTotalPending: string;
+}
+
 export interface AgingReport {
   asOfDate: string;
+  /** Moneda de la EMPRESA: totals/bySupplier están expresados en ella. */
+  baseCurrencyCode: string | null;
+  /** Deuda por moneda del documento (sin sumar monedas distintas). */
+  byCurrency: AgingCurrencyTotal[];
   totals: {
     totalPending: string;
     buckets: AgingBucketAmount[];

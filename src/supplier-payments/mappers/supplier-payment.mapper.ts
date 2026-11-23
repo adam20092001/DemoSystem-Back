@@ -9,6 +9,9 @@ export const SUPPLIER_PAYMENT_ALLOCATION_SAFE_SELECT = {
   id: true,
   purchaseInvoiceId: true,
   amount: true,
+  carryingBaseAmount: true,
+  settledBaseAmount: true,
+  fxDifferenceAmount: true,
 } satisfies Prisma.SupplierPaymentAllocationSelect;
 
 export const SUPPLIER_PAYMENT_SAFE_SELECT = {
@@ -17,6 +20,10 @@ export const SUPPLIER_PAYMENT_SAFE_SELECT = {
   paymentDate: true,
   amount: true,
   currencyCode: true,
+  baseCurrencyCode: true,
+  exchangeRate: true,
+  exchangeRateDate: true,
+  baseAmount: true,
   paymentMethodId: true,
   paymentMethodCode: true,
   paymentMethodName: true,
@@ -52,6 +59,9 @@ function toSafeSupplierPaymentAllocation(
     id: row.id,
     purchaseInvoiceId: row.purchaseInvoiceId,
     amount: row.amount.toFixed(2),
+    carryingBaseAmount: row.carryingBaseAmount.toFixed(2),
+    settledBaseAmount: row.settledBaseAmount.toFixed(2),
+    fxDifferenceAmount: row.fxDifferenceAmount.toFixed(2),
   };
 }
 
@@ -64,6 +74,13 @@ export function toSafeSupplierPayment(
     paymentDate: fromPrismaDate(row.paymentDate),
     amount: row.amount.toFixed(2),
     currencyCode: row.currencyCode,
+    baseCurrencyCode: row.baseCurrencyCode,
+    exchangeRate: row.exchangeRate.toFixed(),
+    exchangeRateDate: fromPrismaDate(row.exchangeRateDate),
+    baseAmount: row.baseAmount.toFixed(2),
+    fxDifferenceAmount: row.allocations
+      .reduce((sum, a) => sum.plus(a.fxDifferenceAmount), new Prisma.Decimal(0))
+      .toFixed(2),
     paymentMethodId: row.paymentMethodId,
     paymentMethodCode: row.paymentMethodCode,
     paymentMethodName: row.paymentMethodName,

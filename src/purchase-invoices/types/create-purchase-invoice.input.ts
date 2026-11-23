@@ -44,6 +44,11 @@ export interface CreatePurchaseInvoiceInput {
   accountingDate?: string;
   dueDate?: string;
   paymentTermsDays?: number;
+  /** R4: moneda del documento (por defecto la de la empresa). */
+  currencyCode?: string;
+  /** R4: moneda de la empresa por 1 unidad de moneda del documento. */
+  exchangeRate?: string;
+  exchangeRateDate?: string;
   lines: CreatePurchaseInvoiceLineInput[];
   requesterRole: RoleName;
   actorUserId: string;

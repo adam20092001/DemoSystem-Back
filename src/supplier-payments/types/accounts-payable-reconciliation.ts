@@ -50,6 +50,8 @@ export interface ApAccountReconciliationRow {
  */
 export interface ApReconciliationReport {
   generatedAt: string;
+  /** Moneda de la EMPRESA: TODOS los importes de esta conciliación son valores contables (en libros), nunca la suma de importes originales de monedas distintas. */
+  baseCurrencyCode: string | null;
   invoices: ApInvoiceReconciliationRow[];
   accounts: ApAccountReconciliationRow[];
   overallConsistent: boolean;

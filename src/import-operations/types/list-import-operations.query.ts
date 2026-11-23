@@ -5,6 +5,8 @@ export interface ListImportOperationsQuery {
   limit?: number;
   status?: ImportOperationStatus;
   originCountry?: string;
+  purchaseInvoiceId?: string;
+  isLegacyUnlinked?: boolean;
   destinationCountry?: string;
   search?: string;
 }

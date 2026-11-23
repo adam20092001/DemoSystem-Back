@@ -1,5 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { ImportShipmentStatus, ImportTransportMode } from '@prisma/client';
+import {
+  ImportIncoterm,
+  ImportShipmentStatus,
+  ImportTransportMode,
+} from '@prisma/client';
 
 class ImportShipmentActorDto {
   @ApiProperty({ format: 'uuid' })
@@ -65,6 +69,15 @@ export class ImportShipmentResponseDto {
 
   @ApiProperty({ enum: ImportTransportMode })
   transportMode!: ImportTransportMode;
+
+  @ApiProperty({ enum: ImportIncoterm, nullable: true })
+  incoterm!: ImportIncoterm | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  incotermNamedPlace!: string | null;
+
+  @ApiProperty({ nullable: true, type: String, example: '2020' })
+  incotermVersion!: string | null;
 
   @ApiProperty({ nullable: true, type: String })
   carrierName!: string | null;

@@ -228,6 +228,11 @@ export enum AuditAction {
   SUPPLIER_UPDATED = 'SUPPLIER_UPDATED',
   SUPPLIER_ACTIVATED = 'SUPPLIER_ACTIVATED',
   SUPPLIER_DEACTIVATED = 'SUPPLIER_DEACTIVATED',
+  // R4: catálogo compartido de países. CountriesService es su único emisor.
+  COUNTRY_CREATED = 'COUNTRY_CREATED',
+  COUNTRY_UPDATED = 'COUNTRY_UPDATED',
+  COUNTRY_ACTIVATED = 'COUNTRY_ACTIVATED',
+  COUNTRY_DEACTIVATED = 'COUNTRY_DEACTIVATED',
   // R2-A1 (catálogo de almacenes y ubicaciones, solo EXPAND).
   // WarehousesService/WarehouseLocationsService son sus únicos emisores. Sin
   // ningún vínculo con inventario: solo metadatos estructurales del catálogo.

@@ -17,6 +17,9 @@ export interface UpdatePurchaseInvoiceInput {
   accountingDate?: string;
   dueDate?: string | null;
   paymentTermsDays?: number | null;
+  currencyCode?: string;
+  exchangeRate?: string;
+  exchangeRateDate?: string;
   lines?: CreatePurchaseInvoiceLineInput[];
   requesterRole: RoleName;
   actorUserId: string;

@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import {
   AccountingSourceType,
+  ImportOperationStatus,
+  ImportShipmentStatus,
   Prisma,
   PurchaseAcquisitionKind,
   PurchaseInvoiceStatus,
@@ -19,6 +21,10 @@ import {
 import { AccountingEngine } from '../accounting/accounting.engine';
 import { buildPurchaseOriginalDescription } from '../accounting/accounting-calculator';
 import { AuditAction } from '../audit/audit-action.enum';
+import {
+  BusinessConflictException,
+  FieldBadRequestException,
+} from '../common/errors/error-contract';
 import { AuditService } from '../audit/audit.service';
 import {
   businessToday,
@@ -47,6 +53,14 @@ import {
   CreatePurchaseInvoiceLineInput,
 } from './types/create-purchase-invoice.input';
 import { ListPurchaseInvoicesQuery } from './types/list-purchase-invoices.query';
+import {
+  BASE_UNIT_COST_MAX_DECIMALS,
+  FOREIGN_UNIT_COST_MAX_DECIMALS,
+  ResolvedCurrency,
+  convertLineToBase,
+  resolveDocumentCurrency,
+  toBaseAmount,
+} from './purchase-invoice-fx';
 import { SafePurchaseInvoice } from './types/safe-purchase-invoice';
 import { UpdatePurchaseInvoiceInput } from './types/update-purchase-invoice.input';
 
@@ -123,6 +137,9 @@ function assertCanCancel(requesterRole: RoleName): void {
   }
 }
 
+/** Máximo representable en DECIMAL(14,2). */
+const MAX_BASE_AMOUNT = new Prisma.Decimal('999999999999.99');
+
 interface LockedInvoiceRow {
   id: string;
   status: PurchaseInvoiceStatus;
@@ -140,14 +157,23 @@ interface PreparedLine {
   acquisitionKind: PurchaseAcquisitionKind;
   purchasePurpose: PurchasePurpose;
   quantity: Prisma.Decimal;
+  /** Moneda de la EMPRESA (contable). */
   unitCost: Prisma.Decimal;
+  /** Moneda del DOCUMENTO. */
+  unitCostOriginal: Prisma.Decimal;
   taxCategory: PurchaseLineTaxCategory;
   taxBasis: PurchaseLineTaxBasis | null;
   taxRateSnapshot: Prisma.Decimal | null;
+  /** Importes en la moneda de la EMPRESA. */
   taxableBaseAmount: Prisma.Decimal;
   taxAmount: Prisma.Decimal;
   creditableTaxAmount: Prisma.Decimal;
   lineTotal: Prisma.Decimal;
+  /** Importes en la moneda del DOCUMENTO. */
+  taxableBaseAmountOriginal: Prisma.Decimal;
+  taxAmountOriginal: Prisma.Decimal;
+  creditableTaxAmountOriginal: Prisma.Decimal;
+  lineTotalOriginal: Prisma.Decimal;
 }
 
 /**
@@ -293,13 +319,25 @@ export class PurchaseInvoicesService {
       );
       const settings = await this.settingsReader.getCurrent(tx);
 
+      // R4: moneda del documento, tasa (manual) y fecha de tasa. La moneda
+      // contable es SIEMPRE la de la empresa vigente bajo el lock de arriba.
+      const currency = resolveDocumentCurrency(
+        {
+          currencyCode: input.currencyCode,
+          exchangeRate: input.exchangeRate,
+          exchangeRateDate: input.exchangeRateDate,
+        },
+        settings.currencyCode,
+        input.issueDate,
+      );
       const lines = await this.prepareLines(
         tx,
         input.lines,
         settings.taxEnabled,
         settings.taxRate,
+        currency,
       );
-      const totals = calculatePurchaseInvoiceTotals(lines);
+      const totals = this.totalsOf(lines);
 
       const created = await tx.purchaseInvoice.create({
         data: {
@@ -312,10 +350,16 @@ export class PurchaseInvoicesService {
           accountingDate,
           dueDate,
           paymentTermsDays: input.paymentTermsDays ?? null,
-          currencyCode: settings.currencyCode,
-          subtotal: totals.subtotal,
-          taxAmount: totals.taxAmount,
-          totalAmount: totals.totalAmount,
+          currencyCode: currency.currencyCode,
+          baseCurrencyCode: currency.baseCurrencyCode,
+          exchangeRate: currency.exchangeRate,
+          exchangeRateDate: toPrismaDate(currency.exchangeRateDate),
+          subtotal: totals.base.subtotal,
+          taxAmount: totals.base.taxAmount,
+          totalAmount: totals.base.totalAmount,
+          subtotalOriginal: totals.original.subtotal,
+          taxAmountOriginal: totals.original.taxAmount,
+          totalAmountOriginal: totals.original.totalAmount,
           createdByUserId: input.actorUserId,
           lines: {
             create: lines.map((line) => this.toLineCreateData(line)),
@@ -334,6 +378,7 @@ export class PurchaseInvoicesService {
         metadata: {
           supplierId: input.supplierId,
           documentType: input.documentType,
+          currencyCode: currency.currencyCode,
         },
         ipAddress: input.ipAddress ?? null,
         client: tx,
@@ -363,6 +408,9 @@ export class PurchaseInvoicesService {
       input.accountingDate !== undefined ||
       input.dueDate !== undefined ||
       input.paymentTermsDays !== undefined ||
+      input.currencyCode !== undefined ||
+      input.exchangeRate !== undefined ||
+      input.exchangeRateDate !== undefined ||
       input.lines !== undefined;
     if (!hasAnyField) {
       throw new BadRequestException(
@@ -417,18 +465,140 @@ export class PurchaseInvoicesService {
         data.paymentTermsDays = input.paymentTermsDays;
       }
 
-      if (input.lines !== undefined) {
+      // R4: moneda/tasa/fecha de tasa (solo en DRAFT; se congelan al confirmar).
+      const currencyTouched =
+        input.currencyCode !== undefined ||
+        input.exchangeRate !== undefined ||
+        input.exchangeRateDate !== undefined;
+      let currency: ResolvedCurrency | null = null;
+      if (currencyTouched || input.lines !== undefined) {
+        const cur = await tx.purchaseInvoice.findUniqueOrThrow({
+          where: { id: locked.id },
+          select: {
+            currencyCode: true,
+            baseCurrencyCode: true,
+            exchangeRate: true,
+            exchangeRateDate: true,
+            issueDate: true,
+          },
+        });
+        await tx.$queryRaw(
+          Prisma.sql`SELECT id FROM company_settings WHERE singleton = true FOR UPDATE`,
+        );
+        const settingsNow = await this.settingsReader.getCurrent(tx);
+        const requestedCode =
+          input.currencyCode !== undefined
+            ? input.currencyCode.trim().toUpperCase()
+            : cur.currencyCode;
+        const currencyChanged = requestedCode !== cur.currencyCode;
+        const keepsForeignRate =
+          !currencyChanged && cur.currencyCode !== cur.baseCurrencyCode;
+        currency = resolveDocumentCurrency(
+          {
+            currencyCode: requestedCode,
+            exchangeRate:
+              input.exchangeRate ??
+              (keepsForeignRate ? cur.exchangeRate.toFixed() : undefined),
+            exchangeRateDate:
+              input.exchangeRateDate ??
+              (currencyChanged ? undefined : fromPrismaDate(cur.exchangeRateDate)),
+          },
+          settingsNow.currencyCode,
+          fromPrismaDate(cur.issueDate),
+        );
+        data.currencyCode = currency.currencyCode;
+        data.baseCurrencyCode = currency.baseCurrencyCode;
+        data.exchangeRate = currency.exchangeRate;
+        data.exchangeRateDate = toPrismaDate(currency.exchangeRateDate);
+      }
+
+      if (input.lines === undefined && currency !== null) {
+        // Solo cambió la moneda/tasa: se reconvierten a la moneda de la empresa
+        // los importes ORIGINALES ya guardados (nunca se vuelven a tipear).
+        const existingLines = await tx.purchaseInvoiceLine.findMany({
+          where: { purchaseInvoiceId: locked.id },
+          select: {
+            id: true,
+            unitCostOriginal: true,
+            taxableBaseAmountOriginal: true,
+            taxAmountOriginal: true,
+            creditableTaxAmountOriginal: true,
+            lineTotalOriginal: true,
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        const rebased: {
+          base: {
+            taxableBaseAmount: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            lineTotal: Prisma.Decimal;
+          };
+          original: {
+            taxableBaseAmount: Prisma.Decimal;
+            taxAmount: Prisma.Decimal;
+            lineTotal: Prisma.Decimal;
+          };
+        }[] = [];
+        for (const line of existingLines) {
+          const base = convertLineToBase(
+            {
+              taxableBaseAmount: line.taxableBaseAmountOriginal,
+              taxAmount: line.taxAmountOriginal,
+              creditableTaxAmount: line.creditableTaxAmountOriginal,
+              lineTotal: line.lineTotalOriginal,
+            },
+            currency.exchangeRate,
+          );
+          this.assertBaseWithinRange(base.lineTotal);
+          await tx.purchaseInvoiceLine.update({
+            where: { id: line.id },
+            data: {
+              unitCost: toBaseAmount(line.unitCostOriginal, currency.exchangeRate),
+              taxableBaseAmount: base.taxableBaseAmount,
+              taxAmount: base.taxAmount,
+              creditableTaxAmount: base.creditableTaxAmount,
+              lineTotal: base.lineTotal,
+            },
+          });
+          rebased.push({
+            base,
+            original: {
+              taxableBaseAmount: line.taxableBaseAmountOriginal,
+              taxAmount: line.taxAmountOriginal,
+              lineTotal: line.lineTotalOriginal,
+            },
+          });
+        }
+        const totals = {
+          base: calculatePurchaseInvoiceTotals(rebased.map((r) => r.base)),
+          original: calculatePurchaseInvoiceTotals(
+            rebased.map((r) => r.original),
+          ),
+        };
+        data.subtotal = totals.base.subtotal;
+        data.taxAmount = totals.base.taxAmount;
+        data.totalAmount = totals.base.totalAmount;
+        data.subtotalOriginal = totals.original.subtotal;
+        data.taxAmountOriginal = totals.original.taxAmount;
+        data.totalAmountOriginal = totals.original.totalAmount;
+      }
+
+      if (input.lines !== undefined && currency !== null) {
         const settings = await this.settingsReader.getCurrent(tx);
         const lines = await this.prepareLines(
           tx,
           input.lines,
           settings.taxEnabled,
           settings.taxRate,
+          currency,
         );
-        const totals = calculatePurchaseInvoiceTotals(lines);
-        data.subtotal = totals.subtotal;
-        data.taxAmount = totals.taxAmount;
-        data.totalAmount = totals.totalAmount;
+        const totals = this.totalsOf(lines);
+        data.subtotal = totals.base.subtotal;
+        data.taxAmount = totals.base.taxAmount;
+        data.totalAmount = totals.base.totalAmount;
+        data.subtotalOriginal = totals.original.subtotal;
+        data.taxAmountOriginal = totals.original.taxAmount;
+        data.totalAmountOriginal = totals.original.totalAmount;
 
         await tx.purchaseInvoiceLine.deleteMany({
           where: { purchaseInvoiceId: locked.id },
@@ -492,6 +662,23 @@ export class PurchaseInvoicesService {
         throw new ConflictException(
           'No se puede confirmar: el proveedor de esta factura no está activo',
         );
+      }
+
+      // R4: la moneda contable (de la empresa) debe seguir siendo la del
+      // momento de crear/editar el borrador. FOR SHARE: un cambio de moneda
+      // concurrente (PATCH /configuration, que bloquea la fila FOR UPDATE)
+      // espera a este commit y entonces encuentra el asiento (A0.2).
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id FROM company_settings WHERE singleton = true FOR SHARE`,
+      );
+      const settingsAtConfirm = await this.settingsReader.getCurrent(tx);
+      if (invoice.baseCurrencyCode !== settingsAtConfirm.currencyCode) {
+        throw new BusinessConflictException({
+          message:
+            'No se puede confirmar: la moneda de la empresa cambió desde que se creó el borrador. Edite la factura para recalcular su moneda y tipo de cambio.',
+          code: 'COMPANY_CURRENCY_CHANGED',
+          field: 'currencyCode',
+        });
       }
       if (invoice.lines.length === 0) {
         throw new BadRequestException(
@@ -649,6 +836,41 @@ export class PurchaseInvoicesService {
         );
       }
 
+      // R4: una factura con una operación de importación vinculada que no esté
+      // ANULADA (ni embarques activos que asignen sus líneas, incluidos los de
+      // operaciones históricas) no se anula: primero se anula la importación o
+      // el embarque. Orden de locks: factura (FOR UPDATE arriba) primero; la
+      // creación de operaciones y embarques toma la factura FOR SHARE.
+      const activeImportOperations = await tx.importOperation.count({
+        where: {
+          purchaseInvoiceId: locked.id,
+          status: { not: ImportOperationStatus.CANCELLED },
+        },
+      });
+      if (activeImportOperations > 0) {
+        throw new BusinessConflictException({
+          message:
+            'No se puede anular: existe una operación de importación activa vinculada a esta factura. Anule primero la importación.',
+          code: 'PURCHASE_INVOICE_HAS_ACTIVE_IMPORT',
+        });
+      }
+      const activeShipmentAssignments = await tx.importShipmentLine.count({
+        where: {
+          purchaseInvoiceLine: { purchaseInvoiceId: locked.id },
+          importShipment: {
+            status: { not: ImportShipmentStatus.CANCELLED },
+            importOperation: { status: { not: ImportOperationStatus.CANCELLED } },
+          },
+        },
+      });
+      if (activeShipmentAssignments > 0) {
+        throw new BusinessConflictException({
+          message:
+            'No se puede anular: hay líneas de esta factura asignadas a embarques de importación activos. Anule primero el embarque.',
+          code: 'PURCHASE_INVOICE_HAS_ACTIVE_SHIPMENT_LINES',
+        });
+      }
+
       const documentLabel = this.formatDocumentLabel(
         locked.documentType,
         locked.documentSeries,
@@ -730,6 +952,7 @@ export class PurchaseInvoicesService {
     lines: CreatePurchaseInvoiceLineInput[],
     taxEnabled: boolean,
     companyTaxRate: Prisma.Decimal,
+    currency: ResolvedCurrency,
   ): Promise<PreparedLine[]> {
     const productIds = Array.from(
       new Set(
@@ -799,7 +1022,7 @@ export class PurchaseInvoicesService {
       }
 
       const quantity = this.parseDecimalInput(line.quantity, 'quantity');
-      const unitCost = this.parseDecimalInput(line.unitCost, 'unitCost');
+      const unitCostOriginal = this.parseDecimalInput(line.unitCost, 'unitCost');
       const creditableTaxAmountInput =
         line.creditableTaxAmount !== undefined
           ? this.parseDecimalInput(
@@ -808,14 +1031,21 @@ export class PurchaseInvoicesService {
             )
           : new Prisma.Decimal(0);
 
+      // Importes en la MONEDA DEL DOCUMENTO (reglas de redondeo de siempre).
       const amounts = computePurchaseLineAmounts({
         quantity,
-        unitCost,
+        unitCost: unitCostOriginal,
         taxCategory,
         taxBasis: taxBasis ?? null,
         taxRate,
         creditableTaxAmount: creditableTaxAmountInput,
+        unitCostMaxDecimals: currency.isForeign
+          ? FOREIGN_UNIT_COST_MAX_DECIMALS
+          : BASE_UNIT_COST_MAX_DECIMALS,
       });
+      // Cada COMPONENTE se convierte a la moneda de la empresa (HALF_UP, 2 dec.).
+      const base = convertLineToBase(amounts, currency.exchangeRate);
+      this.assertBaseWithinRange(base.lineTotal);
 
       return {
         productId: line.productId ?? null,
@@ -825,14 +1055,19 @@ export class PurchaseInvoicesService {
         acquisitionKind: line.acquisitionKind,
         purchasePurpose: line.purchasePurpose,
         quantity,
-        unitCost,
+        unitCost: toBaseAmount(unitCostOriginal, currency.exchangeRate),
+        unitCostOriginal,
         taxCategory,
         taxBasis: taxBasis ?? null,
         taxRateSnapshot: taxRate,
-        taxableBaseAmount: amounts.taxableBaseAmount,
-        taxAmount: amounts.taxAmount,
-        creditableTaxAmount: amounts.creditableTaxAmount,
-        lineTotal: amounts.lineTotal,
+        taxableBaseAmount: base.taxableBaseAmount,
+        taxAmount: base.taxAmount,
+        creditableTaxAmount: base.creditableTaxAmount,
+        lineTotal: base.lineTotal,
+        taxableBaseAmountOriginal: amounts.taxableBaseAmount,
+        taxAmountOriginal: amounts.taxAmount,
+        creditableTaxAmountOriginal: amounts.creditableTaxAmount,
+        lineTotalOriginal: amounts.lineTotal,
       };
     });
   }
@@ -849,6 +1084,7 @@ export class PurchaseInvoicesService {
       purchasePurpose: line.purchasePurpose,
       quantity: line.quantity,
       unitCost: line.unitCost,
+      unitCostOriginal: line.unitCostOriginal,
       taxCategory: line.taxCategory,
       taxBasis: line.taxBasis,
       taxRateSnapshot: line.taxRateSnapshot,
@@ -856,7 +1092,45 @@ export class PurchaseInvoicesService {
       taxAmount: line.taxAmount,
       creditableTaxAmount: line.creditableTaxAmount,
       lineTotal: line.lineTotal,
+      taxableBaseAmountOriginal: line.taxableBaseAmountOriginal,
+      taxAmountOriginal: line.taxAmountOriginal,
+      creditableTaxAmountOriginal: line.creditableTaxAmountOriginal,
+      lineTotalOriginal: line.lineTotalOriginal,
     };
+  }
+
+  /**
+   * Totales de cabecera: SIEMPRE la suma de las líneas ya convertidas (moneda de
+   * la empresa) y de las líneas originales (moneda del documento); nunca se
+   * convierte el total del documento (evita diferencias de céntimos con el
+   * asiento).
+   */
+  private totalsOf(lines: PreparedLine[]): {
+    base: ReturnType<typeof calculatePurchaseInvoiceTotals>;
+    original: ReturnType<typeof calculatePurchaseInvoiceTotals>;
+  } {
+    return {
+      base: calculatePurchaseInvoiceTotals(lines),
+      original: calculatePurchaseInvoiceTotals(
+        lines.map((line) => ({
+          taxableBaseAmount: line.taxableBaseAmountOriginal,
+          taxAmount: line.taxAmountOriginal,
+          lineTotal: line.lineTotalOriginal,
+        })),
+      ),
+    };
+  }
+
+  /** El equivalente en moneda de la empresa debe caber en DECIMAL(14,2). */
+  private assertBaseWithinRange(baseLineTotal: Prisma.Decimal): void {
+    if (baseLineTotal.greaterThan(MAX_BASE_AMOUNT)) {
+      throw new FieldBadRequestException({
+        message:
+          'El equivalente en la moneda de la empresa excede la capacidad representable; revise el tipo de cambio',
+        code: 'BASE_AMOUNT_OUT_OF_RANGE',
+        field: 'exchangeRate',
+      });
+    }
   }
 
   private parseDecimalInput(raw: string, fieldName: string): Prisma.Decimal {

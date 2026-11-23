@@ -105,9 +105,9 @@ export class ImportOperationsController {
   }
 
   @ApiOperation({
-    summary: 'Crear una operación de importación (solo ADMIN; nace DRAFT)',
+    summary: 'Crear una operación de importación (ADMIN, PURCHASING; nace DRAFT)',
     description:
-      'Deliberadamente sin supplierId/purchaseInvoiceId propio: una importación consolidada puede abarcar varios proveedores/facturas, asociados únicamente a nivel de línea de embarque.',
+      'R4: exige purchaseInvoiceId (factura de compra DRAFT o CONFIRMED, no anulada); el proveedor se hereda de la factura y la referencia IMP-AAAA-NNNNNN la genera el servidor. Con la factura en DRAFT no se pueden asignar líneas a embarques hasta confirmarla (nunca se confirma automáticamente). Las operaciones históricas (isLegacyUnlinked) siguen consultables sin factura principal.',
   })
   @ApiCreatedResponse({ type: ImportOperationResponseDto })
   @ApiBadRequestResponse({ description: 'Payload inválido.' })
@@ -122,7 +122,7 @@ export class ImportOperationsController {
     @Req() request: Request,
   ): Promise<SafeImportOperation> {
     return this.importOperationsService.create({
-      reference: dto.reference,
+      purchaseInvoiceId: dto.purchaseInvoiceId,
       description: dto.description,
       originCountry: dto.originCountry,
       destinationCountry: dto.destinationCountry,
@@ -264,6 +264,9 @@ export class ImportOperationsController {
     return this.importShipmentsService.create({
       importOperationId: id,
       transportMode: dto.transportMode,
+      incoterm: dto.incoterm,
+      incotermNamedPlace: dto.incotermNamedPlace,
+      incotermVersion: dto.incotermVersion,
       carrierName: dto.carrierName,
       trackingReference: dto.trackingReference,
       billOfLadingNumber: dto.billOfLadingNumber,

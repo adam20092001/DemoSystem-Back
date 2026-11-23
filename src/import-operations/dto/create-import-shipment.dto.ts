@@ -1,10 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ImportTransportMode } from '@prisma/client';
+import { ImportIncoterm, ImportTransportMode } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
   IsEnum,
+  IsIn,
   IsOptional,
   IsString,
   MaxLength,
@@ -24,6 +25,33 @@ export class CreateImportShipmentDto {
   @ApiProperty({ enum: ImportTransportMode })
   @IsEnum(ImportTransportMode)
   transportMode!: ImportTransportMode;
+
+  @ApiPropertyOptional({
+    enum: ImportIncoterm,
+    description:
+      'Incoterms 2020. Sin valor predeterminado. FAS, FOB, CFR y CIF solo con transportMode=SEA. Con incoterm es obligatorio incotermNamedPlace.',
+  })
+  @IsOptional()
+  @IsEnum(ImportIncoterm)
+  incoterm?: ImportIncoterm;
+
+  @ApiPropertyOptional({
+    maxLength: 150,
+    description: 'Lugar o puerto convenido (obligatorio si se envía incoterm).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  incotermNamedPlace?: string;
+
+  @ApiPropertyOptional({
+    enum: ['2020'],
+    description: 'Versión de los Incoterms; si se omite con incoterm, se asigna 2020.',
+  })
+  @IsOptional()
+  @IsString()
+  @IsIn(['2020'])
+  incotermVersion?: string;
 
   @ApiPropertyOptional({ maxLength: 150 })
   @IsOptional()

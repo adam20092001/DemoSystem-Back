@@ -23,10 +23,20 @@ import {
   isValidDateOnly,
   toPrismaDate,
 } from '../common/date/business-date';
+import {
+  BusinessConflictException,
+  FieldBadRequestException,
+} from '../common/errors/error-contract';
 import { PaginatedResult } from '../common/types/paginated-result';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsReader } from '../configuration/settings-reader.service';
 import { PaymentMethodReader } from '../payment-methods/payment-method-reader.service';
+import {
+  computeCarryingBase,
+  distributeProportionally,
+  resolveDocumentCurrency,
+  toBaseAmount,
+} from '../purchase-invoices/purchase-invoice-fx';
 import { MAX_SUPPLIER_PAYMENT_ALLOCATIONS } from './constants/supplier-payment.constants';
 import {
   SUPPLIER_PAYMENT_SAFE_SELECT,
@@ -83,7 +93,11 @@ interface LockedInvoiceRow {
   supplierId: string;
   status: PurchaseInvoiceStatus;
   currencyCode: string;
+  baseCurrencyCode: string;
+  /** Moneda de la EMPRESA (contable). */
   totalAmount: Prisma.Decimal;
+  /** Moneda del DOCUMENTO (= moneda del pago). */
+  totalAmountOriginal: Prisma.Decimal;
   postedEntryId: string | null;
 }
 
@@ -242,7 +256,10 @@ export class SupplierPaymentsService {
       const invoiceIds = Array.from(allocations.keys()).sort();
       const lockedInvoices = await tx.$queryRaw<LockedInvoiceRow[]>(Prisma.sql`
         SELECT id, supplier_id AS "supplierId", status,
-               currency_code AS "currencyCode", total_amount AS "totalAmount",
+               currency_code AS "currencyCode",
+               base_currency_code AS "baseCurrencyCode",
+               total_amount AS "totalAmount",
+               total_amount_original AS "totalAmountOriginal",
                posted_entry_id AS "postedEntryId"
         FROM purchase_invoices
         WHERE id = ANY(${invoiceIds}::uuid[])
@@ -278,12 +295,41 @@ export class SupplierPaymentsService {
         Prisma.sql`SELECT id FROM company_settings WHERE singleton = true FOR UPDATE`,
       );
       const settings = await this.settingsReader.getCurrent(tx);
+      // R4 (política A): UN pago tiene UNA moneda y solo paga facturas del mismo
+      // proveedor y de ESA moneda. Sin moneda explícita se usa la de la empresa.
+      const currency = resolveDocumentCurrency(
+        {
+          currencyCode: input.currencyCode,
+          exchangeRate: input.exchangeRate,
+          exchangeRateDate: input.exchangeRateDate,
+        },
+        settings.currencyCode,
+        paymentDateString,
+      );
       for (const row of lockedInvoices) {
-        if (row.currencyCode !== settings.currencyCode) {
-          throw new ConflictException(
-            `La factura ${row.id} está en una moneda distinta a la vigente de la empresa`,
-          );
+        if (row.baseCurrencyCode !== settings.currencyCode) {
+          throw new BusinessConflictException({
+            message: `La factura ${row.id} se contabilizó en otra moneda de empresa (${row.baseCurrencyCode}); la moneda vigente es ${settings.currencyCode}`,
+            code: 'COMPANY_CURRENCY_CHANGED',
+            field: 'allocations',
+          });
         }
+        if (row.currencyCode !== currency.currencyCode) {
+          throw new BusinessConflictException({
+            message: `La factura ${row.id} está en ${row.currencyCode} y el pago en ${currency.currencyCode}: un pago solo puede aplicarse a facturas de su misma moneda. Indique currencyCode=${row.currencyCode} o pague las facturas de cada moneda por separado.`,
+            code: 'PAYMENT_CURRENCY_MISMATCH',
+            field: 'allocations',
+          });
+        }
+      }
+      const baseAmount = toBaseAmount(amount, currency.exchangeRate);
+      if (baseAmount.lessThanOrEqualTo(0)) {
+        throw new FieldBadRequestException({
+          message:
+            'El equivalente del pago en la moneda de la empresa debe ser mayor que cero; revise el monto y el tipo de cambio',
+          code: 'PAYMENT_BASE_AMOUNT_NOT_POSITIVE',
+          field: 'exchangeRate',
+        });
       }
 
       const paidSums = await tx.supplierPaymentAllocation.groupBy({
@@ -292,10 +338,16 @@ export class SupplierPaymentsService {
           purchaseInvoiceId: { in: invoiceIds },
           supplierPayment: { status: SupplierPaymentStatus.ACTIVE },
         },
-        _sum: { amount: true },
+        _sum: { amount: true, carryingBaseAmount: true },
       });
       const paidMap = new Map(
         paidSums.map((row) => [row.purchaseInvoiceId, row._sum.amount ?? ZERO]),
+      );
+      const carryingPaidMap = new Map(
+        paidSums.map((row) => [
+          row.purchaseInvoiceId,
+          row._sum.carryingBaseAmount ?? ZERO,
+        ]),
       );
 
       for (const row of lockedInvoices) {
@@ -306,12 +358,54 @@ export class SupplierPaymentsService {
             'Factura bloqueada sin monto asignado; invariante interno roto',
           );
         }
-        const pending = row.totalAmount.minus(alreadyPaid);
+        // El saldo se expresa en la moneda del DOCUMENTO (= moneda del pago).
+        const pending = row.totalAmountOriginal.minus(alreadyPaid);
         if (allocationAmount.greaterThan(pending)) {
           throw new ConflictException(
             `El monto asignado a la factura ${row.id} supera su saldo pendiente`,
           );
         }
+      }
+
+      // R4: por cada factura (orden estable por id): valor en libros que cancela
+      // (a la tasa histórica de la factura) y reparto del equivalente pagado
+      // (a la tasa del pago), con el residuo de redondeo en la última asignación.
+      const settledShares = distributeProportionally(
+        baseAmount,
+        lockedInvoices.map((row) => allocations.get(row.id) ?? ZERO),
+      );
+      const baseByInvoice = new Map<
+        string,
+        { carrying: Prisma.Decimal; settled: Prisma.Decimal; fx: Prisma.Decimal }
+      >();
+      lockedInvoices.forEach((row, index) => {
+        const allocationOriginal = allocations.get(row.id) ?? ZERO;
+        const carrying = computeCarryingBase({
+          invoiceBaseTotal: row.totalAmount,
+          invoiceOriginalTotal: row.totalAmountOriginal,
+          alreadyPaidOriginal: paidMap.get(row.id) ?? ZERO,
+          alreadyCarryingBase: carryingPaidMap.get(row.id) ?? ZERO,
+          allocationOriginal,
+        });
+        const settled = settledShares[index];
+        baseByInvoice.set(row.id, {
+          carrying,
+          settled,
+          fx: settled.minus(carrying),
+        });
+      });
+      const totalCarrying = Array.from(baseByInvoice.values()).reduce(
+        (sum, v) => sum.plus(v.carrying),
+        ZERO,
+      );
+      const totalFxDifference = baseAmount.minus(totalCarrying);
+      if (totalCarrying.lessThanOrEqualTo(0)) {
+        throw new FieldBadRequestException({
+          message:
+            'El valor en libros que cancela el pago es cero; revise el monto del pago',
+          code: 'PAYMENT_CARRYING_NOT_POSITIVE',
+          field: 'amount',
+        });
       }
 
       const method = await this.paymentMethodReader.findByCode(
@@ -363,15 +457,18 @@ export class SupplierPaymentsService {
             `El asiento original de la factura ${row.id} no tiene exactamente una línea de crédito de pasivo; invariante interno roto`,
           );
         }
-        const allocationAmount = allocations.get(row.id);
-        if (allocationAmount === undefined) {
+        const base = baseByInvoice.get(row.id);
+        if (base === undefined) {
           throw new InternalServerErrorException(
-            'Factura bloqueada sin monto asignado; invariante interno roto',
+            'Factura bloqueada sin importes en libros; invariante interno roto',
           );
         }
-        return { accountId: creditAccountIds[0], amount: allocationAmount };
+        // El pasivo se cancela por su valor en libros (moneda de la empresa).
+        return { accountId: creditAccountIds[0], amount: base.carrying };
       });
-      const liabilityLines = groupLiabilityAmountsByAccount(liabilityPlanItems);
+      const liabilityLines = groupLiabilityAmountsByAccount(
+        liabilityPlanItems.filter((item) => item.amount.greaterThan(0)),
+      );
 
       const supplierPaymentId = randomUUID();
       const posted = await this.accountingEngine.postSupplierPaymentCollection(
@@ -384,6 +481,7 @@ export class SupplierPaymentsService {
           accountingDateOnly: paymentDateString,
           accountingDestination: method.accountingDestination,
           liabilityLines,
+          fxDifferenceAmount: totalFxDifference,
           actorUserId: input.actorUserId,
           ipAddress: input.ipAddress,
         },
@@ -395,7 +493,11 @@ export class SupplierPaymentsService {
           supplierId: input.supplierId,
           paymentDate,
           amount,
-          currencyCode: settings.currencyCode,
+          currencyCode: currency.currencyCode,
+          baseCurrencyCode: currency.baseCurrencyCode,
+          exchangeRate: currency.exchangeRate,
+          exchangeRateDate: toPrismaDate(currency.exchangeRateDate),
+          baseAmount,
           paymentMethodId: method.id,
           paymentMethodCode: method.code,
           paymentMethodName: method.name,
@@ -406,10 +508,21 @@ export class SupplierPaymentsService {
           createdByUserId: input.actorUserId,
           allocations: {
             create: Array.from(allocations.entries()).map(
-              ([purchaseInvoiceId, allocationAmount]) => ({
-                purchaseInvoiceId,
-                amount: allocationAmount,
-              }),
+              ([purchaseInvoiceId, allocationAmount]) => {
+                const base = baseByInvoice.get(purchaseInvoiceId);
+                if (base === undefined) {
+                  throw new InternalServerErrorException(
+                    'Asignación sin importes en libros; invariante interno roto',
+                  );
+                }
+                return {
+                  purchaseInvoiceId,
+                  amount: allocationAmount,
+                  carryingBaseAmount: base.carrying,
+                  settledBaseAmount: base.settled,
+                  fxDifferenceAmount: base.fx,
+                };
+              },
             ),
           },
         },
@@ -428,6 +541,9 @@ export class SupplierPaymentsService {
           amount: amount.toFixed(2),
           invoiceCount: lockedInvoices.length,
           entryId: posted.id,
+          currencyCode: currency.currencyCode,
+          baseAmount: baseAmount.toFixed(2),
+          fxDifference: totalFxDifference.toFixed(2),
         },
         ipAddress: input.ipAddress ?? null,
         client: tx,

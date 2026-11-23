@@ -1,10 +1,13 @@
-import { ImportTransportMode } from '@prisma/client';
+import { ImportIncoterm, ImportTransportMode } from '@prisma/client';
 import { ImportShipmentLineInput } from './import-shipment-line.input';
 
 /** Comando interno de ImportShipmentsService.create() — no es un DTO HTTP. */
 export interface CreateImportShipmentInput {
   importOperationId: string;
   transportMode: ImportTransportMode;
+  incoterm?: ImportIncoterm;
+  incotermNamedPlace?: string;
+  incotermVersion?: string;
   carrierName?: string;
   trackingReference?: string;
   billOfLadingNumber?: string;

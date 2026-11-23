@@ -49,9 +49,29 @@ export class AgingTotalsResponseDto {
   buckets!: AgingBucketAmountResponseDto[];
 }
 
+export class AgingCurrencyTotalResponseDto {
+  @ApiProperty({ type: String, example: 'USD' })
+  currencyCode!: string;
+
+  @ApiProperty()
+  invoiceCount!: number;
+
+  @ApiProperty({ type: String, description: 'Saldo pendiente en la moneda del documento.' })
+  totalPending!: string;
+
+  @ApiProperty({ type: String, description: 'Saldo pendiente en libros (moneda de la empresa).' })
+  baseTotalPending!: string;
+}
+
 export class AgingReportResponseDto {
   @ApiProperty({ type: String, example: '2026-10-22' })
   asOfDate!: string;
+
+  @ApiProperty({ type: String, nullable: true, example: 'PEN', description: 'Moneda de la EMPRESA: totals y bySupplier están expresados en ella.' })
+  baseCurrencyCode!: string | null;
+
+  @ApiProperty({ type: [AgingCurrencyTotalResponseDto] })
+  byCurrency!: AgingCurrencyTotalResponseDto[];
 
   @ApiProperty({ type: AgingTotalsResponseDto })
   totals!: AgingTotalsResponseDto;

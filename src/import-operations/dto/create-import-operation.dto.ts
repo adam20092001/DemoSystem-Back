@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 /**
  * id, status y toda auditoría de completado/cancelación nunca se aceptan:
@@ -8,11 +8,13 @@ import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
  * valida en el servicio, no aquí (mismo criterio que CreateSupplierDto).
  */
 export class CreateImportOperationDto {
-  @ApiProperty({ maxLength: 40, example: 'IMP-2026-0001' })
-  @IsString()
-  @MinLength(1)
-  @MaxLength(40)
-  reference!: string;
+  @ApiProperty({
+    format: 'uuid',
+    description:
+      'Factura de compra principal (obligatoria). Puede estar en DRAFT o CONFIRMED; el proveedor se hereda de ella. La referencia (IMP-AAAA-NNNNNN) la genera el servidor: enviar reference produce 400.',
+  })
+  @IsUUID()
+  purchaseInvoiceId!: string;
 
   @ApiPropertyOptional({ maxLength: 300 })
   @IsOptional()

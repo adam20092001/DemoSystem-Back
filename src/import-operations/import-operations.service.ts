@@ -9,12 +9,25 @@ import {
   ImportOperationStatus,
   ImportShipmentStatus,
   Prisma,
+  PurchaseInvoiceStatus,
+  PurchaseReceiptStatus,
   RoleName,
 } from '@prisma/client';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditService } from '../audit/audit.service';
+import { businessToday } from '../common/date/business-date';
+import {
+  BusinessConflictException,
+  FieldBadRequestException,
+} from '../common/errors/error-contract';
 import { PaginatedResult } from '../common/types/paginated-result';
+import { assertCountryUsable } from '../countries/country.utils';
 import { PrismaService } from '../database/prisma.service';
+import {
+  formatImportOperationReference,
+  nextImportOperationNumber,
+  yearOfBusinessDate,
+} from './import-operation-reference';
 import {
   IMPORT_OPERATION_SAFE_SELECT,
   toSafeImportOperation,
@@ -25,7 +38,10 @@ import {
 } from './types/import-operation-action.input';
 import { CreateImportOperationInput } from './types/create-import-operation.input';
 import { ListImportOperationsQuery } from './types/list-import-operations.query';
-import { SafeImportOperation } from './types/safe-import-operation';
+import {
+  SafeImportInvoiceLine,
+  SafeImportOperation,
+} from './types/safe-import-operation';
 import { UpdateImportOperationInput } from './types/update-import-operation.input';
 
 const DEFAULT_PAGE = 1;
@@ -72,7 +88,6 @@ export class ImportOperationsService {
   async create(
     input: CreateImportOperationInput,
   ): Promise<SafeImportOperation> {
-    const reference = normalizeRequiredText(input.reference, 'reference', 40);
     const originCountry = normalizeCountryCode(
       input.originCountry,
       'originCountry',
@@ -89,13 +104,50 @@ export class ImportOperationsService {
     const notes = normalizeOptionalText(input.notes, 1000);
 
     return this.prisma.$transaction(async (tx) => {
-      // Sin pre-check SELECT: la unicidad real la garantiza el índice único
-      // funcional (import_operations_reference_unique) + el filtro global
-      // de excepciones (P2002 -> 409) — mismo criterio exacto que
-      // SuppliersService.create()/CustomersService.create().
+      // R4: países del catálogo compartido (existentes y activos).
+      await assertCountryUsable(tx, originCountry, 'originCountry');
+      await assertCountryUsable(tx, destinationCountry, 'destinationCountry');
+
+      // R4: factura de compra principal OBLIGATORIA en operaciones nuevas.
+      // FOR SHARE: impide que PurchaseInvoicesService.cancel() (que toma
+      // FOR UPDATE sobre la factura) anule la compra entre esta validación y
+      // el commit; el orden de locks es siempre factura primero.
+      const invoiceRows = await tx.$queryRaw<
+        { id: string; status: PurchaseInvoiceStatus }[]
+      >(Prisma.sql`
+        SELECT id, status FROM purchase_invoices
+        WHERE id = ${input.purchaseInvoiceId}::uuid
+        FOR SHARE
+      `);
+      const invoice = invoiceRows[0];
+      if (invoice === undefined) {
+        throw new FieldBadRequestException({
+          message: 'La factura de compra indicada no existe',
+          code: 'PURCHASE_INVOICE_NOT_FOUND',
+          field: 'purchaseInvoiceId',
+        });
+      }
+      if (invoice.status === PurchaseInvoiceStatus.CANCELLED) {
+        throw new BusinessConflictException({
+          message:
+            'No se puede crear una importación sobre una factura de compra anulada',
+          code: 'PURCHASE_INVOICE_CANCELLED',
+          field: 'purchaseInvoiceId',
+        });
+      }
+
+      // R4: correlativo anual generado en el servidor (IMP-AAAA-NNNNNN).
+      // El año es el de la zona de negocio; el índice único funcional de
+      // `reference` es la segunda defensa ante cualquier carrera.
+      const year = yearOfBusinessDate(businessToday());
+      const sequence = await nextImportOperationNumber(tx, year);
+      const reference = formatImportOperationReference(year, sequence);
+
       const created = await tx.importOperation.create({
         data: {
           reference,
+          purchaseInvoiceId: input.purchaseInvoiceId,
+          isLegacyUnlinked: false,
           description,
           originCountry,
           destinationCountry,
@@ -114,7 +166,10 @@ export class ImportOperationsService {
         entityType: 'ImportOperation',
         entityId: created.id,
         description: `Operación de importación ${created.id} creada`,
-        metadata: { importOperationId: created.id },
+        metadata: {
+          importOperationId: created.id,
+          purchaseInvoiceId: input.purchaseInvoiceId,
+        },
         ipAddress: input.ipAddress ?? null,
         client: tx,
       });
@@ -146,6 +201,12 @@ export class ImportOperationsService {
     const where: Prisma.ImportOperationWhereInput = {};
     if (query.status !== undefined) {
       where.status = query.status;
+    }
+    if (query.purchaseInvoiceId !== undefined) {
+      where.purchaseInvoiceId = query.purchaseInvoiceId;
+    }
+    if (query.isLegacyUnlinked !== undefined) {
+      where.isLegacyUnlinked = query.isLegacyUnlinked;
     }
     if (query.originCountry !== undefined) {
       where.originCountry = query.originCountry.trim().toUpperCase();
@@ -194,7 +255,100 @@ export class ImportOperationsService {
     if (row === null) {
       throw new NotFoundException('Operación de importación no encontrada');
     }
-    return toSafeImportOperation(row);
+    const safe = toSafeImportOperation(row);
+    if (row.purchaseInvoiceId !== null) {
+      safe.invoiceLines = await this.loadInvoiceLines(
+        row.purchaseInvoiceId,
+        row.id,
+      );
+    }
+    return safe;
+  }
+
+  /**
+   * Productos y líneas de la compra con su disponibilidad logística (R4).
+   * Solo lectura: nunca escribe stock, valorización ni contabilidad.
+   */
+  private async loadInvoiceLines(
+    purchaseInvoiceId: string,
+    importOperationId: string,
+  ): Promise<SafeImportInvoiceLine[]> {
+    const lines = await this.prisma.purchaseInvoiceLine.findMany({
+      where: { purchaseInvoiceId },
+      select: {
+        id: true,
+        productId: true,
+        descriptionSnapshot: true,
+        unitCodeSnapshot: true,
+        quantity: true,
+        product: { select: { sku: true } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const lineIds = lines.map((line) => line.id);
+    if (lineIds.length === 0) {
+      return [];
+    }
+    const [assignedAll, assignedThis, received] = await Promise.all([
+      this.prisma.importShipmentLine.groupBy({
+        by: ['purchaseInvoiceLineId'],
+        where: {
+          purchaseInvoiceLineId: { in: lineIds },
+          importShipment: { status: { not: ImportShipmentStatus.CANCELLED } },
+        },
+        _sum: { plannedQuantity: true },
+      }),
+      this.prisma.importShipmentLine.groupBy({
+        by: ['purchaseInvoiceLineId'],
+        where: {
+          purchaseInvoiceLineId: { in: lineIds },
+          importShipment: {
+            importOperationId,
+            status: { not: ImportShipmentStatus.CANCELLED },
+          },
+        },
+        _sum: { plannedQuantity: true },
+      }),
+      this.prisma.purchaseReceiptLine.groupBy({
+        by: ['purchaseInvoiceLineId'],
+        where: {
+          purchaseInvoiceLineId: { in: lineIds },
+          purchaseReceipt: { status: PurchaseReceiptStatus.ACTIVE },
+        },
+        _sum: { quantity: true },
+      }),
+    ]);
+    const zero = new Prisma.Decimal(0);
+    const assignedAllMap = new Map(
+      assignedAll.map((r) => [r.purchaseInvoiceLineId, r._sum.plannedQuantity ?? zero]),
+    );
+    const assignedThisMap = new Map(
+      assignedThis.map((r) => [r.purchaseInvoiceLineId, r._sum.plannedQuantity ?? zero]),
+    );
+    const receivedMap = new Map(
+      received.map((r) => [r.purchaseInvoiceLineId, r._sum.quantity ?? zero]),
+    );
+    return lines.map((line) => {
+      const assigned = assignedAllMap.get(line.id) ?? zero;
+      const receivedQty = receivedMap.get(line.id) ?? zero;
+      const available = line.quantity.minus(assigned);
+      const pending = line.quantity.minus(receivedQty);
+      return {
+        purchaseInvoiceLineId: line.id,
+        productId: line.productId,
+        productSku: line.product?.sku ?? null,
+        description: line.descriptionSnapshot,
+        unitCode: line.unitCodeSnapshot,
+        invoicedQuantity: line.quantity.toFixed(3),
+        assignedQuantity: assigned.toFixed(3),
+        assignedToThisOperationQuantity: (
+          assignedThisMap.get(line.id) ?? zero
+        ).toFixed(3),
+        availableQuantity: (available.lessThan(0) ? zero : available).toFixed(3),
+        receivedQuantity: receivedQty.toFixed(3),
+        pendingReceiptQuantity: (pending.lessThan(0) ? zero : pending).toFixed(3),
+      };
+    });
   }
 
   async update(
@@ -215,7 +369,12 @@ export class ImportOperationsService {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.importOperation.findUnique({
         where: { id: input.importOperationId },
-        select: { id: true, status: true },
+        select: {
+          id: true,
+          status: true,
+          originCountry: true,
+          destinationCountry: true,
+        },
       });
       if (existing === null) {
         throw new NotFoundException('Operación de importación no encontrada');
@@ -229,7 +388,7 @@ export class ImportOperationsService {
         );
       }
 
-      const data: Prisma.ImportOperationUpdateInput = {};
+      const data: Prisma.ImportOperationUncheckedUpdateInput = {};
       const updatedFields: string[] = [];
 
       if (input.description !== undefined) {
@@ -237,17 +396,25 @@ export class ImportOperationsService {
         updatedFields.push('description');
       }
       if (input.originCountry !== undefined) {
-        data.originCountry = normalizeCountryCode(
+        const newOrigin = normalizeCountryCode(
           input.originCountry,
           'originCountry',
         );
+        if (newOrigin !== existing.originCountry) {
+          await assertCountryUsable(tx, newOrigin, 'originCountry');
+        }
+        data.originCountry = newOrigin;
         updatedFields.push('originCountry');
       }
       if (input.destinationCountry !== undefined) {
-        data.destinationCountry = normalizeCountryCode(
+        const newDestination = normalizeCountryCode(
           input.destinationCountry,
           'destinationCountry',
         );
+        if (newDestination !== existing.destinationCountry) {
+          await assertCountryUsable(tx, newDestination, 'destinationCountry');
+        }
+        data.destinationCountry = newDestination;
         updatedFields.push('destinationCountry');
       }
       if (input.externalReference !== undefined) {
