@@ -234,17 +234,14 @@ describe('WarehouseLocationsService', () => {
       );
     });
 
-    it.each([RoleName.PURCHASING, RoleName.ACCOUNTANT])(
-      '%s recibe 403 al leer',
-      async (role) => {
-        await expect(service.list('wh-1', {}, role)).rejects.toBeInstanceOf(
-          ForbiddenException,
-        );
-        await expect(
-          service.findOne('wh-1', 'loc-1', role),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-      },
-    );
+    it.each([RoleName.ACCOUNTANT])('%s recibe 403 al leer', async (role) => {
+      await expect(service.list('wh-1', {}, role)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(
+        service.findOne('wh-1', 'loc-1', role),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
   });
 
   describe('update', () => {

@@ -292,8 +292,8 @@ describe('PurchaseInvoicesService', () => {
       });
     });
 
-    describe('R1: confirmar / anular (ADMIN, MANAGEMENT)', () => {
-      it.each([RoleName.ADMIN, RoleName.MANAGEMENT])(
+    describe('R3: confirmar / anular (ADMIN, MANAGEMENT, PURCHASING)', () => {
+      it.each([RoleName.ADMIN, RoleName.MANAGEMENT, RoleName.PURCHASING])(
         '%s atraviesa la guardia de confirmar y anular',
         async (role) => {
           prisma.tx.$queryRaw.mockResolvedValue([]);
@@ -317,32 +317,32 @@ describe('PurchaseInvoicesService', () => {
         },
       );
 
-      it.each([
-        RoleName.PURCHASING,
-        RoleName.ACCOUNTANT,
-        RoleName.SELLER,
-        RoleName.WAREHOUSE,
-      ])('%s no puede confirmar ni anular', async (role) => {
-        await expect(
-          service.confirm({
-            purchaseInvoiceId: PURCHASE_INVOICE_ID,
-            requesterRole: role,
-            actorUserId: ACTOR_ID,
-            ipAddress: null,
-          }),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        await expect(
-          service.cancel({
-            purchaseInvoiceId: PURCHASE_INVOICE_ID,
-            reason: 'motivo',
-            requesterRole: role,
-            actorUserId: ACTOR_ID,
-            ipAddress: null,
-          }),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        expect(prisma.tx.$queryRaw).not.toHaveBeenCalled();
-        expect(accountingEngine.postPurchaseRecognition).not.toHaveBeenCalled();
-      });
+      it.each([RoleName.ACCOUNTANT, RoleName.SELLER, RoleName.WAREHOUSE])(
+        '%s no puede confirmar ni anular',
+        async (role) => {
+          await expect(
+            service.confirm({
+              purchaseInvoiceId: PURCHASE_INVOICE_ID,
+              requesterRole: role,
+              actorUserId: ACTOR_ID,
+              ipAddress: null,
+            }),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          await expect(
+            service.cancel({
+              purchaseInvoiceId: PURCHASE_INVOICE_ID,
+              reason: 'motivo',
+              requesterRole: role,
+              actorUserId: ACTOR_ID,
+              ipAddress: null,
+            }),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(prisma.tx.$queryRaw).not.toHaveBeenCalled();
+          expect(
+            accountingEngine.postPurchaseRecognition,
+          ).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 

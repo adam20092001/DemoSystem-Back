@@ -269,7 +269,7 @@ describe('PurchaseReceiptsService', () => {
       expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
     });
 
-    it.each([RoleName.MANAGEMENT, RoleName.ACCOUNTANT, RoleName.PURCHASING])(
+    it.each([RoleName.MANAGEMENT, RoleName.ACCOUNTANT])(
       '%s puede leer pero nunca registrar ni anular',
       async (role) => {
         prisma.purchaseReceipt.findUnique.mockResolvedValue(
@@ -287,6 +287,29 @@ describe('PurchaseReceiptsService', () => {
         expect(prisma.tx.purchaseReceipt.create).not.toHaveBeenCalled();
       },
     );
+
+    it('R3: PURCHASING puede leer, registrar y anular recepciones (atraviesa la guardia de rol)', async () => {
+      prisma.purchaseReceipt.findUnique.mockResolvedValue(makeSafeReceiptRow());
+      await expect(
+        service.findOne(PURCHASE_RECEIPT_ID, RoleName.PURCHASING),
+      ).resolves.toBeDefined();
+      let createError: unknown;
+      try {
+        await service.create(
+          createInput({ requesterRole: RoleName.PURCHASING }),
+        );
+      } catch (e) {
+        createError = e;
+      }
+      expect(createError).not.toBeInstanceOf(ForbiddenException);
+      let cancelError: unknown;
+      try {
+        await service.cancel(cancelInput(RoleName.PURCHASING));
+      } catch (e) {
+        cancelError = e;
+      }
+      expect(cancelError).not.toBeInstanceOf(ForbiddenException);
+    });
 
     it('R1: WAREHOUSE puede leer y registrar la recepción física, pero nunca anularla', async () => {
       prisma.purchaseReceipt.findUnique.mockResolvedValue(makeSafeReceiptRow());

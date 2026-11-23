@@ -32,6 +32,7 @@ const READ_ROLES = [
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /**

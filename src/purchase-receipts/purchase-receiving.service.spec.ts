@@ -73,7 +73,7 @@ describe('PurchaseReceivingService (R1)', () => {
   });
 
   describe('permisos', () => {
-    it.each([RoleName.SELLER, RoleName.PURCHASING])(
+    it.each([RoleName.SELLER])(
       '%s: lista y detalle lanzan ForbiddenException sin tocar Prisma',
       async (role) => {
         await expect(

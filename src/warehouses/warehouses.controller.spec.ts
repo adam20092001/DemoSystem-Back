@@ -24,11 +24,12 @@ const READ = [
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
   RoleName.SELLER,
+  RoleName.PURCHASING,
 ];
 
 describe('WarehousesController — matriz de roles (R2-A1)', () => {
   it.each(['list', 'findOne', 'listLocations', 'findLocation'])(
-    '%s: lectura para ADMIN, WAREHOUSE, MANAGEMENT y SELLER (nunca PURCHASING ni ACCOUNTANT)',
+    '%s: lectura para ADMIN, WAREHOUSE, MANAGEMENT, SELLER y PURCHASING (R3; nunca ACCOUNTANT)',
     (method) => {
       expect([...rolesOf(method)].sort()).toEqual([...READ].sort());
     },

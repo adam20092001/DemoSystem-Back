@@ -43,6 +43,7 @@ const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.SELLER,
+  RoleName.PURCHASING,
 ]);
 
 function assertCanReadPaymentMethods(requesterRole: RoleName): void {

@@ -44,8 +44,9 @@ const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
-const MANAGE_ROLES = [RoleName.ADMIN] as const;
+const MANAGE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 
 /** Registro, consulta, listado y anulación de pagos a proveedores (Fase A5.3). */
 @ApiTags('Supplier Payments')

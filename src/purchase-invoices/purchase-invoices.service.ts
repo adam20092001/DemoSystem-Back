@@ -75,10 +75,12 @@ const EDIT_DRAFT_ROLES: ReadonlySet<RoleName> = new Set([
 const CONFIRM_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
 ]);
 const CANCEL_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
 ]);
 
 function assertCanRead(requesterRole: RoleName): void {

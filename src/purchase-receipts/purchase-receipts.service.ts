@@ -86,8 +86,12 @@ const PURCHASE_RECEIPT_REFERENCE_TYPE = 'PurchaseReceipt';
 const CREATE_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.WAREHOUSE,
+  RoleName.PURCHASING,
 ]);
-const CANCEL_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
+const CANCEL_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.PURCHASING,
+]);
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,

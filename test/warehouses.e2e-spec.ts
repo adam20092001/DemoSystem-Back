@@ -374,7 +374,7 @@ describe('Almacenes y ubicaciones — R2-A1 (catálogo) y R2-ACT (e2e)', () => {
       },
     );
 
-    it.each([RoleName.PURCHASING, RoleName.ACCOUNTANT])(
+    it.each([RoleName.ACCOUNTANT])(
       '%s no tiene ningún acceso al catálogo (403 en lectura y escritura)',
       async (role) => {
         const cookie = cookies.get(role) as string;

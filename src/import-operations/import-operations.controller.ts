@@ -49,11 +49,12 @@ import { ImportShipmentsService } from './import-shipments.service';
 import { SafeImportOperation } from './types/safe-import-operation';
 import { SafeImportShipment } from './types/safe-import-shipment';
 
-const WRITE_ROLES = [RoleName.ADMIN] as const;
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /**

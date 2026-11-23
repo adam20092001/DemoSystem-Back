@@ -155,13 +155,17 @@ describe('PurchaseInvoicesController', () => {
     );
 
     it.each(['confirm', 'cancel'])(
-      'R1: %s expone @Roles(ADMIN, MANAGEMENT) exactamente (excepción aprobada; PURCHASING nunca confirma ni anula)',
+      'R3: %s expone @Roles(ADMIN, MANAGEMENT, PURCHASING) exactamente',
       (name) => {
         const metadata = Reflect.getMetadata(
           ROLES_KEY,
           controllerPrototype[name],
         ) as RoleName[];
-        expect(metadata).toEqual([RoleName.ADMIN, RoleName.MANAGEMENT]);
+        expect(metadata).toEqual([
+          RoleName.ADMIN,
+          RoleName.MANAGEMENT,
+          RoleName.PURCHASING,
+        ]);
       },
     );
 

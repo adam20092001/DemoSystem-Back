@@ -30,6 +30,7 @@ const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ]);
 
 function assertCanRead(requesterRole: RoleName): void {

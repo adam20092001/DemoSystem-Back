@@ -46,6 +46,7 @@ const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.SELLER,
+  RoleName.PURCHASING,
 ] as const;
 const MUTATE_ROLES = [RoleName.ADMIN] as const;
 

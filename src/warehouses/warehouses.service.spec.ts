@@ -200,6 +200,7 @@ describe('WarehousesService', () => {
       RoleName.WAREHOUSE,
       RoleName.MANAGEMENT,
       RoleName.SELLER,
+      RoleName.PURCHASING,
     ])('%s puede listar y consultar', async (role) => {
       await expect(service.list({}, role)).resolves.toMatchObject({
         total: 1,
@@ -209,18 +210,15 @@ describe('WarehousesService', () => {
       });
     });
 
-    it.each([RoleName.PURCHASING, RoleName.ACCOUNTANT])(
-      '%s recibe 403 al leer',
-      async (role) => {
-        await expect(service.list({}, role)).rejects.toBeInstanceOf(
-          ForbiddenException,
-        );
-        await expect(service.findOne('wh-1', role)).rejects.toBeInstanceOf(
-          ForbiddenException,
-        );
-        expect(prisma.warehouse.findMany).not.toHaveBeenCalled();
-      },
-    );
+    it.each([RoleName.ACCOUNTANT])('%s recibe 403 al leer', async (role) => {
+      await expect(service.list({}, role)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(service.findOne('wh-1', role)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(prisma.warehouse.findMany).not.toHaveBeenCalled();
+    });
 
     it('findOne responde 404 si no existe', async () => {
       prisma.warehouse.findUnique.mockResolvedValue(null);

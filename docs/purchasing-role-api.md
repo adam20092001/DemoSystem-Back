@@ -1,5 +1,9 @@
 # Rol PURCHASING y recepción de almacén — contrato REST para el frontend (Angular)
 
+> **Superado parcialmente por R3.** `PURCHASING` ahora también confirma/anula facturas, registra/anula recepciones, opera pagos a proveedores e
+> Importaciones. La matriz vigente está en [purchasing-full-access-api.md](purchasing-full-access-api.md); este documento conserva el contrato de
+> sesión/rol activo y las vistas de recepción de `WAREHOUSE`.
+
 Integración de **R1**: rol `PURCHASING`, permisos de compras por acción, excepción de `MANAGEMENT` y vistas de
 recepción para `WAREHOUSE` sin información financiera. Referencia de reglas: [CLAUDE.md](../CLAUDE.md) §5 y §11 (R1).
 El cuerpo exacto de cada request/response está en Swagger (`/api/docs`).

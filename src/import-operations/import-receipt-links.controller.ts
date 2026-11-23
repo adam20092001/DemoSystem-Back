@@ -42,11 +42,12 @@ import {
   SafeShipmentLineReceptionSummary,
 } from './types/safe-import-receipt-link';
 
-const WRITE_ROLES = [RoleName.ADMIN] as const;
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /**

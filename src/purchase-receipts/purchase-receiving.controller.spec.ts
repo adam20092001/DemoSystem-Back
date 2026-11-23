@@ -51,7 +51,7 @@ describe('PurchaseReceivingController (R1)', () => {
   });
 
   it.each(['listInvoices', 'findInvoice'])(
-    '%s expone @Roles(ADMIN, WAREHOUSE, MANAGEMENT, ACCOUNTANT) exactamente: nunca SELLER ni PURCHASING',
+    '%s expone @Roles(ADMIN, WAREHOUSE, MANAGEMENT, ACCOUNTANT, PURCHASING) exactamente: nunca SELLER (R3)',
     (method) => {
       const roles = Reflect.getMetadata(
         ROLES_KEY,
@@ -62,9 +62,9 @@ describe('PurchaseReceivingController (R1)', () => {
         RoleName.WAREHOUSE,
         RoleName.MANAGEMENT,
         RoleName.ACCOUNTANT,
+        RoleName.PURCHASING,
       ]);
       expect(roles).not.toContain(RoleName.SELLER);
-      expect(roles).not.toContain(RoleName.PURCHASING);
     },
   );
 
