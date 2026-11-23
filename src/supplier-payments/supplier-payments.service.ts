@@ -51,11 +51,15 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 /** ADMIN administra el ciclo de vida completo; MANAGEMENT/ACCOUNTANT solo leen. SELLER/WAREHOUSE sin ningún acceso (A5.3). */
-const MANAGE_ROLES: ReadonlySet<RoleName> = new Set([RoleName.ADMIN]);
+const MANAGE_ROLES: ReadonlySet<RoleName> = new Set([
+  RoleName.ADMIN,
+  RoleName.PURCHASING,
+]);
 const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ]);
 
 function assertCanRead(requesterRole: RoleName): void {

@@ -51,8 +51,12 @@ const READ_ROLES = [
   RoleName.PURCHASING,
   RoleName.WAREHOUSE,
 ] as const;
-const CREATE_ROLES = [RoleName.ADMIN, RoleName.WAREHOUSE] as const;
-const CANCEL_ROLES = [RoleName.ADMIN] as const;
+const CREATE_ROLES = [
+  RoleName.ADMIN,
+  RoleName.WAREHOUSE,
+  RoleName.PURCHASING,
+] as const;
+const CANCEL_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 
 /**
  * Historial y creación de recepciones físicas ANIDADAS bajo una factura de

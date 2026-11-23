@@ -36,11 +36,12 @@ import { UpdateImportShipmentDto } from './dto/update-import-shipment.dto';
 import { ImportShipmentsService } from './import-shipments.service';
 import { SafeImportShipment } from './types/safe-import-shipment';
 
-const WRITE_ROLES = [RoleName.ADMIN] as const;
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /** Consulta de detalle, edición mientras PLANNED, y transiciones explícitas de UN embarque, por su propio id (Fase B1). */

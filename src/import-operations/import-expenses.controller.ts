@@ -48,11 +48,12 @@ import { ImportExpensesService } from './import-expenses.service';
 import { SafeImportExpense } from './types/safe-import-expense';
 import { SafeImportExpenseAllocationBatch } from './types/safe-import-expense-allocation-batch';
 
-const WRITE_ROLES = [RoleName.ADMIN] as const;
+const WRITE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 const READ_ROLES = [
   RoleName.ADMIN,
   RoleName.MANAGEMENT,
   RoleName.ACCOUNTANT,
+  RoleName.PURCHASING,
 ] as const;
 
 /**

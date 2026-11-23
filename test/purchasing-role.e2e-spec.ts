@@ -869,33 +869,37 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       expect(updatedAudit.userId).toBe(purchasingUserId);
     });
 
-    it('12-13. PURCHASING no confirma ni anula (403) y la factura queda intacta', async () => {
+    it('12-13. (R3) PURCHASING confirma y anula (200) con auditoría de su propio usuario', async () => {
       const draft = await draftInvoice([goodLine(productId, '1.000')]);
-      expect(
-        (
-          await api(
-            'post',
-            `/purchase-invoices/${draft.id}/confirm`,
-            purchasingCookie,
-            {},
-          )
-        ).status,
-      ).toBe(403);
-      expect(
-        (
-          await api(
-            'post',
-            `/purchase-invoices/${draft.id}/cancel`,
-            purchasingCookie,
-            { reason: 'motivo' },
-          )
-        ).status,
-      ).toBe(403);
-      const row = await prisma.purchaseInvoice.findUniqueOrThrow({
-        where: { id: draft.id },
+      const confirmed = await api(
+        'post',
+        `/purchase-invoices/${draft.id}/confirm`,
+        purchasingCookie,
+        {},
+      );
+      expect(confirmed.status).toBe(200);
+      expect((confirmed.body as InvoiceBody).status).toBe('CONFIRMED');
+      const cancelled = await api(
+        'post',
+        `/purchase-invoices/${draft.id}/cancel`,
+        purchasingCookie,
+        { reason: 'motivo' },
+      );
+      expect(cancelled.status).toBe(200);
+      expect((cancelled.body as InvoiceBody).status).toBe('CANCELLED');
+      const audits = await prisma.auditLog.findMany({
+        where: {
+          entityId: draft.id,
+          action: {
+            in: [
+              AuditAction.PURCHASE_INVOICE_CONFIRMED,
+              AuditAction.PURCHASE_INVOICE_CANCELLED,
+            ],
+          },
+        },
       });
-      expect(row.status).toBe('DRAFT');
-      expect(row.postedEntryId).toBeNull();
+      expect(audits).toHaveLength(2);
+      for (const a of audits) expect(a.userId).toBe(purchasingUserId);
     });
 
     it('14-15. MANAGEMENT confirma (con asiento contable) y anula (con reversión): excepción aprobada, con auditoría del actor real', async () => {
@@ -1705,26 +1709,29 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       ).toBe(false);
     });
 
-    it('lectura de recepción para ADMIN/MANAGEMENT/ACCOUNTANT; nunca SELLER ni PURCHASING', async () => {
-      for (const cookie of [adminCookie, managementCookie, accountantCookie]) {
+    it('(R3) vistas de recepción: ADMIN/MANAGEMENT/ACCOUNTANT/PURCHASING leen (200); nunca SELLER', async () => {
+      for (const cookie of [
+        adminCookie,
+        managementCookie,
+        accountantCookie,
+        purchasingCookie,
+      ]) {
         expect(
           (await api('get', '/purchase-receiving/invoices', cookie)).status,
         ).toBe(200);
       }
-      for (const cookie of [sellerCookie, purchasingCookie]) {
-        expect(
-          (await api('get', '/purchase-receiving/invoices', cookie)).status,
-        ).toBe(403);
-        expect(
-          (
-            await api(
-              'get',
-              `/purchase-receiving/invoices/${NON_EXISTENT_UUID}`,
-              cookie,
-            )
-          ).status,
-        ).toBe(403);
-      }
+      expect(
+        (await api('get', '/purchase-receiving/invoices', sellerCookie)).status,
+      ).toBe(403);
+      expect(
+        (
+          await api(
+            'get',
+            `/purchase-receiving/invoices/${NON_EXISTENT_UUID}`,
+            sellerCookie,
+          )
+        ).status,
+      ).toBe(403);
     });
 
     it('WAREHOUSE no abre facturas ni proveedores ni cuentas por pagar', async () => {
@@ -1747,7 +1754,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       ).toBe(403);
     });
 
-    it('PURCHASING lee recepciones (vista completa) pero no recibe ni las anula', async () => {
+    it('(R3) PURCHASING lee recepciones (vista completa), registra y anula', async () => {
       const invoice = await confirmedInvoice([
         goodLine(secondProductId, '3.000'),
       ]);
@@ -1774,9 +1781,9 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       expect(detail.status).toBe(200);
       expect(detail.body).toHaveProperty('reclassificationEntryId');
 
-      expect(
-        (await receive(invoice.id, lineId, '1.000', purchasingCookie)).status,
-      ).toBe(403);
+      const own = await receive(invoice.id, lineId, '1.000', purchasingCookie);
+      expect(own.status).toBe(201);
+      createdReceiptIds.push((own.body as ReceiptBody).id);
       expect(
         (
           await api(
@@ -1786,7 +1793,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
             { reason: 'x' },
           )
         ).status,
-      ).toBe(403);
+      ).toBe(200);
     });
   });
 
@@ -1814,10 +1821,10 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       }
     });
 
-    it('21. no accede a pagos a proveedores (ni lectura ni escritura)', async () => {
+    it('21. (R3) accede a pagos a proveedores: ninguna ruta responde 403', async () => {
       expect(
         (await api('get', '/supplier-payments', purchasingCookie)).status,
-      ).toBe(403);
+      ).toBe(200);
       expect(
         (
           await api(
@@ -1826,10 +1833,10 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
             purchasingCookie,
           )
         ).status,
-      ).toBe(403);
+      ).toBe(404);
       expect(
         (await api('post', '/supplier-payments', purchasingCookie, {})).status,
-      ).toBe(403);
+      ).toBe(400);
       expect(
         (
           await api(
@@ -1839,7 +1846,7 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
             { reason: 'x' },
           )
         ).status,
-      ).toBe(403);
+      ).toBe(404);
     });
 
     it('22. no administra usuarios ni roles', async () => {
@@ -1879,21 +1886,18 @@ describe('R1 — Rol PURCHASING (e2e)', () => {
       }
     });
 
-    it('24. endpoints alternativos: contabilidad, importaciones, ventas, clientes y configuración siguen cerrados', async () => {
+    it('24. endpoints alternativos: contabilidad, ventas, clientes y configuración siguen cerrados (importaciones y pagos a proveedores se abrieron en R3)', async () => {
       for (const [method, path] of [
         ['get', '/accounting/entries'],
         ['get', '/chart-of-accounts'],
         ['post', '/accounting/manual-entries'],
         ['get', '/accounting/periods'],
-        ['get', '/import-shipments'],
-        ['get', '/import-operations'],
         ['get', '/sales'],
         ['get', '/quotes'],
         ['get', '/customers'],
         ['get', '/payments'],
         ['get', '/dashboard'],
         ['get', '/audit-logs'],
-        ['get', '/payment-methods'],
         ['get', '/electronic-documents'],
       ] as const) {
         const response = await api(method, path, purchasingCookie, {});

@@ -21,6 +21,7 @@ export const READ_ROLES: ReadonlySet<RoleName> = new Set([
   RoleName.WAREHOUSE,
   RoleName.MANAGEMENT,
   RoleName.SELLER,
+  RoleName.PURCHASING,
 ]);
 
 /** Administración del catálogo: exclusiva de ADMIN. */

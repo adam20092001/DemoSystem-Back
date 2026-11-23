@@ -91,7 +91,7 @@ describe('SupplierPaymentsController', () => {
     });
   });
 
-  it('expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT) en lectura y @Roles(ADMIN) exclusivamente en escritura', () => {
+  it('R3: expone @Roles(ADMIN, MANAGEMENT, ACCOUNTANT, PURCHASING) en lectura y @Roles(ADMIN, PURCHASING) exclusivamente en escritura', () => {
     const prototype = SupplierPaymentsController.prototype as unknown as Record<
       string,
       object
@@ -100,6 +100,7 @@ describe('SupplierPaymentsController', () => {
       RoleName.ADMIN,
       RoleName.MANAGEMENT,
       RoleName.ACCOUNTANT,
+      RoleName.PURCHASING,
     ];
     expect(Reflect.getMetadata(ROLES_KEY, prototype.list)).toEqual(readRoles);
     expect(Reflect.getMetadata(ROLES_KEY, prototype.findOne)).toEqual(
@@ -107,9 +108,11 @@ describe('SupplierPaymentsController', () => {
     );
     expect(Reflect.getMetadata(ROLES_KEY, prototype.create)).toEqual([
       RoleName.ADMIN,
+      RoleName.PURCHASING,
     ]);
     expect(Reflect.getMetadata(ROLES_KEY, prototype.cancel)).toEqual([
       RoleName.ADMIN,
+      RoleName.PURCHASING,
     ]);
   });
 });

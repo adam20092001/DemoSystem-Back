@@ -56,8 +56,16 @@ const READ_ROLES = [
 ] as const;
 const CREATE_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
 const EDIT_DRAFT_ROLES = [RoleName.ADMIN, RoleName.PURCHASING] as const;
-const CONFIRM_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
-const CANCEL_ROLES = [RoleName.ADMIN, RoleName.MANAGEMENT] as const;
+const CONFIRM_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
+] as const;
+const CANCEL_ROLES = [
+  RoleName.ADMIN,
+  RoleName.MANAGEMENT,
+  RoleName.PURCHASING,
+] as const;
 
 /**
  * Facturas de compra universales (Fase A5.2a): ciclo de vida
