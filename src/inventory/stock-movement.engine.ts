@@ -57,6 +57,13 @@ const ALLOWED_ORIGIN_MOVEMENT_TYPES: Record<
   ],
   [InventoryMovementOrigin.MANUAL]: null,
   [InventoryMovementOrigin.OTHER]: null,
+  // R2-C: una transferencia mueve stock con un EXIT (origen) y un ENTRY
+  // (destino); nunca un ajuste. NO es un origen histórico autoritativo: el
+  // producto debe ser inventariable y estar activo en el momento.
+  [InventoryMovementOrigin.TRANSFER]: [
+    InventoryMovementType.ENTRY,
+    InventoryMovementType.EXIT,
+  ],
 };
 
 /**

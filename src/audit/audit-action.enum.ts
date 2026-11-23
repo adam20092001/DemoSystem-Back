@@ -137,6 +137,9 @@ export enum AuditAction {
   INVENTORY_EXIT_CREATED = 'INVENTORY_EXIT_CREATED',
   INVENTORY_ADJUSTMENT_IN_CREATED = 'INVENTORY_ADJUSTMENT_IN_CREATED',
   INVENTORY_ADJUSTMENT_OUT_CREATED = 'INVENTORY_ADJUSTMENT_OUT_CREATED',
+  // R2-C: documento de transferencia entre ubicaciones (ADICIONAL a los dos
+  // INVENTORY_EXIT_CREATED/INVENTORY_ENTRY_CREATED de sus movimientos).
+  INVENTORY_TRANSFER_CREATED = 'INVENTORY_TRANSFER_CREATED',
   // Fase A6.1: eventos de valorización de inventario (solo cuando
   // Product.valuationMethod está configurado) — ADICIONALES a
   // INVENTORY_ENTRY_CREATED/INVENTORY_EXIT_CREATED, nunca en su lugar.

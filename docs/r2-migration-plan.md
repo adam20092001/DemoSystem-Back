@@ -437,6 +437,28 @@ Tercera entrega de R2-B, sobre R2-ACT, R2-B1b y R2-B2. **Sin migraciones nuevas*
   histórico NULL se cubre con prueba unitaria y el procedimiento manual de R2-ACT (sin bypass de restricciones en E2E). Contrato para Angular:
   `docs/sales-locations-api.md`.
 
+## 5.12 R2-C — transferencias de stock entre ubicaciones (rama `feat/r2-c-stock-transfers`; NO integrada ni desplegada)
+
+Cuarta entrega de R2-B/R2-C, sobre R2-ACT, R2-B1b, R2-B2 y R2-B3. **Incluye la migración 35** (`20261123011758_add_stock_transfers`), aplicada
+únicamente en PostgreSQL 16 descartables; **no** en `pos_db` ni `pos_db_test`.
+
+- **Migración 35 (100% aditiva):** valor `TRANSFER` en `InventoryMovementOrigin`; tabla `stock_transfers` (producto, ubicación origen y destino,
+  cantidad, motivo, notas, `idempotency_key`, usuario, `exit_movement_id` y `entry_movement_id` únicos, `created_at`) con FK `RESTRICT`; índice único
+  `(created_by_user_id, idempotency_key)` (admite varios NULL); CHECK `quantity > 0`, `source <> destination`, clave no vacía; y un CHECK nuevo
+  `inventory_movements_transfer_consistency` (un movimiento `TRANSFER` es ENTRY/EXIT, referencia `StockTransfer` y lleva ubicación; se compara
+  `origin::text` porque PostgreSQL no permite usar un valor de enum recién agregado en la misma transacción). Ninguna tabla ni migración anterior se modifica.
+- **Motor:** único cambio en `StockMovementEngine`: `TRANSFER` admite ENTRY y EXIT (`ALLOWED_ORIGIN_MOVEMENT_TYPES`). No se agrega a
+  `AUTHORITATIVE_HISTORICAL_ORIGINS` (el producto debe ser inventariable y activo). Reglas de stock, bloqueo, conciliación y valorización intactas.
+- **Servicio (`src/inventory/transfers/`):** una transacción: advisory lock de idempotencia (si hay clave) → `lockLocationsShared([origen, destino])` en una sola
+  llamada (antes de bloquear el producto) → EXIT(origen) → ENTRY(destino) → documento → auditoría `INVENTORY_TRANSFER_CREATED`. No inyecta los motores de
+  valorización ni de contabilidad. `Product.stockCurrent` no cambia.
+- **Inmutabilidad:** sin anulación ni eliminación; la corrección es una transferencia inversa.
+- **Idempotencia:** clave opcional por usuario; mismo contenido (comparación canónica) → la original; contenido distinto → 409; concurrente → una sola.
+- **API:** `POST/GET /inventory/transfers`, `GET /inventory/transfers/:id`; ADMIN/WAREHOUSE crean, ADMIN/WAREHOUSE/MANAGEMENT consultan. Kardex: campo
+  aditivo `transferId`. Contrato para Angular: `docs/stock-transfers-api.md`.
+- **Pruebas:** unitarias (servicio, DTOs, controller, mapper, motor) y `test/stock-transfers.e2e-spec.ts` (PostgreSQL descartable; concurrencia real y
+  CHECK probados intentando violarlos, sin desactivarlos).
+
 ## 6. Riesgos y límites conocidos de R2-A1 (los puntos sobre inercia quedan superados por R2-ACT, §5)
 
 - **El invariante "todo almacén tiene su `DEFAULT`" lo garantiza el servicio**, no un trigger (los triggers no están
