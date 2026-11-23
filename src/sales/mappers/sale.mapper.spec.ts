@@ -5,7 +5,7 @@ import {
   SalePaymentStatus,
   SaleStatus,
 } from '@prisma/client';
-import { SaleDetailRow, toSafeSale } from './sale.mapper';
+import { SALE_DETAIL_SELECT, SaleDetailRow, toSafeSale } from './sale.mapper';
 
 function item(lineTotal: string) {
   return {
@@ -23,6 +23,7 @@ function item(lineTotal: string) {
     discountType: null,
     discountValue: null,
     discountAmount: new Prisma.Decimal('0'),
+    location: null,
   };
 }
 
@@ -144,5 +145,38 @@ describe('toSafeSale — campos derivados de R2-B4', () => {
     const before = JSON.stringify(row);
     toSafeSale(row, []);
     expect(JSON.stringify(row)).toBe(before);
+  });
+});
+
+describe('toSafeSale — ubicación de origen de la línea (R2-B3)', () => {
+  const LOCATION = {
+    id: '10000000-0000-4000-8000-00000000000a',
+    code: 'ESTANTE-A',
+    name: 'Estante A',
+    warehouse: { id: '20000000-0000-4000-8000-000000000001', code: 'MAIN' },
+  };
+
+  it('expone location (id, code, name, warehouse{id,code}) en la línea inventariable', () => {
+    const result = toSafeSale(
+      makeRow({ items: [{ ...item('10.00'), location: LOCATION }] }),
+      [],
+    );
+    expect(result.items[0].location).toEqual(LOCATION);
+  });
+
+  it('servicios y ventas históricas devuelven location null', () => {
+    const result = toSafeSale(makeRow({ items: [item('10.00')] }), []);
+    expect(result.items[0].location).toBeNull();
+  });
+
+  it('el select de la línea limita la ubicación a id/code/name/warehouse{id,code}', () => {
+    expect(SALE_DETAIL_SELECT.items.select.location).toEqual({
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        warehouse: { select: { id: true, code: true } },
+      },
+    });
   });
 });

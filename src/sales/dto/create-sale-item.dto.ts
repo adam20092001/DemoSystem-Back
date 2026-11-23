@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString, IsUUID, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString, IsUUID, Matches } from 'class-validator';
 
 /**
  * Mismo criterio textual que el dominio (sale-calculator.ts, que reexporta
@@ -31,4 +31,13 @@ export class CreateSaleItemDto {
       'quantity debe ser un decimal no negativo, como texto, con máximo 3 decimales',
   })
   quantity!: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'R2-B3. Ubicación de ORIGEN del stock de este producto (una por línea). Si se omite, MAIN/DEFAULT. Solo para productos inventariables: enviarla para un servicio responde 400. Ubicación inexistente → 404; ubicación o almacén inactivos, o stock insuficiente en la ubicación → 409.',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }

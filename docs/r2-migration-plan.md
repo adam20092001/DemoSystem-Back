@@ -206,7 +206,7 @@ no tiene "down"); mientras no haya operaciones posteriores a la migración, el r
 
 ### 5.6 Decisiones abiertas
 
-1. R2-B: ubicación explícita en inventario (**R2-B1b implementado en rama, ver §5.9**), recepciones (**R2-B2 implementado en rama, ver §5.10**) y ventas; revisar las reglas de desactivación (D4).
+1. R2-B: ubicación explícita en inventario (**R2-B1b implementado en rama, ver §5.9**), recepciones (**R2-B2 implementado en rama, ver §5.10**) y ventas (**R2-B3 implementado en rama, ver §5.11**); revisar las reglas de desactivación (D4).
 2. Endpoint para designar otro almacén predeterminado (hoy inexistente a propósito).
 3. Si algún día se desea `VALIDATE CONSTRAINT`, hay que decidir qué hacer con los movimientos históricos sin ubicación
    (hoy no se reescriben).
@@ -415,6 +415,27 @@ Segunda entrega de R2-B, sobre R2-ACT y R2-B1b. **Sin migraciones nuevas** y sin
 - **Pruebas:** unitarias (DTO, mapper, servicio) y E2E en `test/purchase-receipts.e2e-spec.ts` (bloque «R2-B2», PostgreSQL descartable,
   incluida concurrencia con productos y ubicaciones cruzadas). El caso histórico NULL se cubre con prueba unitaria y el procedimiento manual
   de R2-ACT (sin bypass de restricciones en E2E). Contrato para Angular: `docs/purchase-receipts-locations-api.md`.
+
+## 5.11 R2-B3 — ventas por ubicación de origen (rama `feat/r2-b3-sales-locations`; NO integrada ni desplegada)
+
+Tercera entrega de R2-B, sobre R2-ACT, R2-B1b y R2-B2. **Sin migraciones nuevas** y sin cambios en `StockMovementEngine`.
+
+- **`locationId` opcional por ítem** de `POST /sales` y **`locations` opcional** (`[{productId, locationId}]`) en
+  `POST /sales/from-quote/:quoteId`. Sin ellos, `MAIN/DEFAULT`. `createDirect()` y `createFromQuote()` resuelven y bloquean las ubicaciones de
+  **todas** las líneas en una sola llamada a `lockLocationsShared()` (Warehouse/Location `FOR SHARE`, antes de los productos) y las asocian por
+  `productId` (nunca por índice tras ordenar); la ubicación se persiste en `SaleItem.locationId` y se usa en el EXIT.
+- **Un producto por venta** (D21, índice único y 400 sin cambios) y **una ubicación por producto**. Los servicios no tienen ubicación: un
+  `locationId` para un servicio (o para un producto no inventariable) responde 400. En la conversión, `locations` con producto ajeno a la
+  cotización, repetido o no inventariable responde 400. `Quote`/`QuoteItem` no cambian.
+- **Stock:** el motor sigue siendo la validación autoritativa (insuficiencia por ubicación → 409). Solo se enriquece su mensaje con producto y
+  ubicación (consulta únicamente en el camino de error). Nunca se sustituye por otra ubicación.
+- **Anulación:** sin cambios de código (ya reingresa a la ubicación del movimiento original; histórico NULL → `MAIN/DEFAULT`).
+- **Respuesta aditiva:** `location { id, code, name, warehouse { id, code } } | null` por ítem (servicios e históricos: `null`). El impreso no cambia.
+- **Sin cambios:** permisos, precios, descuentos, IGV, pagos, comprobantes, contabilidad, costos, valorización, COGS y D4. Las transferencias
+  (R2-C) siguen pendientes.
+- **Pruebas:** unitarias (DTOs, mapper, servicio) y `test/sales-locations.e2e-spec.ts` (PostgreSQL descartable, incluida concurrencia). El caso
+  histórico NULL se cubre con prueba unitaria y el procedimiento manual de R2-ACT (sin bypass de restricciones en E2E). Contrato para Angular:
+  `docs/sales-locations-api.md`.
 
 ## 6. Riesgos y límites conocidos de R2-A1 (los puntos sobre inercia quedan superados por R2-ACT, §5)
 

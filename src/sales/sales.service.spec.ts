@@ -189,6 +189,7 @@ function makeSaleItemRow(overrides: Partial<Record<string, unknown>> = {}) {
     discountType: null,
     discountValue: null,
     discountAmount: new Prisma.Decimal('0'),
+    location: null,
     ...overrides,
   };
 }
@@ -1698,6 +1699,187 @@ describe('SalesService', () => {
         expect(engine.apply).not.toHaveBeenCalled();
       });
 
+      describe('R2-B3: ubicación de origen por línea', () => {
+        const LOC_A = '10000000-0000-4000-8000-00000000000a';
+        const LOC_B = '10000000-0000-4000-8000-00000000000b';
+
+        function routerTwoProducts(overrides: Record<string, unknown> = {}) {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow(),
+              products: new Map([
+                [PRODUCT_ID, makeProductRow()],
+                [
+                  PRODUCT_ID_2,
+                  makeProductRow({
+                    productId: PRODUCT_ID_2,
+                    sku: 'SKU-2',
+                    ...overrides,
+                  }),
+                ],
+              ]),
+            }),
+          );
+          prisma.tx.sale.create.mockResolvedValue(
+            makeSaleDetailRow({
+              items: [
+                makeSaleItemRow(),
+                makeSaleItemRow({ id: 'sale-item-2', productId: PRODUCT_ID_2 }),
+              ],
+            }),
+          );
+        }
+
+        it('pasa las ubicaciones de todas las líneas en UNA sola llamada y las asocia por producto aunque el orden de proceso sea otro', async () => {
+          routerTwoProducts();
+          // Solicitud: PRODUCT_2 (LOC_B) primero, PRODUCT_1 (LOC_A) después.
+          await service.createDirect({
+            ...validDirectInput,
+            items: [
+              { productId: PRODUCT_ID_2, quantity: '1', locationId: LOC_B },
+              { productId: PRODUCT_ID, quantity: '1', locationId: LOC_A },
+            ],
+          });
+
+          expect(engine.lockLocationsShared).toHaveBeenCalledTimes(1);
+          expect(engine.lockLocationsShared.mock.calls[0][1]).toEqual([
+            LOC_B,
+            LOC_A,
+          ]);
+          const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: {
+              items: {
+                create: { productId: string; locationId: string | null }[];
+              };
+            };
+          };
+          const persisted = new Map(
+            createArgs.data.items.create.map((i) => [
+              i.productId,
+              i.locationId,
+            ]),
+          );
+          expect(persisted.get(PRODUCT_ID)).toBe(LOC_A);
+          expect(persisted.get(PRODUCT_ID_2)).toBe(LOC_B);
+          // Los EXIT se procesan por productId ascendente con SU ubicación.
+          const calls = engine.apply.mock.calls.map(
+            (c) => c[1] as { productId: string; locationId?: string },
+          );
+          expect(calls).toEqual([
+            expect.objectContaining({
+              productId: PRODUCT_ID,
+              locationId: LOC_A,
+            }),
+            expect.objectContaining({
+              productId: PRODUCT_ID_2,
+              locationId: LOC_B,
+            }),
+          ]);
+        });
+
+        it('omitir locationId equivale a MAIN/DEFAULT para ese producto', async () => {
+          routerTwoProducts();
+          await service.createDirect({
+            ...validDirectInput,
+            items: [
+              { productId: PRODUCT_ID, quantity: '1', locationId: LOC_A },
+              { productId: PRODUCT_ID_2, quantity: '1' },
+            ],
+          });
+          expect(engine.lockLocationsShared.mock.calls[0][1]).toEqual([
+            LOC_A,
+            null,
+          ]);
+          const call2 = engine.apply.mock.calls.find(
+            (c) => (c[1] as { productId: string }).productId === PRODUCT_ID_2,
+          )?.[1] as { locationId?: string };
+          expect(call2.locationId).toBe(DEFAULT_LOCATION_ID);
+        });
+
+        it('una ubicación explícita en un servicio responde 400 y no crea nada', async () => {
+          routerTwoProducts({ isInventoryTracked: false });
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              items: [
+                { productId: PRODUCT_ID, quantity: '1' },
+                { productId: PRODUCT_ID_2, quantity: '1', locationId: LOC_A },
+              ],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(engine.apply).not.toHaveBeenCalled();
+        });
+
+        it('producto repetido sigue respondiendo 400 aunque las ubicaciones difieran', async () => {
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              items: [
+                { productId: PRODUCT_ID, quantity: '1', locationId: LOC_A },
+                { productId: PRODUCT_ID, quantity: '1', locationId: LOC_B },
+              ],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+        });
+
+        it('si el motor rechaza la ubicación (404/409) no se crea ni se mueve nada', async () => {
+          routerTwoProducts();
+          engine.lockLocationsShared.mockRejectedValueOnce(
+            new NotFoundException('Ubicación no encontrada'),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              items: [
+                { productId: PRODUCT_ID, quantity: '1', locationId: LOC_A },
+              ],
+            }),
+          ).rejects.toBeInstanceOf(NotFoundException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(engine.apply).not.toHaveBeenCalled();
+        });
+
+        it('stock insuficiente en la ubicación: 409 con producto y ubicación en el mensaje', async () => {
+          routerTwoProducts();
+          (
+            prisma.tx as unknown as {
+              warehouseLocation: { findUnique: jest.Mock };
+            }
+          ).warehouseLocation = {
+            findUnique: jest
+              .fn()
+              .mockResolvedValue({ code: 'A1', warehouse: { code: 'MAIN' } }),
+          };
+          engine.apply.mockRejectedValueOnce(
+            new ConflictException(
+              'Stock insuficiente para completar el movimiento',
+            ),
+          );
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              items: [
+                { productId: PRODUCT_ID, quantity: '1', locationId: LOC_A },
+              ],
+            }),
+          ).rejects.toThrow('SKU-1 en la ubicación MAIN/A1');
+        });
+
+        it('otros errores del motor se relanzan sin cambios', async () => {
+          routerTwoProducts();
+          const failure = new ConflictException('Otro conflicto');
+          engine.apply.mockRejectedValueOnce(failure);
+          await expect(
+            service.createDirect({
+              ...validDirectInput,
+              items: [{ productId: PRODUCT_ID, quantity: '1' }],
+            }),
+          ).rejects.toBe(failure);
+        });
+      });
+
       it('la secuencia NV se obtiene solo después de toda la validación (elegibilidad de cliente falla antes)', async () => {
         prisma.tx.$queryRaw.mockImplementation(
           createQueryRawRouter({
@@ -3149,6 +3331,129 @@ describe('SalesService', () => {
         );
       });
 
+      describe('R2-B3: ubicaciones de origen en la conversión', () => {
+        const LOC_B = '10000000-0000-4000-8000-00000000000b';
+
+        function setupTwoItemQuote(secondTracked = true): void {
+          prisma.tx.$queryRaw.mockImplementation(
+            createQueryRawRouter({
+              customer: makeCustomerRow(),
+              quote: makeQuoteRow({
+                subtotal: new Prisma.Decimal('20.00'),
+                total: new Prisma.Decimal('20.00'),
+              }),
+              products: new Map([
+                [PRODUCT_ID, makeProductRow()],
+                [
+                  PRODUCT_ID_2,
+                  makeProductRow({
+                    productId: PRODUCT_ID_2,
+                    sku: 'SKU-2',
+                    isInventoryTracked: secondTracked,
+                  }),
+                ],
+              ]),
+            }),
+          );
+          prisma.tx.quoteItem.findMany.mockResolvedValue([
+            makeQuoteItemRow(),
+            makeQuoteItemRow({ productId: PRODUCT_ID_2, productSku: 'SKU-2' }),
+          ]);
+          prisma.tx.sale.create.mockResolvedValue(
+            makeSaleDetailRow({
+              items: [
+                makeSaleItemRow(),
+                makeSaleItemRow({ id: 'sale-item-2', productId: PRODUCT_ID_2 }),
+              ],
+            }),
+          );
+        }
+
+        it('sin locations: todos los productos salen de MAIN/DEFAULT (compatibilidad)', async () => {
+          setupTwoItemQuote();
+          await service.createFromQuote(validConvertInput);
+          expect(engine.lockLocationsShared.mock.calls[0][1]).toEqual([
+            null,
+            null,
+          ]);
+          for (const call of engine.apply.mock.calls) {
+            expect((call[1] as { locationId?: string }).locationId).toBe(
+              DEFAULT_LOCATION_ID,
+            );
+          }
+        });
+
+        it('con locations: persiste y usa la ubicación del producto indicado; el resto, MAIN/DEFAULT', async () => {
+          setupTwoItemQuote();
+          await service.createFromQuote({
+            ...validConvertInput,
+            locations: [{ productId: PRODUCT_ID_2, locationId: LOC_B }],
+          });
+          expect(engine.lockLocationsShared).toHaveBeenCalledTimes(1);
+          expect(engine.lockLocationsShared.mock.calls[0][1]).toEqual([
+            null,
+            LOC_B,
+          ]);
+          const createArgs = prisma.tx.sale.create.mock.calls[0][0] as {
+            data: {
+              items: {
+                create: { productId: string; locationId: string | null }[];
+              };
+            };
+          };
+          const persisted = new Map(
+            createArgs.data.items.create.map((i) => [
+              i.productId,
+              i.locationId,
+            ]),
+          );
+          expect(persisted.get(PRODUCT_ID)).toBe(DEFAULT_LOCATION_ID);
+          expect(persisted.get(PRODUCT_ID_2)).toBe(LOC_B);
+          const call2 = engine.apply.mock.calls.find(
+            (c) => (c[1] as { productId: string }).productId === PRODUCT_ID_2,
+          )?.[1] as { locationId?: string };
+          expect(call2.locationId).toBe(LOC_B);
+        });
+
+        it('un producto ajeno a la cotización → 400 sin efectos', async () => {
+          setupTwoItemQuote();
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              locations: [{ productId: 'product-ajeno', locationId: LOC_B }],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(engine.apply).not.toHaveBeenCalled();
+        });
+
+        it('un producto repetido en locations → 400', async () => {
+          setupTwoItemQuote();
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              locations: [
+                { productId: PRODUCT_ID, locationId: LOC_B },
+                { productId: PRODUCT_ID, locationId: DEFAULT_LOCATION_ID },
+              ],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+        });
+
+        it('un servicio (no inventariable) en locations → 400', async () => {
+          setupTwoItemQuote(false);
+          await expect(
+            service.createFromQuote({
+              ...validConvertInput,
+              locations: [{ productId: PRODUCT_ID_2, locationId: LOC_B }],
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(prisma.tx.sale.create).not.toHaveBeenCalled();
+          expect(engine.apply).not.toHaveBeenCalled();
+        });
+      });
+
       it('marca la cotización como CONVERTED en la misma transacción', async () => {
         await service.createFromQuote(validConvertInput);
         expect(prisma.tx.quote.update).toHaveBeenCalledWith({
@@ -3804,6 +4109,39 @@ describe('SalesService', () => {
         ]);
         const call = engine.apply.mock.calls[0][1] as { locationId?: string };
         expect(call.locationId).toBeUndefined();
+      });
+
+      it('R2-B3: una venta con varios productos en ubicaciones distintas devuelve cada producto a SU ubicación', async () => {
+        prisma.tx.inventoryMovement.findMany.mockResolvedValueOnce([
+          {
+            productId: PRODUCT_ID,
+            quantity: new Prisma.Decimal('2.000'),
+            locationId: OTHER_LOCATION_ID,
+          },
+          {
+            productId: PRODUCT_ID_2,
+            quantity: new Prisma.Decimal('3.000'),
+            locationId: DEFAULT_LOCATION_ID,
+          },
+        ]);
+        await service.cancel(validCancelInput);
+        expect(engine.lockLocationsShared).toHaveBeenCalledWith(prisma.tx, [
+          OTHER_LOCATION_ID,
+          DEFAULT_LOCATION_ID,
+        ]);
+        const calls = engine.apply.mock.calls.map(
+          (c) => c[1] as { productId: string; locationId?: string },
+        );
+        expect(calls).toEqual([
+          expect.objectContaining({
+            productId: PRODUCT_ID,
+            locationId: OTHER_LOCATION_ID,
+          }),
+          expect.objectContaining({
+            productId: PRODUCT_ID_2,
+            locationId: DEFAULT_LOCATION_ID,
+          }),
+        ]);
       });
 
       it('venta sin movimientos originales (todos los ítems no inventariables) igual se puede anular', async () => {

@@ -11,8 +11,16 @@ import { InitialPaymentInput } from '../../payments/types/payment.input';
  * precio/descuento/cliente/vendedor — esos siguen siendo copia exacta e
  * inmutable del Quote.
  */
+/** R2-B3: ubicación de origen de un producto inventariable de la cotización. */
+export interface ConvertQuoteLocationInput {
+  productId: string;
+  locationId: string;
+}
+
 export interface ConvertQuoteToSaleInput {
   quoteId: string;
+  /** R2-B3: opcional; los productos omitidos salen de MAIN/DEFAULT. */
+  locations?: ConvertQuoteLocationInput[];
   payment?: InitialPaymentInput;
   payments?: InitialPaymentInput[];
   actorUserId: string;

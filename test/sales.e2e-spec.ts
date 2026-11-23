@@ -146,6 +146,8 @@ const SAFE_SALE_ITEM_KEYS = [
   'discountType',
   'discountValue',
   'discountAmount',
+  // R2-B3: ubicación de origen (aditivo; null en servicios e históricos).
+  'location',
 ].sort();
 
 const SAFE_SALE_MOVEMENT_KEYS = [

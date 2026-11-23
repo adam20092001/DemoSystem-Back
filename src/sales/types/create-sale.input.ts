@@ -3,6 +3,8 @@ import { InitialPaymentInput } from '../../payments/types/payment.input';
 export interface CreateSaleItemInput {
   productId: string;
   quantity: string;
+  /** R2-B3: ubicación de origen; si se omite, MAIN/DEFAULT. */
+  locationId?: string;
 }
 
 /**
